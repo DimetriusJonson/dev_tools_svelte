@@ -1,0 +1,44 @@
+[package]
+name = "webdev-useful-tools"
+version = "0.1.0"
+description = "Useful tools for web developers"
+authors = ["WebDev Useful Tools"]
+edition = "2021"
+
+[lib]
+name = "webdev_useful_tools_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-deep-link = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+quick-xml = "0.42"
+rusqlite = { version = "0.32", features = ["bundled"] }
+axum = "0.8"
+tokio = { version = "1", features = ["net", "sync", "rt-multi-thread", "macros"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+if-addrs = "0.15"
+mime_guess = "2"
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+
+[profile.release]
+# Optimize for size
+opt-level = "z"      # Optimize for size (or "s" for slightly less aggressive)
+lto = true           # Link-Time Optimization
+codegen-units = 1    # Single codegen unit for better optimization
+panic = "abort"      # Smaller binary, no unwinding
+strip = true         # Strip symbols
+
+[profile.release.package."*"]
+opt-level = "z"      # Also optimize dependencies for size

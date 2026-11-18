@@ -1,0 +1,7 @@
+.svelte-kit
+build
+node_modules
+.DS_Store
+src-tauri/target
+src-tauri/gen
+static/.vite

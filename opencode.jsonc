@@ -1,0 +1,33 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "strata/qwen3.8-flash-next-gyro-gyro-m",
+  "small_model": "strata/qwen3.8-flash-next-gyro-gyro-m",
+  "autoupdate": false,
+  "compaction": {
+    "auto": true,
+    "buffer": "20%"
+  },
+  "share": "disabled",
+  "provider": {
+    "strata": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Strata (local)",
+      "options": {
+        "baseURL": "http://shzai:8080/v1",
+        "apiKey": "sk-strata-Xg2uZP2UbgJCWhwUX_rDJB0GsuTIFazT"
+      },
+      "models": {
+        "qwen3.8-flash-next-gyro-gyro-m": {
+          "name": "Qwen3.8-Flash-Next (local)",
+          "tool_call": true,
+          "reasoning": true,
+          "limit": {
+            "context": 131072,
+            "input": 126976,
+            "output": 16384
+          }
+        }
+      }
+    }
+  }
+}
