@@ -489,52 +489,148 @@ export function byteLength(value: string): number {
 	return new TextEncoder().encode(value).length;
 }
 
+// Bash ANSI-C quoting (`$'…'`) turns these escapes back into characters, and
+// browsers emit it for "Copy as cURL (bash)" whenever an argument has line breaks.
+const ANSI_C_ESCAPES: Record<string, string> = {
+	n: '\n',
+	r: '\r',
+	t: '\t',
+	a: '\u0007',
+	b: '\u0008',
+	f: '\u000C',
+	v: '\u000B',
+	e: '\u001B',
+	'\\': '\\',
+	"'": "'",
+	'"': '"',
+	'?': '?',
+	'$': '$'
+};
+
+interface EscapeDecoding {
+	text: string;
+	/** Index of the first character after the escape sequence. */
+	next: number;
+}
+
+function decodeAnsiCEscape(input: string, start: number): EscapeDecoding {
+	const char = input[start];
+	if (char === '\n' || char === '\r') return { text: '', next: start + 1 };
+
+	const hexLength = char === 'x' ? 2 : char === 'u' ? 4 : char === 'U' ? 8 : 0;
+	if (hexLength > 0) {
+		const digits = input.slice(start + 1, start + 1 + hexLength);
+		if (digits.length === hexLength && /^[0-9a-fA-F]+$/.test(digits)) {
+			const code = Number.parseInt(digits, 16);
+			if (code <= 0x10ffff) {
+				return { text: String.fromCodePoint(code), next: start + 1 + hexLength };
+			}
+		}
+		return { text: `\\${char}`, next: start + 1 };
+	}
+
+	if (char >= '0' && char <= '7') {
+		const digits = /^[0-7]{1,3}/.exec(input.slice(start))?.[0] ?? '';
+		const code = Number.parseInt(digits, 8);
+		// Bash drops a NUL byte instead of putting it in the argument.
+		return { text: code > 0 ? String.fromCharCode(code) : '', next: start + digits.length };
+	}
+
+	const simple = ANSI_C_ESCAPES[char];
+	if (simple !== undefined) return { text: simple, next: start + 1 };
+	return { text: `\\${char}`, next: start + 1 };
+}
+
+// POSIX double quotes keep the backslash except in front of these.
+const DOUBLE_QUOTE_ESCAPES = new Set(['$', '`', '"', '\\', '\n', '\r']);
+
 function tokenizeCurl(input: string): string[] {
 	const tokens: string[] = [];
 	let current = '';
-	let quote: "'" | '"' | null = null;
+	// A quoted argument is a token even when it is empty, so `-H ''` does not shift
+	// the following argument into its place.
+	let started = false;
+	let quote: 'single' | 'double' | 'ansi' | null = null;
+
+	const flush = () => {
+		if (started) tokens.push(current);
+		current = '';
+		started = false;
+	};
 
 	for (let index = 0; index < input.length; index += 1) {
 		const char = input[index];
 
-		if (quote === "'") {
+		if (quote === 'single') {
 			if (char === "'") quote = null;
 			else current += char;
 			continue;
 		}
 
-		if (quote === '"') {
-			if (char === '"') {
+		if (quote === 'ansi') {
+			if (char === "'") {
 				quote = null;
-			} else if (char === '\\' && index + 1 < input.length) {
-				index += 1;
-				current += input[index];
-			} else {
-				current += char;
+				continue;
 			}
+			if (char === '\\' && index + 1 < input.length) {
+				const decoded = decodeAnsiCEscape(input, index + 1);
+				current += decoded.text;
+				index = decoded.next - 1;
+				continue;
+			}
+			current += char;
 			continue;
 		}
 
-		if (char === '"' || char === "'") {
-			quote = char;
+		if (quote === 'double') {
+			if (char === '"') {
+				quote = null;
+				continue;
+			}
+			if (char === '\\' && DOUBLE_QUOTE_ESCAPES.has(input[index + 1] ?? '')) {
+				index += 1;
+				const next = input[index];
+				// `\<newline>` inside quotes is a line continuation, not a character.
+				if (next !== '\n' && next !== '\r') current += next;
+				continue;
+			}
+			current += char;
+			continue;
+		}
+
+		if (char === "'") {
+			quote = 'single';
+			started = true;
+			continue;
+		}
+		if (char === '"') {
+			quote = 'double';
+			started = true;
+			continue;
+		}
+		if (char === '$' && (input[index + 1] === "'" || input[index + 1] === '"')) {
+			// `$'…'` is bash ANSI-C quoting; `$"…"` is locale quoting and escapes
+			// like a double-quoted Windows argument.
+			quote = input[index + 1] === "'" ? 'ansi' : 'double';
+			started = true;
+			index += 1;
 			continue;
 		}
 		if (char === '\\' && index + 1 < input.length) {
 			index += 1;
 			current += input[index];
+			started = true;
 			continue;
 		}
 		if (/\s/.test(char)) {
-			if (current) {
-				tokens.push(current);
-				current = '';
-			}
+			flush();
 			continue;
 		}
 		current += char;
+		started = true;
 	}
 
-	if (current) tokens.push(current);
+	flush();
 	return tokens;
 }
 
@@ -559,6 +655,63 @@ function sniffBodyType(body: string): BodyType {
 	}
 	if (trimmed.startsWith('<')) return 'xml';
 	return 'text';
+}
+
+// Exporters that are not shell-correct wrap the payload in plain quotes and still
+// escape it (`\"`, `\n`), so the shell would send the backslashes literally. Only
+// these sequences mark a value as escaped; `\u` is excluded because JSON bodies use
+// it as real content.
+const ESCAPED_PAYLOAD = /\\(?:[nrtbfv]|["'])/;
+
+const PAYLOAD_ESCAPES: Record<string, string> = {
+	n: '\n',
+	r: '\r',
+	t: '\t',
+	b: '\u0008',
+	f: '\u000C',
+	v: '\u000B',
+	'"': '"',
+	"'": "'",
+	'\\': '\\'
+};
+
+function decodePayloadEscapes(value: string): string {
+	return value.replace(/\\(.)/g, (whole, char: string) => PAYLOAD_ESCAPES[char] ?? whole);
+}
+
+/** `null` when the body type has no grammar to check against. */
+function isStructuredBodyValid(bodyType: BodyType, text: string): boolean | null {
+	if (!text.trim()) return null;
+	if (bodyType === 'json') {
+		try {
+			JSON.parse(text);
+			return true;
+		} catch {
+			return false;
+		}
+	}
+	if (bodyType === 'xml') {
+		if (typeof DOMParser === 'undefined') return null;
+		const doc = new DOMParser().parseFromString(text, 'application/xml');
+		return doc.getElementsByTagName('parsererror').length === 0;
+	}
+	return null;
+}
+
+/**
+ * Turns shell-level escape sequences of an imported body back into characters. It
+ * runs only when the raw text cannot be what the user meant: a body that already
+ * parses as JSON/XML is kept verbatim, and a body with real line breaks is kept too,
+ * because there `\n` is content rather than an encoded break. Form-encode bodies are
+ * left alone: their rows go into a table that cannot hold control characters.
+ */
+function unescapeImportedBody(raw: string, bodyType: BodyType): string {
+	if (!raw || bodyType === 'form' || !ESCAPED_PAYLOAD.test(raw)) return raw;
+	const decoded = decodePayloadEscapes(raw);
+	if (decoded === raw) return raw;
+	if (isStructuredBodyValid(bodyType, raw) === true) return raw;
+	if (isStructuredBodyValid(bodyType, decoded) === true) return decoded;
+	return /[\r\n]/.test(raw) ? raw : decoded;
 }
 
 const CURL_FLAGS_WITH_VALUE = new Set([
@@ -715,14 +868,15 @@ export function parseCurl(command: string): ParsedCurl | null {
 
 	const rawBody = bodyParts.join('&');
 	const contentType = getHeader(headers, 'content-type');
-	let bodyType = bodyTypeFromContentType(contentType) ?? sniffBodyType(rawBody);
+	const importedType = bodyTypeFromContentType(contentType) ?? sniffBodyType(rawBody);
+	const textBody = unescapeImportedBody(rawBody, importedType);
+	// Re-sniff after de-escaping: an escaped payload usually only looks like JSON or
+	// XML once the escapes are gone, and there is no Content-Type to trust.
+	const bodyType = bodyTypeFromContentType(contentType) ?? sniffBodyType(textBody);
 	const form = bodyType === 'form' ? parseForm(rawBody) : [];
 	// Form-encode rows live in their own table, so an imported form body does not
 	// occupy the JSON/XML/Text buffer.
-	const body = bodyType === 'form' ? '' : rawBody;
-	if (!contentType && body && bodyType === 'text') {
-		bodyType = 'text';
-	}
+	const body = bodyType === 'form' ? '' : textBody;
 
 	return {
 		method: (method || (rawBody ? 'POST' : 'GET')).toUpperCase(),

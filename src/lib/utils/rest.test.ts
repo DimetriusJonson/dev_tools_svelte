@@ -144,6 +144,74 @@ describe('cURL import', () => {
 		]);
 	});
 
+	it('decodes bash ANSI-C quoting produced by a browser export', () => {
+		const parsed = parseCurl(
+			`curl $'https://example.com/api?q=1&x=2' --request POST -H $'Content-Type: application/json' --data-raw $'{"a":1}\\n{"b":2}\\tend'`
+		);
+		expect(parsed?.url).toBe('https://example.com/api?q=1&x=2');
+		expect(parsed?.method).toBe('POST');
+		expect(parsed?.headers).toEqual([{ name: 'Content-Type', value: 'application/json' }]);
+		expect(parsed?.body).toBe('{"a":1}\n{"b":2}\tend');
+	});
+
+	it('unescapes an XML payload escaped inside plain single quotes', () => {
+		const parsed = parseCurl(
+			`curl 'https://xml.example.com/order/book?debugNemo=true' \\
+-X POST \\
+-H 'Content-Type: application/xml' \\
+-H 'Accept: application/xml' \\
+-H 'cookie: aid_dev=867E21D71396E11B.dev' \\
+--data-raw '<?xml version=\\"1.0\\" encoding=\\"UTF-8\\"?>\\n<order xmlns:xsi=\\"http://www.w3.org/2001/XMLSchema-instance\\">\\n    <OrderType>\\n        <type>Touristic</type>\\n    </OrderType>\\n    <spo>TARIFF N 8483/0Dub UAE\\n      16.01-20.12.26</spo>\\n</order>\\n'`
+		);
+		expect(parsed?.method).toBe('POST');
+		expect(parsed?.url).toBe('https://xml.example.com/order/book?debugNemo=true');
+		expect(parsed?.bodyType).toBe('xml');
+		expect(parsed?.body).toBe(
+			'<?xml version="1.0" encoding="UTF-8"?>\n' +
+				'<order xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">\n' +
+				'    <OrderType>\n' +
+				'        <type>Touristic</type>\n' +
+				'    </OrderType>\n' +
+				'    <spo>TARIFF N 8483/0Dub UAE\n      16.01-20.12.26</spo>\n' +
+				'</order>\n'
+		);
+		expect(parseCookies(parsed?.headers ?? [])).toEqual([
+			{ name: 'aid_dev', value: '867E21D71396E11B.dev' }
+		]);
+	});
+
+	it('unescapes a JSON payload escaped inside plain single quotes', () => {
+		const parsed = parseCurl(
+			`curl 'https://example.com/api' -X POST -H 'Content-Type: application/json' --data-raw '{\\"name\\":\\"John\\",\\n\\"age\\":30}'`
+		);
+		expect(parsed?.bodyType).toBe('json');
+		expect(parsed?.body).toBe('{"name":"John",\n"age":30}');
+	});
+
+	it('keeps escape sequences that are genuine JSON string content', () => {
+		const parsed = parseCurl(
+			`curl 'https://example.com/api' -X POST -H 'Content-Type: application/json' --data-raw '{"note":"line1\\nline2","quote":"say \\"hi\\""}'`
+		);
+		expect(parsed?.bodyType).toBe('json');
+		expect(parsed?.body).toBe('{"note":"line1\\nline2","quote":"say \\"hi\\""}');
+	});
+
+	it('keeps a multi-line body with real line breaks untouched', () => {
+		const parsed = parseCurl(
+			`curl 'https://example.com/api' --data-raw 'SELECT\\nfirst\nsecond'`
+		);
+		expect(parsed?.bodyType).toBe('text');
+		expect(parsed?.body).toBe('SELECT\\nfirst\nsecond');
+	});
+
+	it('keeps empty quoted arguments as their own tokens', () => {
+		const parsed = parseCurl(`curl -H '' --data-raw '' 'https://example.com/api'`);
+		expect(parsed?.url).toBe('https://example.com/api');
+		expect(parsed?.method).toBe('GET');
+		expect(parsed?.headers).toEqual([]);
+		expect(parsed?.body).toBe('');
+	});
+
 	it('keeps the form table independent from the text buffer when importing', () => {
 		const parsed = parseCurl(
 			`curl 'https://example.com/login' --data 'user=a&pass=b' -H 'Content-Type: application/x-www-form-urlencoded'`
@@ -216,6 +284,16 @@ describe('cURL export', () => {
 		expect(command).toContain('curl.exe "https://example.com/api?q=100%"');
 		expect(command).toContain('-H "X Note: say \\"hi\\""');
 		expect(command).toContain('--data-raw "{\\"a\\":1}"');
+	});
+
+	it('reads back its own POSIX command', () => {
+		const command = buildCurl(request, 'posix');
+		const parsed = parseCurl(command);
+		expect(parsed?.method).toBe('POST');
+		expect(parsed?.url).toBe('https://example.com/api');
+		expect(parsed?.headers).toEqual([{ name: 'Accept', value: 'application/json' }]);
+		expect(parsed?.bodyType).toBe('json');
+		expect(parsed?.body).toBe(`{"a":"it's"}`);
 	});
 
 	it('reads back its own Windows command', () => {
