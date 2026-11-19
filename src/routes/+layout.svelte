@@ -9,10 +9,15 @@
 	import { t } from '$lib/stores/i18n';
 	import { isDark } from '$lib/stores/theme';
 	import { buildViewerUrl, consumePendingDeepLink, listenForDeepLinks } from '$lib/services/share';
+	import { dismissSplash, setSplashTitle, setSplashVersion } from '$lib/utils/splash';
 
 	let { children } = $props();
 
 	onMount(() => {
+		setSplashTitle($t('app.title'));
+		setSplashVersion(version);
+		dismissSplash();
+
 		let cancelled = false;
 		let unlisten: (() => void) | undefined;
 

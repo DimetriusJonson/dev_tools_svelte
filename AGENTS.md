@@ -42,6 +42,7 @@ npm run tauri build -- --no-bundle
 ```
 
 - `npm run dev` runs Vite on `http://localhost:1420` with `strictPort: true`.
+- If `npm run tauri dev` fails with "Port 1420 is already in use", a stale Vite is holding it. When Tauri runs on Windows while a WSL-side `npm run dev` is alive, WSL localhost forwarding reserves 1420 on the Windows side too; find it with `ss -ltnp | grep 1420` (WSL) and stop that `vite` process.
 - `npm run check` runs `svelte-kit sync && svelte-check`.
 - `npm run build` writes the static frontend to `build/`.
 - Rust tests live in `src-tauri/src/*.rs` under `#[cfg(test)]`.
@@ -60,7 +61,7 @@ Definition of Done for a code change:
 ```text
 src/
 ├── app.css                              # theme variables, CodeMirror/diff/resizer styles
-├── app.html                             # pre-hydration theme script, title, favicon
+├── app.html                             # pre-hydration theme script, loading splash (markup + inline CSS + labels)
 ├── lib/
 │   ├── components/
 │   │   ├── CodeMirrorEditor.svelte       # reusable CodeMirror wrapper + highlight API
@@ -88,9 +89,11 @@ src/
 │       ├── formatters.ts                 # XML/JSON/URL transformations
 │       ├── formatters.test.ts
 │       ├── rest.ts                       # query/cookies/form + cURL helpers
-│       └── rest.test.ts
+│       ├── rest.test.ts
+│       ├── splash.ts                     # loading splash labels, version, dismissal
+│       └── splash.test.ts
 └── routes/
-    ├── +layout.svelte                    # navbar, full-height shell, deep-link navigation
+    ├── +layout.svelte                    # navbar, full-height shell, splash dismissal, deep-link navigation
     ├── +layout.ts                        # ssr = false; prerender = false
     ├── +page.ts                          # 307 redirect to /xml
     ├── xml/+page.svelte                  # XmlJsonFormatter mode="xml"
@@ -178,12 +181,21 @@ getEditorValue(): string;
 - Navigation hover must **not** paint a background highlight in either theme; only scale/transform. Active nav pill remains visually distinct.
 - Navbar uses `overflow-y-hidden` and `py-1` to prevent the WebKit/WSLg scrollbar artifact caused by scaling.
 
+### Loading splash
+
+- `src/app.html` owns the splash markup (`#app-splash`, `.app-splash-*`), its inline CSS, and its localized labels. It renders before the bundle exists, so colors use `var(--token, fallback)` literals and the labels mirror `app.title` and the loading text from `i18n.ts`.
+- Keep the splash markup outside the `%sveltekit.body%` mount container; hydration must not manage it, and removal must never fight Svelte's DOM.
+- `src/lib/utils/splash.ts` exposes `setSplashTitle`, `setSplashVersion`, `splashHoldMs`, and `dismissSplash({ minimumMs, fadeMs, elapsed })`. `+layout.svelte` calls them in `onMount` with `$t('app.title')` and `version`, so the dictionary value and `package.json` version replace the template guesses at hydration.
+- Minimum visible time is 350 ms and the fade is 260 ms, then the element is removed. `dismissSplash` and the setters are idempotent no-ops once the splash is gone.
+- The `app.html` watchdog reveals a restart hint after 12 s so a bundle that never hydrates does not leave a silent spinner.
+- Tests pass `elapsed` explicitly instead of relying on `performance.now()` under fake timers.
+
 ### Localization
 
 - `src/lib/stores/i18n.ts` contains `en` and `ru` dictionaries.
 - Use `$t('key', { param: value })`; never hardcode user-facing strings in pages/components.
 - Locale storage key: `devtools.locale`; default is `ru` when `navigator.language` starts with `ru`, otherwise `en`.
-- Keep `document.documentElement.lang` in sync with the selected locale.
+- Keep `document.documentElement.lang` in sync with the selected locale. `src/app.html` sets `lang` and the localized splash/document title from the stored locale before the bundle loads; the layout then owns the real title (`app.title` + version).
 - The window/tab title comes from the `app.title` key plus the app version (`$app/environment` `version`, set from `package.json` via `kit.version.name` in `svelte.config.js`). `+layout.svelte` updates `document.title` and the Tauri window title through `getCurrentWindow().setTitle()` on locale change.
 
 ### Layout interactions
@@ -373,6 +385,7 @@ All commands use `#[tauri::command(rename_all = "snake_case")]`. Frontend invoke
 - **Rest client:** `src/routes/rest/+page.svelte` → `RestExplorer.svelte` + `PropertyEditor.svelte` → `services/rest.ts` → `utils/rest.ts` → `rest.rs`. Projects/requests persist in `rest_projects`, `rest_requests`, `rest_request_properties` (headers) and `rest_request_form` (Form-encode rows). Execution goes through the Rust backend in Tauri; browser mode falls back to `fetch` and `localStorage`.
 - **Notifications:** `stores/toast.ts` → `Toaster.svelte` in `+layout.svelte`. `utils/clipboard.ts` emits success/failure notifications; pages report errors through `notify`/`notifyError`.
 - **Theme/i18n:** `theme.ts`, `i18n.ts`, `Navbar.svelte`, `app.html`.
+- **Loading splash:** `src/app.html` markup + inline CSS + pre-hydration label script → `utils/splash.ts` → `+layout.svelte` `onMount`. Tests in `utils/splash.test.ts`. No new storage keys: it reads `devtools.theme` and `devtools.locale`.
 - **Persistence:** `services/db.ts` → `db.rs` commands; browser fallback is localStorage.
 - **Large files:** `services/files.ts` + `services/db.ts` → `processor.rs`.
 
@@ -385,6 +398,7 @@ All commands use `#[tauri::command(rename_all = "snake_case")]`. Frontend invoke
 - Compare LCS is capped at 4,000,000 cells and inline token diff at 250,000 cells. Over the cap, fall back to prefix/suffix or whole-line detection; do not allocate unbounded DP tables.
 - Compare clears highlights when either side changes and on swap.
 - `CodeMirrorEditor` must destroy its view on unmount and reconfigure compartments on prop changes.
+- The loading splash lives in `src/app.html`, not in a component, because it must paint before the bundle exists. Keep its CSS inline there with `var(--token, fallback)` values, keep the markup a sibling of the `%sveltekit.body%` container, and dismiss it from `+layout.svelte` `onMount` through `utils/splash.ts`. Its label strings are the documented exception to the "no hardcoded user-facing strings" rule: they mirror `app.title` and the loading text, and the layout overwrites the title from the dictionary, so update both places when the app name changes.
 - Do not add `tauri-plugin-sql`; use the existing `rusqlite` backend.
 - Do not add external icon packs or copy icon markup into pages; extend `ICON_PATHS`.
 - Do not put theme/locale into SQLite without updating this document and the persistence contract.

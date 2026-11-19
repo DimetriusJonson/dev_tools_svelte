@@ -21,9 +21,148 @@
 				}
 			})();
 		</script>
+		<style>
+			/*
+			 * Pre-hydration loading screen. It is styled here because the app bundle
+			 * has not loaded yet; palette values only appear as `var()` fallbacks for
+			 * `npm run dev`, where app.css arrives with the bundle.
+			 */
+			#app-splash {
+				position: fixed;
+				inset: 0;
+				z-index: 50;
+				display: flex;
+				flex-direction: column;
+				align-items: center;
+				justify-content: center;
+				gap: 16px;
+				padding: 24px;
+				background: var(--app-bg, #f5f5f5);
+				color: var(--text, #111827);
+				font-family: 'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+				transition:
+					opacity 260ms ease,
+					transform 260ms ease;
+			}
+			html.dark #app-splash {
+				background: var(--app-bg, #181818);
+				color: var(--text, #e5e5e5);
+			}
+			#app-splash.app-splash-out {
+				opacity: 0;
+				transform: scale(0.98);
+				pointer-events: none;
+			}
+			.app-splash-logo {
+				width: 84px;
+				height: 84px;
+				border-radius: 18px;
+				box-shadow: var(--shadow, 0 18px 40px -24px rgba(17, 24, 39, 0.35));
+			}
+			.app-splash-title {
+				margin: 0;
+				font-size: 20px;
+				font-weight: 600;
+				text-align: center;
+			}
+			.app-splash-version {
+				margin: 0;
+				font-size: 12px;
+				color: var(--text-muted, #4b5563);
+			}
+			.app-splash-spinner {
+				width: 26px;
+				height: 26px;
+				border-radius: 50%;
+				border: 3px solid var(--border, #d1d5db);
+				border-top-color: var(--accent, #d97706);
+				animation: app-splash-spin 0.9s linear infinite;
+			}
+			.app-splash-note,
+			.app-splash-hint {
+				margin: 0;
+				max-width: 46ch;
+				font-size: 13px;
+				text-align: center;
+				color: var(--text-muted, #4b5563);
+			}
+			html.dark #app-splash .app-splash-version,
+			html.dark #app-splash .app-splash-note,
+			html.dark #app-splash .app-splash-hint {
+				color: var(--text-muted, #9ca3af);
+			}
+			@keyframes app-splash-spin {
+				to {
+					transform: rotate(360deg);
+				}
+			}
+			@media (prefers-reduced-motion: reduce) {
+				#app-splash {
+					transition: none;
+				}
+				.app-splash-spinner {
+					animation-duration: 1.8s;
+				}
+			}
+		</style>
 		%sveltekit.head%
 	</head>
 	<body data-sveltekit-preload-data="hover">
+		<div id="app-splash" class="app-splash" role="status" aria-live="polite">
+			<img class="app-splash-logo" src="%sveltekit.assets%/favicon.svg" alt="" />
+			<p class="app-splash-title" id="app-splash-title"></p>
+			<p class="app-splash-version" id="app-splash-version" hidden></p>
+			<div class="app-splash-spinner" aria-hidden="true"></div>
+			<p class="app-splash-note" id="app-splash-note"></p>
+			<p class="app-splash-hint" id="app-splash-hint" hidden></p>
+		</div>
 		<div style="display: contents">%sveltekit.body%</div>
+		<script>
+			/*
+			 * Splash labels are localized before the bundle loads, so the very first
+			 * paint is never blank and never shows the wrong language. These strings
+			 * mirror `app.title` and the loading text in src/lib/stores/i18n.ts; the
+			 * layout overwrites the title with the dictionary value at hydration.
+			 */
+			(function () {
+				var LABELS = {
+					en: {
+						title: 'WebDev Useful Tools',
+						loading: 'Loading tools…',
+						hint: 'The app is taking too long to start. Restart it if the screen stays blank.'
+					},
+					ru: {
+						title: 'Полезные инструменты веб-разработчика',
+						loading: 'Загрузка инструментов…',
+						hint: 'Приложение запускается слишком долго. Перезапустите его, если экран остаётся пустым.'
+					}
+				};
+				var locale = 'en';
+				try {
+					var stored = localStorage.getItem('devtools.locale');
+					if (stored === 'en' || stored === 'ru') {
+						locale = stored;
+					} else if ((window.navigator.language || '').toLowerCase().indexOf('ru') === 0) {
+						locale = 'ru';
+					}
+				} catch (e) {
+					locale = 'en';
+				}
+				var labels = LABELS[locale] || LABELS.en;
+				document.documentElement.lang = locale;
+				document.title = labels.title;
+				var title = document.getElementById('app-splash-title');
+				var note = document.getElementById('app-splash-note');
+				var hint = document.getElementById('app-splash-hint');
+				if (title) title.textContent = labels.title;
+				if (note) note.textContent = labels.loading;
+				// Reveals a restart hint when the bundle never hydrates the app.
+				window.setTimeout(function () {
+					if (!hint) return;
+					hint.textContent = labels.hint;
+					hint.hidden = false;
+				}, 12000);
+			})();
+		</script>
 	</body>
 </html>
