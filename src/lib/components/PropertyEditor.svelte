@@ -95,13 +95,6 @@
 </script>
 
 <div class="flex min-h-0 flex-col overflow-hidden rounded-lg border border-[var(--border)]">
-	<div class="grid shrink-0 grid-cols-2 items-center border-b border-[var(--border)] px-3 py-2">
-		<span class="truncate text-xs font-semibold text-[var(--text-muted)]">{nameLabel}</span>
-		<span class="min-w-0 truncate text-xs font-semibold text-[var(--text-muted)]">
-			{valueLabel}
-		</span>
-	</div>
-
 	<div
 		class="min-h-0 flex-1 overflow-y-auto"
 		onfocusout={(event) => {

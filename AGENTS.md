@@ -193,6 +193,7 @@ getEditorValue(): string;
 - URL layout: source textarea, 12px horizontal resizer, centered buttons, result textarea.
 - Compare layout: two equal panes and a fixed 160px center column; it must fill the available height.
 - Copy feedback lasts 1.5 s. Formatter errors clear after 4.5 s.
+- `PropertyEditor.svelte` renders no column-title header row; `nameLabel`/`valueLabel` props are used only in `aria-label`, and placeholders convey the column meaning. Keep the add-row input directly under the container border.
 
 ## 5. Persistence, IPC, and Backend
 
