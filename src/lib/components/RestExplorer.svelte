@@ -275,7 +275,7 @@
 			<ul class="flex flex-col gap-0.5">
 				{#each requests as request (request.id)}
 					{@const active = activeId === request.id}
-					<li class="group relative">
+					<li class="relative">
 						{#if renamingRequestId === request.id}
 							<input
 								bind:this={requestInput}
@@ -308,17 +308,17 @@
 									{requestLabel(request)}
 								</span>
 							</button>
-							<button
-								type="button"
-								onclick={(event) => openRequestMenu(event, request.id)}
-								class="absolute right-1 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md bg-[var(--panel-bg)] text-[var(--text-muted)] transition-all duration-150 hover:scale-110 hover:text-[var(--text)] {active
-									? 'opacity-100'
-									: 'opacity-0 group-hover:opacity-100'}"
-								title={$t('rest.requestMenu')}
-								aria-label={$t('rest.requestMenu')}
-							>
-								<Icon name="more" size={16} strokeWidth={3} />
-							</button>
+							{#if active}
+								<button
+									type="button"
+									onclick={(event) => openRequestMenu(event, request.id)}
+									class="absolute right-1 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md bg-[var(--panel-bg)] text-[var(--text-muted)] transition-all duration-150 hover:scale-110 hover:text-[var(--text)]"
+									title={$t('rest.requestMenu')}
+									aria-label={$t('rest.requestMenu')}
+								>
+									<Icon name="more" size={16} strokeWidth={3} />
+								</button>
+							{/if}
 						{/if}
 					</li>
 				{/each}
