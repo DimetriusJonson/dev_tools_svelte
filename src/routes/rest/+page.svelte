@@ -97,12 +97,6 @@
 			? requests.filter((request) => request.project_id === activeProjectId)
 			: requests
 	);
-	// The project the open request belongs to, shown on every tab strip below.
-	const tabProjectName = $derived.by(() => {
-		const projectId = active?.project_id ?? null;
-		const owner = projectId ? projects.find((project) => project.id === projectId) : undefined;
-		return owner?.name.trim() || $t('rest.projectNone');
-	});
 	const queryRows = $derived(active ? parseQuery(active.url) : []);
 	const cookieRows = $derived(active ? parseCookies(active.headers) : []);
 	const effectiveBody = $derived(active ? resolveRequestBody(active) : '');
@@ -834,16 +828,6 @@
 
 <svelte:window onresize={onWindowResize} />
 
-{#snippet projectTag()}
-	<span
-		class="ml-auto flex min-w-0 max-w-[180px] items-center gap-1.5 rounded-md bg-[var(--secondary-bg)] px-2 py-1 text-xs font-semibold text-[var(--text-muted)]"
-		title={$t('rest.projectTagHint', { name: tabProjectName })}
-	>
-		<Icon name="folder" size={13} class="shrink-0" />
-		<span class="truncate">{tabProjectName}</span>
-	</span>
-{/snippet}
-
 <div class="flex h-full min-h-0 gap-0 px-3 pb-3 pt-3">
 	<div class="h-full min-h-0 shrink-0" style="width: {explorerWidth}px;">
 		<RestExplorer
@@ -1012,7 +996,6 @@
 									></span>
 								{/if}
 							</button>
-							{@render projectTag()}
 						</div>
 						<div class="min-h-0 flex-1 p-2">
 							{#if requestTab === 'headers'}
@@ -1087,12 +1070,11 @@
 									{/if}
 								</button>
 							{/each}
-							{@render projectTag()}
 							{#if active.body_type === 'json' || active.body_type === 'xml'}
 								<button
 									type="button"
 									onclick={formatBody}
-									class="flex h-8 w-8 items-center justify-center rounded-md text-[var(--text-muted)] transition-all duration-150 hover:scale-110 hover:bg-white/5 hover:text-[var(--text)] active:scale-95"
+									class="ml-auto flex h-8 w-8 items-center justify-center rounded-md text-[var(--text-muted)] transition-all duration-150 hover:scale-110 hover:bg-white/5 hover:text-[var(--text)] active:scale-95"
 									title={$t('common.format')}
 									aria-label={$t('common.format')}
 								>
@@ -1179,7 +1161,6 @@
 						>
 							{$t('rest.rawRequest')}
 						</button>
-						{@render projectTag()}
 					</div>
 
 					{#if responseTab === 'response'}
