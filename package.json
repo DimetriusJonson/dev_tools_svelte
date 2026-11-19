@@ -21,6 +21,7 @@
 		"@codemirror/theme-one-dark": "^6.1.2",
 		"@codemirror/view": "^6.35.3",
 		"@tauri-apps/api": "^2.2.0",
+		"@tauri-apps/plugin-clipboard-manager": "^2.5.0",
 		"@tauri-apps/plugin-dialog": "^2.2.0",
 		"codemirror": "^6.0.1"
 	},

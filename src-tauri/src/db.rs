@@ -53,6 +53,61 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 			size INTEGER NOT NULL,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		);
+
+		CREATE TABLE IF NOT EXISTS rest_projects (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			sort_order INTEGER NOT NULL DEFAULT 0,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS rest_requests (
+			id TEXT PRIMARY KEY,
+			project_id TEXT,
+			name TEXT NOT NULL DEFAULT '',
+			method TEXT NOT NULL DEFAULT 'GET',
+			url TEXT NOT NULL DEFAULT '',
+			body TEXT NOT NULL DEFAULT '',
+			body_type TEXT NOT NULL DEFAULT 'json',
+			save_response INTEGER NOT NULL DEFAULT 0,
+			response_body TEXT,
+			response_headers TEXT NOT NULL DEFAULT '[]',
+			raw_request TEXT,
+			sort_order INTEGER NOT NULL DEFAULT 0,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS rest_request_properties (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			request_id TEXT NOT NULL,
+			kind TEXT NOT NULL,
+			name TEXT NOT NULL DEFAULT '',
+			value TEXT NOT NULL DEFAULT '',
+			sort_order INTEGER NOT NULL DEFAULT 0
+		);
+
+		CREATE TABLE IF NOT EXISTS rest_request_form (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			request_id TEXT NOT NULL,
+			name TEXT NOT NULL DEFAULT '',
+			value TEXT NOT NULL DEFAULT '',
+			sort_order INTEGER NOT NULL DEFAULT 0
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_rest_requests_project ON rest_requests(project_id);
+		CREATE INDEX IF NOT EXISTS idx_rest_properties_request ON rest_request_properties(request_id);
+		CREATE INDEX IF NOT EXISTS idx_rest_form_request ON rest_request_form(request_id);
+
+		INSERT INTO rest_request_form (request_id, name, value, sort_order)
+		SELECT p.request_id, p.name, p.value, p.sort_order
+		FROM rest_request_properties p
+		WHERE p.kind = 'form'
+			AND NOT EXISTS (
+				SELECT 1 FROM rest_request_form f WHERE f.request_id = p.request_id
+			);
+
+		DELETE FROM rest_request_properties WHERE kind = 'form';
 		"#,
     )
 }
@@ -220,6 +275,10 @@ mod tests {
         assert!(tables.contains(&"editor_state".to_string()));
         assert!(tables.contains(&"app_settings".to_string()));
         assert!(tables.contains(&"shared_uploads".to_string()));
+        assert!(tables.contains(&"rest_projects".to_string()));
+        assert!(tables.contains(&"rest_requests".to_string()));
+        assert!(tables.contains(&"rest_request_properties".to_string()));
+        assert!(tables.contains(&"rest_request_form".to_string()));
     }
 
     #[test]

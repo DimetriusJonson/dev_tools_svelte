@@ -6,6 +6,7 @@
 	import { isDark } from '$lib/stores/theme';
 	import { t } from '$lib/stores/i18n';
 	import { draftShare } from '$lib/stores/share';
+	import { notifyError } from '$lib/stores/toast';
 	import { copyText } from '$lib/utils/clipboard';
 	import {
 		escapeContent,
@@ -39,14 +40,12 @@
 	let status = $state('');
 	let busy = $state(false);
 	let copied = $state(false);
-	let errorMessage = $state('');
 	let hydrated = $state(false);
 	let leftWidth = $state(720);
 	let resizing = $state(false);
 	let fileInput = $state<HTMLInputElement | null>(null);
 
 	let copyTimer: ReturnType<typeof setTimeout> | undefined;
-	let errorTimer: ReturnType<typeof setTimeout> | undefined;
 
 	const isDarkTheme = $derived($isDark);
 
@@ -60,17 +59,12 @@
 	}
 
 	function flashError(message: string): void {
-		errorMessage = message;
-		if (errorTimer) clearTimeout(errorTimer);
-		errorTimer = setTimeout(() => {
-			errorMessage = '';
-		}, 4500);
+		notifyError(message);
 	}
 
 	function execute(): void {
 		try {
 			output = formatContent(mode, source, currentOptions());
-			errorMessage = '';
 			status = '';
 		} catch {
 			output = '';
@@ -81,7 +75,6 @@
 	function escapeSource(): void {
 		try {
 			output = escapeContent(mode, source);
-			errorMessage = '';
 			status = '';
 		} catch {
 			output = '';
@@ -147,7 +140,6 @@
 			selectedFile = path;
 			fileName = basename(path);
 			status = fileName;
-			errorMessage = '';
 		} catch (error) {
 			flashError(String(error));
 		}
@@ -163,7 +155,6 @@
 			fileName = file.name;
 			selectedFile = null;
 			status = file.name;
-			errorMessage = '';
 		} catch {
 			flashError($t('common.error'));
 		}
@@ -178,7 +169,6 @@
 			try {
 				output = formatContent(mode, source, currentOptions());
 				status = fileName;
-				errorMessage = '';
 			} catch {
 				output = '';
 				flashError($t('formatter.invalid'));
@@ -205,7 +195,6 @@
 				do_escape: false
 			});
 			status = $t('formatter.fileDone', { path: result.output_path });
-			errorMessage = '';
 		} catch (error) {
 			flashError($t('formatter.fileError', { message: String(error) }));
 		} finally {
@@ -258,7 +247,6 @@
 		return () => {
 			cancelled = true;
 			if (copyTimer) clearTimeout(copyTimer);
-			if (errorTimer) clearTimeout(errorTimer);
 		};
 	});
 
@@ -466,11 +454,4 @@
 		</div>
 	</div>
 
-	{#if errorMessage}
-		<div
-			class="fade-in pointer-events-none absolute bottom-24 left-1/2 z-30 max-w-[80%] -translate-x-1/2 rounded-full border border-red-400/40 bg-red-500/95 px-5 py-2.5 text-center text-sm font-semibold text-white shadow-lg"
-		>
-			{errorMessage}
-		</div>
-	{/if}
 </div>

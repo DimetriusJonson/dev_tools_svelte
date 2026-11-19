@@ -16,9 +16,9 @@
 - **Editors:** CodeMirror 6 (`basicSetup`, JSON/XML language packages, one-dark highlight style).
 - **Database:** SQLite via `rusqlite` with `bundled` feature. Not `tauri-plugin-sql`.
 - **File processing:** `quick-xml 0.42`, `serde_json` with `preserve_order`.
-- **Tauri plugins:** `dialog`, `single-instance`.
+- **Tauri plugins:** `dialog`, `single-instance`, `deep-link`, `clipboard-manager`.
 - **Testing:** Vitest + jsdom for frontend; Rust unit tests for DB, processing, and tray mapping.
-- **Current status:** XML, JSON, URL, Compare, Share (desktop only), themes, i18n, persistence, tray, single-instance, deep links, and large-file processing are implemented. Rest client is a localized placeholder.
+- **Current status:** XML, JSON, URL, Compare, Share (desktop only), Rest client, themes, i18n, persistence, notifications, tray, single-instance, deep links, and large-file processing are implemented.
 
 ## 2. Commands & Definition of Done
 
@@ -66,22 +66,29 @@ src/
 │   │   ├── CodeMirrorEditor.svelte       # reusable CodeMirror wrapper + highlight API
 │   │   ├── Icon.svelte                   # inline SVG path dictionary
 │   │   ├── Navbar.svelte                 # nav pills, language, theme controls
+│   │   ├── PropertyEditor.svelte         # shared name/value table for REST properties
+│   │   ├── RestExplorer.svelte           # REST projects and request list UI
+│   │   ├── Toaster.svelte                # global notification stack
 │   │   └── XmlJsonFormatter.svelte       # shared XML/JSON tool UI
 │   ├── services/
 │   │   ├── db.ts                         # Tauri IPC + localStorage fallback
 │   │   ├── files.ts                      # native dialogs and path helpers
+│   │   ├── rest.ts                       # REST IPC wrappers + browser fallback
 │   │   ├── share.ts                      # share IPC wrappers + viewer URL helpers
 │   │   └── share.test.ts
 │   ├── stores/
 │   │   ├── i18n.ts                       # en/ru dictionaries, locale detection
 │   │   ├── share.ts                      # draftShare handoff from XML/JSON result
-│   │   └── theme.ts                      # system/dark/light mode
+│   │   ├── theme.ts                      # system/dark/light mode
+│   │   └── toast.ts                      # transient success/error/info notifications
 │   └── utils/
-│       ├── clipboard.ts                  # clipboard write with fallback
+│       ├── clipboard.ts                  # clipboard read/write with notification fallback
 │       ├── diff.ts                       # line LCS + inline token diff
 │       ├── diff.test.ts
 │       ├── formatters.ts                 # XML/JSON/URL transformations
-│       └── formatters.test.ts
+│       ├── formatters.test.ts
+│       ├── rest.ts                       # query/cookies/form + cURL helpers
+│       └── rest.test.ts
 └── routes/
     ├── +layout.svelte                    # navbar, full-height shell, deep-link navigation
     ├── +layout.ts                        # ssr = false; prerender = false
@@ -92,7 +99,7 @@ src/
     ├── compare/+page.svelte              # diff UI
     ├── share/+page.svelte                # desktop share UI: interfaces, file/content upload
     ├── view/+page.svelte                 # read-only viewer opened by deep link
-    └── rest/+page.svelte                 # placeholder
+    └── rest/+page.svelte                 # REST client: explorer, request editor, response
 
 src-tauri/
 ├── Cargo.toml
@@ -105,6 +112,7 @@ src-tauri/
     ├── lib.rs                            # tray, single-instance, DB init, commands, deep link
     ├── db.rs                             # schema, editor/settings CRUD, shared_uploads CRUD
     ├── processor.rs                      # large-file XML/JSON processing
+    ├── rest.rs                           # REST projects/requests persistence, execution, cancellation
     ├── share.rs                          # interfaces, deep link, upload/viewer commands, server state
     └── http_server.rs                    # read-only axum share server on port 3030
 
@@ -158,7 +166,7 @@ getEditorValue(): string;
 - **No external icon libraries.** All icons live in `ICON_PATHS` in `src/lib/components/Icon.svelte`.
 - Store one or more SVG `d` strings per icon. Render only `<path d={...} />`.
 - **Never** use empty fragments `<>...</>` inside `<svg>`.
-- Current names include `copy`, `download`, `share`, `chevronDown`, `sun`, `moon`, `monitor`, `arrowRight`, `check`, `swap`, `file`, `compare`, `server`, `sparkles`.
+- Current names include `copy`, `download`, `share`, `chevronDown`, `sun`, `moon`, `monitor`, `arrowRight`, `check`, `swap`, `file`, `compare`, `server`, `sparkles`, `globe`, `more`, `plus`, `trash`, `clipboard`, `braces`, `alignLeft`, `eraser`, `eye`, `play`, `folder`, `close`.
 
 ### Styling and themes
 
@@ -218,6 +226,39 @@ CREATE TABLE IF NOT EXISTS shared_uploads (
   size INTEGER NOT NULL,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS rest_projects (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS rest_requests (
+  id TEXT PRIMARY KEY,
+  project_id TEXT,
+  name TEXT NOT NULL DEFAULT '',
+  method TEXT NOT NULL DEFAULT 'GET',
+  url TEXT NOT NULL DEFAULT '',
+  body TEXT NOT NULL DEFAULT '',
+  body_type TEXT NOT NULL DEFAULT 'json',
+  save_response INTEGER NOT NULL DEFAULT 0,
+  response_body TEXT,
+  response_headers TEXT NOT NULL DEFAULT '[]',
+  raw_request TEXT,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS rest_request_properties (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  request_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  value TEXT NOT NULL DEFAULT '',
+  sort_order INTEGER NOT NULL DEFAULT 0
+);
 ```
 
 Editor keys in use:
@@ -255,6 +296,21 @@ All commands use `#[tauri::command(rename_all = "snake_case")]`. Frontend invoke
 | `download_shared_upload` | `server`, `id`, `path` | `void` |
 | `consume_pending_deep_link` | — | `DeepLinkTarget \| null` |
 | `clear_pending_deep_link` | — | `void` |
+| `list_rest_projects` | — | `RestProject[]` |
+| `create_rest_project` | `name` | `RestProject` |
+| `rename_rest_project` | `id`, `name` | `void` |
+| `delete_rest_project` | `id` | `void` |
+| `list_rest_requests` | — | `RestRequest[]` |
+| `create_rest_request` | `draft` | `RestRequest` |
+| `update_rest_request` | `request` | `void` |
+| `rename_rest_request` | `id`, `name` | `void` |
+| `delete_rest_request` | `id` | `void` |
+| `duplicate_rest_request` | `id` | `RestRequest` |
+| `save_rest_response` | `id`, `body`, `headers`, `raw_request` | `void` |
+| `clear_rest_response` | `id` | `void` |
+| `execute_rest_request` | `method`, `url`, `headers`, `body`, `body_type` | `RestResponse` |
+| `cancel_rest_request` | — | `boolean` |
+| `download_rest_response` | `method`, `url`, `headers`, `body`, `body_type`, `path` | `u64` |
 
 `ProcessResult` contains `output_path`, `bytes_in`, `bytes_out`.
 `ShareServerStatus` contains `running`, `port`, `error`. `ShareUploadResult` contains `id`, `link`, `server`, `filename`, `size`.
@@ -279,7 +335,7 @@ All commands use `#[tauri::command(rename_all = "snake_case")]`. Frontend invoke
 - Upload limit is 50 MB for both file and content paths; file uploads read the whole file in `spawn_blocking`.
 - `build_deep_link`/`parse_deep_link` use scheme `webdev-useful-tools://view?server=...&id=...`; `install_deep_link_handler` stores the target in `PendingDeepLink` and emits `share:deep-link`. The frontend consumes the pending target on mount and navigates to `/view` through `buildViewerUrl`.
 - Frontend share pages must gate uploads on `ShareServerStatus.running`; the Share UI shows a Retry button that calls `restart_share_server`.
-- `reqwest` is used with `default-features = false, features = ["json"]`; plain HTTP only. `src-tauri/tests/http_client.rs` guards that client feature set.
+- `reqwest` is used with `default-features = false, features = ["json", "rustls", "gzip"]`. REST requests support HTTP and HTTPS, automatic gzip decompression, a 120-second timeout, and up to 10 redirects. `src-tauri/tests/http_client.rs` still guards the plain-HTTP client path.
 
 ### Desktop integration
 
@@ -288,7 +344,8 @@ All commands use `#[tauri::command(rename_all = "snake_case")]`. Frontend invoke
 - Tray menu IDs `open` and `quit` map to `TrayAction::Open` / `Quit`; unknown IDs are ignored.
 - Closing the `main` window prevents close and hides it to the tray. Quit exits the process.
 - Window title `<localized app.title> <version>` from `package.json`, set by the frontend via `setTitle`; `tauri.conf.json > app > windows > title` is only the initial value. 1440×920, minimum 1100×700.
-- Capabilities in `src-tauri/capabilities/default.json`: `core:default`, `core:window:allow-set-title`, `dialog:default`, `dialog:allow-open`, `dialog:allow-save`.
+- Capabilities in `src-tauri/capabilities/default.json`: `core:default`, `core:window:allow-set-title`, `dialog:default`, `dialog:allow-open`, `dialog:allow-save`, `clipboard-manager:allow-read-text`.
+- Clipboard reads go through `tauri-plugin-clipboard-manager` in Tauri. Do not call `navigator.clipboard.readText()` directly from pages: WebView2/WKWebView reject it with a permissions error. In browser mode `utils/clipboard.ts` falls back to `navigator.clipboard` and requires a secure context.
 - Custom icon source is `src-tauri/icon-source.png`; SVG companion is `src-tauri/icons/app-icon.svg`. Regenerate the bundle with `npx tauri icon src-tauri/icon-source.png` when the icon changes.
 
 ## 6. Feature Implementation Map
@@ -297,7 +354,8 @@ All commands use `#[tauri::command(rename_all = "snake_case")]`. Frontend invoke
 - **URL:** `src/routes/url/+page.svelte` → `encodeUrl`/`decodeUrl` in `formatters.ts`. Uses `encodeURI`/`decodeURI`, not `encodeURIComponent`.
 - **Compare:** `src/routes/compare/+page.svelte` → `diffTexts`/`lineOffsets`/`splitLines` in `diff.ts`; highlights are applied through `CodeMirrorEditor`.
 - **Share (desktop):** `src/routes/share/+page.svelte` → `services/share.ts` → `share.rs` + `http_server.rs`; uploads go to `shared_uploads` in `db.rs`. Draft content arrives from `XmlJsonFormatter.svelte` through the `draftShare` store (`readOnly: true`). Viewer: `src/routes/view/+page.svelte` opened via deep link or `/view?server=...&id=...`.
-- **Rest:** placeholder page only; no network layer exists.
+- **Rest client:** `src/routes/rest/+page.svelte` → `RestExplorer.svelte` + `PropertyEditor.svelte` → `services/rest.ts` → `utils/rest.ts` → `rest.rs`. Projects/requests persist in `rest_projects`, `rest_requests`, `rest_request_properties`. Execution goes through the Rust backend in Tauri; browser mode falls back to `fetch` and `localStorage`.
+- **Notifications:** `stores/toast.ts` → `Toaster.svelte` in `+layout.svelte`. `utils/clipboard.ts` emits success/failure notifications; pages report errors through `notify`/`notifyError`.
 - **Theme/i18n:** `theme.ts`, `i18n.ts`, `Navbar.svelte`, `app.html`.
 - **Persistence:** `services/db.ts` → `db.rs` commands; browser fallback is localStorage.
 - **Large files:** `services/files.ts` + `services/db.ts` → `processor.rs`.
@@ -320,6 +378,10 @@ All commands use `#[tauri::command(rename_all = "snake_case")]`. Frontend invoke
 - Keep `invoke` argument names snake_case to match the Rust command signatures.
 - Browser mode must remain functional for client-side XML/JSON/URL/Compare features.
 - New Tauri APIs may require capability updates; check `capabilities/default.json`.
+- REST command functions are Rust `cmd_*` wrappers with `#[tauri::command(rename = "...", rename_all = "snake_case")]` because the DB helpers already use the public names. Keep the invoke names unchanged when adding commands.
+- Query rows are derived from the URL and Cookies rows are derived from the `Cookie` header. Do not store them twice; edit the URL or header through the shared helpers in `utils/rest.ts`.
+- The REST Save checkbox applies to text responses only. Attachments and binary responses must be fetched with `download_rest_response` instead of being loaded into the editor.
+- Keep REST execution on the Rust backend for desktop to avoid CORS. The browser `fetch` fallback is best-effort and may be blocked by CORS or forbidden headers.
 - Avoid reintroducing nav hover background colors or removing `overflow-y-hidden`/`py-1`; that combination regressed the layout before.
 
 ## 8. Adding a Feature
@@ -347,7 +409,7 @@ Feature mapping template:
 
 ## 9. Scope & Non-Goals
 
-- Share is desktop-only and LAN-only; Rest client is a placeholder and must not be claimed as working.
+- Share is desktop-only and LAN-only. Rest client runs requests through the desktop backend; the browser build has CORS-limited fallback behavior.
 - No server-side rendering, server routes, or remote backend.
 - No external icon or component libraries.
 - No mobile target.

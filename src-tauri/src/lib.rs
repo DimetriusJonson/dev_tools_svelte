@@ -1,6 +1,7 @@
 mod db;
 mod http_server;
 mod processor;
+mod rest;
 mod share;
 
 use std::sync::{Arc, Mutex};
@@ -55,6 +56,7 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
@@ -67,6 +69,7 @@ pub fn run() {
             let database = init_database(app.handle())?;
             let share_database = database.clone();
             app.manage(database);
+            app.manage(rest::RestCancelState::default());
             app.manage(share::PendingDeepLink::default());
             share::install_deep_link_handler(app.handle());
             app.manage(http_server::start(share_database));
@@ -111,7 +114,22 @@ pub fn run() {
             share::load_shared_upload,
             share::download_shared_upload,
             share::consume_pending_deep_link,
-            share::clear_pending_deep_link
+            share::clear_pending_deep_link,
+            rest::cmd_list_rest_projects,
+            rest::cmd_create_rest_project,
+            rest::cmd_rename_rest_project,
+            rest::cmd_delete_rest_project,
+            rest::cmd_list_rest_requests,
+            rest::cmd_create_rest_request,
+            rest::cmd_update_rest_request,
+            rest::cmd_rename_rest_request,
+            rest::cmd_delete_rest_request,
+            rest::cmd_duplicate_rest_request,
+            rest::cmd_save_rest_response,
+            rest::cmd_clear_rest_response,
+            rest::cmd_execute_rest_request,
+            rest::cmd_cancel_rest_request,
+            rest::cmd_download_rest_response
         ])
         .build(tauri::generate_context!())
         .expect("error while building the Tauri application")

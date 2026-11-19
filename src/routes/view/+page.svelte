@@ -6,6 +6,7 @@
 	import CodeMirrorEditor from '$lib/components/CodeMirrorEditor.svelte';
 	import { t } from '$lib/stores/i18n';
 	import { isDark } from '$lib/stores/theme';
+	import { notifyError } from '$lib/stores/toast';
 	import { copyText } from '$lib/utils/clipboard';
 	import { isTauriRuntime } from '$lib/services/db';
 	import { pickSaveFile } from '$lib/services/files';
@@ -38,11 +39,13 @@
 
 		if (!isTauriRuntime()) {
 			errorMessage = $t('viewer.desktopOnly');
+			notifyError(errorMessage);
 			loading = false;
 			return;
 		}
 		if (!targetServer || !targetId) {
 			errorMessage = $t('viewer.invalidLink');
+			notifyError(errorMessage);
 			loading = false;
 			return;
 		}
@@ -51,6 +54,7 @@
 			upload = await loadSharedUpload(targetServer, targetId);
 		} catch (error) {
 			errorMessage = String(error);
+			notifyError(error);
 		} finally {
 			loading = false;
 		}
@@ -83,6 +87,7 @@
 			status = $t('viewer.downloaded', { path });
 		} catch (error) {
 			errorMessage = String(error);
+			notifyError(error);
 		} finally {
 			downloading = false;
 		}

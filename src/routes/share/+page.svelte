@@ -6,6 +6,7 @@
 	import { t } from '$lib/stores/i18n';
 	import { isDark } from '$lib/stores/theme';
 	import { draftShare } from '$lib/stores/share';
+	import { notifyError } from '$lib/stores/toast';
 	import { copyText } from '$lib/utils/clipboard';
 	import { isTauriRuntime } from '$lib/services/db';
 	import { basename, pickShareFile } from '$lib/services/files';
@@ -39,7 +40,6 @@
 	let uploading = $state(false);
 	let retrying = $state(false);
 	let result = $state<ShareUploadResult | null>(null);
-	let errorMessage = $state('');
 	let dragging = $state(false);
 	let copied = $state(false);
 
@@ -68,7 +68,6 @@
 
 	async function restartServer(): Promise<void> {
 		retrying = true;
-		errorMessage = '';
 		try {
 			serverStatus = await restartShareServer();
 			if (serverStatus && !serverStatus.running) {
@@ -82,7 +81,7 @@
 	}
 
 	function flashError(message: string): void {
-		errorMessage = message;
+		notifyError(message);
 	}
 
 	function setLanguage(language: ContentLanguage): void {
@@ -100,7 +99,6 @@
 			selectedPath = path;
 			selectedName = basename(path);
 			result = null;
-			errorMessage = '';
 		} catch (error) {
 			flashError(String(error));
 		}
@@ -114,7 +112,6 @@
 		if (!serverIsReady()) return;
 		uploading = true;
 		result = null;
-		errorMessage = '';
 		try {
 			result = await uploadShareFile(path, server);
 		} catch (error) {
@@ -150,7 +147,6 @@
 
 		uploading = true;
 		result = null;
-		errorMessage = '';
 		try {
 			const name = contentName.trim() || 'snippet.txt';
 			result = await uploadShareContent(content, name, contentType, server);
@@ -463,14 +459,6 @@
 					</p>
 				</section>
 			{/if}
-		{/if}
-
-		{#if errorMessage}
-			<div
-				class="fade-in rounded-xl border border-red-400/40 bg-red-500/95 px-4 py-3 text-sm font-semibold text-white"
-			>
-				{errorMessage}
-			</div>
 		{/if}
 
 		{#if loading}

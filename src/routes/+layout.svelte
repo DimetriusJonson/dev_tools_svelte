@@ -4,6 +4,7 @@
 	import { goto } from '$app/navigation';
 	import '../app.css';
 	import Navbar from '$lib/components/Navbar.svelte';
+	import Toaster from '$lib/components/Toaster.svelte';
 	import { isTauriRuntime } from '$lib/services/db';
 	import { t } from '$lib/stores/i18n';
 	import { isDark } from '$lib/stores/theme';
@@ -55,4 +56,5 @@
 	<main class="min-h-0 flex-1">
 		{@render children()}
 	</main>
+	<Toaster />
 </div>
