@@ -126,6 +126,22 @@ export function parseForm(body: string): RestProperty[] {
 	return Array.from(params.entries()).map(([name, value]) => ({ name, value }));
 }
 
+export interface RestBodySource {
+	body: string;
+	body_type: BodyType;
+	form: RestProperty[];
+}
+
+/**
+ * Resolves the body that goes on the wire. Form-encode rows are stored in their own
+ * table and never mix with the JSON/XML/Text buffer: when the Form-encode tab is
+ * active the table wins and the text body is ignored, otherwise the text body is used
+ * unchanged.
+ */
+export function resolveRequestBody(source: RestBodySource): string {
+	return source.body_type === 'form' ? encodeForm(source.form) : source.body;
+}
+
 export function bodyTypeFromContentType(contentType: string): BodyType | null {
 	const value = contentType.toLowerCase();
 	if (value.includes('json')) return 'json';
@@ -170,7 +186,7 @@ export function detectLanguageFromHeaders(
 	return 'text';
 }
 
-function defaultContentType(bodyType: BodyType): string {
+export function defaultContentType(bodyType: BodyType): string {
 	switch (bodyType) {
 		case 'json':
 			return 'application/json';
@@ -461,16 +477,19 @@ export function parseCurl(command: string): ParsedCurl | null {
 
 	if (!url.trim()) return null;
 
-	const body = bodyParts.join('&');
+	const rawBody = bodyParts.join('&');
 	const contentType = getHeader(headers, 'content-type');
-	let bodyType = bodyTypeFromContentType(contentType) ?? sniffBodyType(body);
-	const form = bodyType === 'form' ? parseForm(body) : [];
+	let bodyType = bodyTypeFromContentType(contentType) ?? sniffBodyType(rawBody);
+	const form = bodyType === 'form' ? parseForm(rawBody) : [];
+	// Form-encode rows live in their own table, so an imported form body does not
+	// occupy the JSON/XML/Text buffer.
+	const body = bodyType === 'form' ? '' : rawBody;
 	if (!contentType && body && bodyType === 'text') {
 		bodyType = 'text';
 	}
 
 	return {
-		method: (method || (body ? 'POST' : 'GET')).toUpperCase(),
+		method: (method || (rawBody ? 'POST' : 'GET')).toUpperCase(),
 		url,
 		headers,
 		body,

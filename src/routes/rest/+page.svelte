@@ -37,14 +37,13 @@
 		buildRawRequestPreview,
 		byteLength,
 		detectLanguageFromHeaders,
-		encodeForm,
 		formatRestSize,
 		formatRestTime,
 		getHeader,
 		parseCookies,
 		parseCurl,
-		parseForm,
 		parseQuery,
+		resolveRequestBody,
 		setCookieRows,
 		updateUrlQuery,
 		type CurlShell,
@@ -88,9 +87,7 @@
 	);
 	const queryRows = $derived(active ? parseQuery(active.url) : []);
 	const cookieRows = $derived(active ? parseCookies(active.headers) : []);
-	const effectiveBody = $derived(
-		active ? (active.body_type === 'form' ? encodeForm(active.form) : active.body) : ''
-	);
+	const effectiveBody = $derived(active ? resolveRequestBody(active) : '');
 	const savedResponseHeaders = $derived(active?.response_headers ?? []);
 	const responseHeaders = $derived(response?.headers ?? savedResponseHeaders);
 	const savedResponseBody = $derived(active?.response_body ?? '');
@@ -192,7 +189,7 @@
 			name: request.name,
 			method: request.method,
 			url: request.url,
-			body: request.body_type === 'form' ? encodeForm(request.form) : request.body,
+			body: request.body,
 			body_type: request.body_type,
 			save_response: request.save_response,
 			headers: request.headers,
@@ -242,14 +239,8 @@
 
 	function setBodyType(type: BodyType): void {
 		if (!active || active.body_type === type) return;
-		if (type === 'form' && active.form.length === 0 && active.body.trim()) {
-			patchActive({ body_type: type, form: parseForm(active.body) });
-			return;
-		}
-		if (active.body_type === 'form' && type !== 'form') {
-			patchActive({ body_type: type, body: encodeForm(active.form) });
-			return;
-		}
+		// The Form-encode table has its own storage, so switching tabs never copies
+		// rows into the JSON/XML/Text buffer or parses that buffer into rows.
 		patchActive({ body_type: type });
 	}
 
@@ -268,7 +259,7 @@
 	}
 
 	function onFormChange(rows: RestProperty[]): void {
-		patchActive({ form: rows, body: encodeForm(rows) });
+		patchActive({ form: rows });
 	}
 
 	function formatBody(): void {
@@ -322,7 +313,6 @@
 		}
 
 		const target = active;
-		const body = target.body_type === 'form' ? encodeForm(target.form) : target.body;
 		void flushSave(target);
 		running = true;
 		aborting = false;
@@ -333,8 +323,10 @@
 				method: target.method,
 				url: target.url,
 				headers: target.headers,
-				body,
-				body_type: target.body_type
+				body: target.body,
+				body_type: target.body_type,
+				// Form-encode rows win over the text body when that tab is active.
+				form: target.form
 			});
 			if (activeId === target.id) {
 				response = result;
@@ -550,7 +542,7 @@
 	async function copyCurl(id: string, shell: CurlShell): Promise<void> {
 		const request = requests.find((item) => item.id === id);
 		if (!request) return;
-		const body = request.body_type === 'form' ? encodeForm(request.form) : request.body;
+		const body = resolveRequestBody(request);
 		const command = buildCurl(
 			{
 				method: request.method,
@@ -584,8 +576,9 @@
 			method: active.method,
 			url: active.url,
 			headers: active.headers,
-			body: effectiveBody,
-			body_type: active.body_type
+			body: active.body,
+			body_type: active.body_type,
+			form: active.form
 		};
 		try {
 			if (isTauriRuntime()) {

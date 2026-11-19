@@ -1,8 +1,10 @@
 import { invokeCommand, isTauriRuntime } from './db';
 import {
 	buildRawRequestPreview,
+	defaultContentType,
 	detectLanguageFromContentType,
 	detectLanguageFromHeaders,
+	resolveRequestBody,
 	type BodyType,
 	type RestProperty
 } from '$lib/utils/rest';
@@ -55,6 +57,7 @@ export interface RestExecutionInput {
 	headers: RestProperty[];
 	body: string;
 	body_type: BodyType;
+	form: RestProperty[];
 }
 
 export interface RestResponse {
@@ -104,7 +107,16 @@ function loadLocal(): LocalState {
 		const parsed = JSON.parse(raw) as Partial<LocalState>;
 		return {
 			projects: Array.isArray(parsed.projects) ? parsed.projects : [],
-			requests: Array.isArray(parsed.requests) ? parsed.requests : []
+			requests: Array.isArray(parsed.requests)
+				? parsed.requests.map((request) => ({
+						...request,
+						headers: Array.isArray(request.headers) ? request.headers : [],
+						form: Array.isArray(request.form) ? request.form : [],
+						response_headers: Array.isArray(request.response_headers)
+							? request.response_headers
+							: []
+					}))
+				: []
 		};
 	} catch {
 		return { projects: [], requests: [] };
@@ -337,11 +349,24 @@ function isTextContentType(contentType: string): boolean {
 	return contentType.trim() === '' || detectLanguageFromContentType(contentType) !== null;
 }
 
+/**
+ * Body that actually goes on the wire: the Form-encode table has priority over the
+ * JSON/XML/Text buffer when that tab is active, mirroring the Rust backend.
+ */
+function wireBody(input: RestExecutionInput): string {
+	return resolveRequestBody({
+		body: input.body,
+		body_type: input.body_type,
+		form: input.form
+	});
+}
+
 async function browserFetch(
 	input: RestExecutionInput,
 	signal: AbortSignal
 ): Promise<{ response: Response; duration: number }> {
 	const url = normalizeUrl(input.url);
+	const body = wireBody(input);
 	const requestHeaders = new Headers();
 	for (const header of input.headers) {
 		const name = header.name.trim();
@@ -350,13 +375,16 @@ async function browserFetch(
 		if (lower === 'host' || lower === 'content-length') continue;
 		requestHeaders.set(name, header.value);
 	}
+	if (body && !requestHeaders.has('content-type')) {
+		requestHeaders.set('content-type', defaultContentType(input.body_type));
+	}
 	const started = performance.now();
 	let response: Response;
 	try {
 		response = await fetch(url.toString(), {
 			method: input.method.toUpperCase(),
 			headers: requestHeaders,
-			body: input.body || undefined,
+			body: body || undefined,
 			signal,
 			redirect: 'follow'
 		});
@@ -422,7 +450,7 @@ async function browserExecute(input: RestExecutionInput): Promise<RestResponse> 
 				input.method,
 				input.url,
 				input.headers,
-				input.body,
+				wireBody(input),
 				input.body_type
 			)
 		};
@@ -438,7 +466,8 @@ export async function executeRestRequest(input: RestExecutionInput): Promise<Res
 			url: input.url,
 			headers: input.headers,
 			body: input.body,
-			body_type: input.body_type
+			body_type: input.body_type,
+			form: input.form
 		});
 	}
 	return browserExecute(input);
@@ -464,6 +493,7 @@ export async function downloadRestResponse(
 			headers: input.headers,
 			body: input.body,
 			body_type: input.body_type,
+			form: input.form,
 			path
 		});
 		return;

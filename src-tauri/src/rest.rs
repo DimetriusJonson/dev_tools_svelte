@@ -186,11 +186,7 @@ fn form_for(conn: &Connection, request_id: &str) -> rusqlite::Result<Vec<RestPro
     Ok(rows)
 }
 
-fn write_form(
-    conn: &Connection,
-    request_id: &str,
-    rows: &[RestProperty],
-) -> rusqlite::Result<()> {
+fn write_form(conn: &Connection, request_id: &str, rows: &[RestProperty]) -> rusqlite::Result<()> {
     conn.execute(
         "DELETE FROM rest_request_form WHERE request_id = ?1",
         params![request_id],
@@ -625,6 +621,51 @@ fn default_content_type(body_type: &str) -> &'static str {
     }
 }
 
+/// Percent-encode set of `application/x-www-form-urlencoded`: unreserved ASCII plus
+/// `*` stays literal, spaces become `+`, every other byte becomes `%XX`. Mirrors
+/// `URLSearchParams.toString()` used by the frontend.
+fn encode_form_value(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*' => {
+                out.push(byte as char);
+            }
+            b' ' => out.push('+'),
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
+/// Serialises the Form-encode table into a request body. Rows with a blank name are
+/// skipped, matching how they are persisted in `rest_request_form`.
+pub fn encode_form_urlencoded(rows: &[RestProperty]) -> String {
+    let mut parts: Vec<String> = Vec::with_capacity(rows.len());
+    for row in rows {
+        if row.name.trim().is_empty() {
+            continue;
+        }
+        parts.push(format!(
+            "{}={}",
+            encode_form_value(&row.name),
+            encode_form_value(&row.value)
+        ));
+    }
+    parts.join("&")
+}
+
+/// Chooses the body that goes on the wire. The Form-encode table has its own storage
+/// and takes priority whenever the Form-encode tab is selected; the JSON/XML/Text
+/// buffer is then ignored and never modified.
+pub fn resolve_body(body_type: &str, body: &str, form: &[RestProperty]) -> String {
+    if body_type == "form" {
+        encode_form_urlencoded(form)
+    } else {
+        body.to_string()
+    }
+}
+
 fn host_header(url: &Url) -> String {
     match (url.host_str(), url.port()) {
         (Some(host), Some(port)) => format!("{host}:{port}"),
@@ -734,11 +775,13 @@ fn prepare_call(
     headers: &[RestProperty],
     body: &str,
     body_type: &str,
+    form: &[RestProperty],
 ) -> Result<PreparedCall, String> {
     let parsed = normalize_rest_url(url)?;
     let method = Method::from_bytes(method.trim().to_ascii_uppercase().as_bytes())
         .map_err(|_| format!("Invalid HTTP method: {method}"))?;
-    let prepared = prepare_headers(&parsed, headers, body, body_type);
+    let body = resolve_body(body_type, body, form);
+    let prepared = prepare_headers(&parsed, headers, &body, body_type);
     let wire_headers = prepared
         .iter()
         .filter(|header| {
@@ -748,12 +791,12 @@ fn prepare_call(
         .cloned()
         .collect::<Vec<_>>();
     let header_map = build_headers_map(&wire_headers)?;
-    let raw_request = build_raw_request(method.as_str(), &parsed, &prepared, body);
+    let raw_request = build_raw_request(method.as_str(), &parsed, &prepared, &body);
     Ok(PreparedCall {
         method,
         url: parsed,
         headers: header_map,
-        body: body.to_string(),
+        body,
         raw_request,
     })
 }
@@ -875,14 +918,16 @@ pub async fn cmd_execute_rest_request(
     headers: Vec<RestProperty>,
     body: String,
     body_type: String,
+    form: Option<Vec<RestProperty>>,
 ) -> Result<RestResponse, String> {
+    let form = form.unwrap_or_default();
     let PreparedCall {
         method,
         url,
         headers,
         body: request_body,
         raw_request,
-    } = prepare_call(&method, &url, &headers, &body, &body_type)?;
+    } = prepare_call(&method, &url, &headers, &body, &body_type, &form)?;
     let client = build_client()?;
     let receiver = cancel.begin();
 
@@ -976,9 +1021,11 @@ pub async fn cmd_download_rest_response(
     headers: Vec<RestProperty>,
     body: String,
     body_type: String,
+    form: Option<Vec<RestProperty>>,
     path: String,
 ) -> Result<u64, String> {
-    let call = prepare_call(&method, &url, &headers, &body, &body_type)?;
+    let form = form.unwrap_or_default();
+    let call = prepare_call(&method, &url, &headers, &body, &body_type, &form)?;
     let client = build_client()?;
     let mut builder = client.request(call.method.clone(), call.url.clone());
     for (name, value) in &call.headers {
@@ -1101,6 +1148,49 @@ mod tests {
     }
 
     #[test]
+    fn encodes_form_rows_like_urlsearchparams() {
+        let rows = vec![property("name", "John Doe"), property("tag", "a&b")];
+        assert_eq!(encode_form_urlencoded(&rows), "name=John+Doe&tag=a%26b");
+        assert_eq!(
+            encode_form_urlencoded(&[property("q", "привет")]),
+            "q=%D0%BF%D1%80%D0%B8%D0%B2%D0%B5%D1%82"
+        );
+        assert_eq!(encode_form_urlencoded(&[property("  ", "x")]), "");
+        assert_eq!(encode_form_urlencoded(&[]), "");
+    }
+
+    #[test]
+    fn form_table_has_priority_over_text_body() {
+        let rows = vec![property("user", "a"), property("pass", "b")];
+        assert_eq!(resolve_body("form", "{\"a\":1}", &rows), "user=a&pass=b");
+        assert_eq!(resolve_body("json", "{\"a\":1}", &rows), "{\"a\":1}");
+        assert_eq!(resolve_body("text", "plain", &rows), "plain");
+        assert_eq!(resolve_body("form", "{\"a\":1}", &[]), "");
+    }
+
+    #[test]
+    fn prepare_call_uses_form_rows_and_their_content_type() {
+        let call = prepare_call(
+            "POST",
+            "https://example.com/login",
+            &[],
+            "{\"ignored\":true}",
+            "form",
+            &[property("user", "a b"), property("pass", "c&d")],
+        )
+        .expect("prepared call");
+        assert_eq!(call.body, "user=a+b&pass=c%26d");
+        assert!(call
+            .raw_request
+            .contains("content-type: application/x-www-form-urlencoded"));
+        assert!(call
+            .raw_request
+            .contains(&format!("content-length: {}", call.body.len())));
+        assert!(call.raw_request.ends_with(&call.body));
+        assert!(!call.raw_request.contains("ignored"));
+    }
+
+    #[test]
     fn project_and_request_roundtrip() {
         let connection = memory_db();
         let project = create_rest_project(&connection, "Local API").expect("project");
@@ -1175,6 +1265,66 @@ mod tests {
             .expect("present");
         assert_eq!(cleared.response_body, None);
         assert!(cleared.response_headers.is_empty());
+    }
+
+    #[test]
+    fn form_rows_are_stored_in_their_own_table() {
+        let connection = memory_db();
+        let body = "{\"q\":\"text buffer\"}".to_string();
+        let rows = vec![property("q", "hello world"), property("page", "2")];
+
+        let draft = RestRequestDraft {
+            project_id: None,
+            name: "Search".to_string(),
+            method: "GET".to_string(),
+            url: "https://example.com/search".to_string(),
+            body: body.clone(),
+            body_type: "json".to_string(),
+            save_response: false,
+            headers: vec![],
+            form: rows.clone(),
+        };
+        let created = create_rest_request(&connection, &draft).expect("request");
+
+        let update = RestRequestUpdate {
+            id: created.id.clone(),
+            project_id: None,
+            name: "Search".to_string(),
+            method: "GET".to_string(),
+            url: "https://example.com/search".to_string(),
+            body: body.clone(),
+            body_type: "form".to_string(),
+            save_response: false,
+            headers: vec![],
+            form: rows.clone(),
+        };
+        update_rest_request(&connection, &update).expect("update");
+
+        let stored = read_rest_request(&connection, &created.id)
+            .expect("read")
+            .expect("present");
+        assert_eq!(stored.body_type, "form");
+        assert_eq!(stored.form, rows);
+        // Selecting the Form-encode tab must not rewrite the JSON/XML/Text buffer.
+        assert_eq!(stored.body, body);
+
+        let form_rows: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM rest_request_form WHERE request_id = ?1",
+                params![created.id],
+                |row| row.get(0),
+            )
+            .expect("form row count");
+        assert_eq!(form_rows, 2);
+
+        let legacy_rows: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM rest_request_properties WHERE request_id = ?1 AND kind = 'form'",
+                params![created.id],
+                |row| row.get(0),
+            )
+            .expect("legacy property count");
+        assert_eq!(legacy_rows, 0);
     }
 
     #[test]

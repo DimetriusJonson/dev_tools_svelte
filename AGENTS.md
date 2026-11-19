@@ -259,7 +259,22 @@ CREATE TABLE IF NOT EXISTS rest_request_properties (
   value TEXT NOT NULL DEFAULT '',
   sort_order INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS rest_request_form (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  request_id TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  value TEXT NOT NULL DEFAULT '',
+  sort_order INTEGER NOT NULL DEFAULT 0
+);
 ```
+
+Rest storage:
+
+- `rest_requests.body` is only the JSON/XML/Text editor buffer. Form-encode rows are never serialized into it.
+- `rest_request_form` holds the Form-encode tab table (`name`, `value`, `sort_order`) independently of the text buffer; `write_form` drops rows with a blank name, like header rows.
+- `init_schema` migrates legacy `rest_request_properties` rows with `kind = 'form'` into `rest_request_form` and deletes them. Only `kind = 'header'` is written today.
+- `rest.rs::resolve_body` (client mirrors: `utils/rest.ts::resolveRequestBody`, `services/rest.ts::wireBody`) gives form rows priority when `body_type = 'form'`: the wire body is `encode_form_urlencoded(form)`, the default content type is `application/x-www-form-urlencoded`, and the text buffer is ignored and left untouched.
 
 Editor keys in use:
 
@@ -308,9 +323,9 @@ All commands use `#[tauri::command(rename_all = "snake_case")]`. Frontend invoke
 | `duplicate_rest_request` | `id` | `RestRequest` |
 | `save_rest_response` | `id`, `body`, `headers`, `raw_request` | `void` |
 | `clear_rest_response` | `id` | `void` |
-| `execute_rest_request` | `method`, `url`, `headers`, `body`, `body_type` | `RestResponse` |
+| `execute_rest_request` | `method`, `url`, `headers`, `body`, `body_type`, `form` | `RestResponse` |
 | `cancel_rest_request` | — | `boolean` |
-| `download_rest_response` | `method`, `url`, `headers`, `body`, `body_type`, `path` | `u64` |
+| `download_rest_response` | `method`, `url`, `headers`, `body`, `body_type`, `form`, `path` | `u64` |
 
 `ProcessResult` contains `output_path`, `bytes_in`, `bytes_out`.
 `ShareServerStatus` contains `running`, `port`, `error`. `ShareUploadResult` contains `id`, `link`, `server`, `filename`, `size`.
@@ -354,7 +369,7 @@ All commands use `#[tauri::command(rename_all = "snake_case")]`. Frontend invoke
 - **URL:** `src/routes/url/+page.svelte` → `encodeUrl`/`decodeUrl` in `formatters.ts`. Uses `encodeURI`/`decodeURI`, not `encodeURIComponent`.
 - **Compare:** `src/routes/compare/+page.svelte` → `diffTexts`/`lineOffsets`/`splitLines` in `diff.ts`; highlights are applied through `CodeMirrorEditor`.
 - **Share (desktop):** `src/routes/share/+page.svelte` → `services/share.ts` → `share.rs` + `http_server.rs`; uploads go to `shared_uploads` in `db.rs`. Draft content arrives from `XmlJsonFormatter.svelte` through the `draftShare` store (`readOnly: true`). Viewer: `src/routes/view/+page.svelte` opened via deep link or `/view?server=...&id=...`.
-- **Rest client:** `src/routes/rest/+page.svelte` → `RestExplorer.svelte` + `PropertyEditor.svelte` → `services/rest.ts` → `utils/rest.ts` → `rest.rs`. Projects/requests persist in `rest_projects`, `rest_requests`, `rest_request_properties`. Execution goes through the Rust backend in Tauri; browser mode falls back to `fetch` and `localStorage`.
+- **Rest client:** `src/routes/rest/+page.svelte` → `RestExplorer.svelte` + `PropertyEditor.svelte` → `services/rest.ts` → `utils/rest.ts` → `rest.rs`. Projects/requests persist in `rest_projects`, `rest_requests`, `rest_request_properties` (headers) and `rest_request_form` (Form-encode rows). Execution goes through the Rust backend in Tauri; browser mode falls back to `fetch` and `localStorage`.
 - **Notifications:** `stores/toast.ts` → `Toaster.svelte` in `+layout.svelte`. `utils/clipboard.ts` emits success/failure notifications; pages report errors through `notify`/`notifyError`.
 - **Theme/i18n:** `theme.ts`, `i18n.ts`, `Navbar.svelte`, `app.html`.
 - **Persistence:** `services/db.ts` → `db.rs` commands; browser fallback is localStorage.
@@ -380,6 +395,7 @@ All commands use `#[tauri::command(rename_all = "snake_case")]`. Frontend invoke
 - New Tauri APIs may require capability updates; check `capabilities/default.json`.
 - REST command functions are Rust `cmd_*` wrappers with `#[tauri::command(rename = "...", rename_all = "snake_case")]` because the DB helpers already use the public names. Keep the invoke names unchanged when adding commands.
 - Query rows are derived from the URL and Cookies rows are derived from the `Cookie` header. Do not store them twice; edit the URL or header through the shared helpers in `utils/rest.ts`.
+- Form-encode rows are the only source of truth for `application/x-www-form-urlencoded` bodies and live in `rest_request_form`. Do not serialize them into `rest_requests.body`, and do not parse the text buffer into rows or overwrite the buffer when switching body tabs. `prepare_call` calls `resolve_body`, so the table wins whenever `body_type = 'form'`; the client uses `resolveRequestBody` for the raw preview and cURL export, and `execute_rest_request`/`download_rest_response` receive `form` alongside `body`.
 - The REST Save checkbox applies to text responses only. Attachments and binary responses must be fetched with `download_rest_response` instead of being loaded into the editor.
 - Keep REST execution on the Rust backend for desktop to avoid CORS. The browser `fetch` fallback is best-effort and may be blocked by CORS or forbidden headers.
 - Avoid reintroducing nav hover background colors or removing `overflow-y-hidden`/`py-1`; that combination regressed the layout before.

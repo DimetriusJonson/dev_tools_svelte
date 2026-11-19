@@ -12,6 +12,7 @@ import {
 	parseCurl,
 	parseForm,
 	parseQuery,
+	resolveRequestBody,
 	setCookieRows,
 	updateUrlQuery
 } from './rest';
@@ -79,6 +80,18 @@ describe('form encoding', () => {
 		expect(encodeForm(rows)).toBe('name=John+Doe&tag=a%26b');
 		expect(parseForm('name=John+Doe&tag=a%26b')).toEqual(rows);
 	});
+
+	it('gives the Form-encode table priority over the text buffer', () => {
+		const rows = [{ name: 'user', value: 'a' }];
+		expect(resolveRequestBody({ body: '{"a":1}', body_type: 'form', form: rows })).toBe(
+			'user=a'
+		);
+		expect(resolveRequestBody({ body: '{"a":1}', body_type: 'json', form: rows })).toBe(
+			'{"a":1}'
+		);
+		expect(resolveRequestBody({ body: 'plain', body_type: 'text', form: rows })).toBe('plain');
+		expect(resolveRequestBody({ body: '{"a":1}', body_type: 'form', form: [] })).toBe('');
+	});
 });
 
 describe('cURL import', () => {
@@ -103,6 +116,21 @@ describe('cURL import', () => {
 		);
 		expect(parsed?.url).toBe('https://example.com/login');
 		expect(parsed?.bodyType).toBe('form');
+		// Form rows are stored separately, so the text buffer stays empty.
+		expect(parsed?.body).toBe('');
+		expect(parsed?.form).toEqual([
+			{ name: 'user', value: 'a' },
+			{ name: 'pass', value: 'b' }
+		]);
+	});
+
+	it('keeps the form table independent from the text buffer when importing', () => {
+		const parsed = parseCurl(
+			`curl 'https://example.com/login' --data 'user=a&pass=b' -H 'Content-Type: application/x-www-form-urlencoded'`
+		);
+		expect(parsed?.method).toBe('POST');
+		expect(parsed?.bodyType).toBe('form');
+		expect(parsed?.body).toBe('');
 		expect(parsed?.form).toEqual([
 			{ name: 'user', value: 'a' },
 			{ name: 'pass', value: 'b' }
