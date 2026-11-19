@@ -75,7 +75,8 @@ src/
 │   ├── services/
 │   │   ├── db.ts                         # Tauri IPC + localStorage fallback
 │   │   ├── files.ts                      # native dialogs and path helpers
-│   │   ├── rest.ts                       # REST IPC wrappers + browser fallback
+│   │   ├── rest.ts                       # REST IPC wrappers + browser fallback + explorer selection persistence
+│   │   ├── rest.test.ts                  # selection restore rules and browser-storage round trip
 │   │   ├── share.ts                      # share IPC wrappers + viewer URL helpers
 │   │   └── share.test.ts
 │   ├── stores/
@@ -211,6 +212,7 @@ getEditorValue(): string;
 - Compare layout: two equal panes and a fixed 160px center column; it must fill the available height.
 - Copy feedback lasts 1.5 s. Formatter errors clear after 4.5 s.
 - `PropertyEditor.svelte` renders no column-title header row; `nameLabel`/`valueLabel` props are used only in `aria-label`, and placeholders convey the column meaning. Keep the add-row input directly under the container border.
+- Each REST tab strip (`Headers`/`Query`/`Cookies`, the body tabs, and `Response`/`Headers`/`Raw request`) ends with the `{#snippet projectTag()}` chip carrying `ml-auto`; no other element in that row may have `ml-auto`, because two auto margins split the free space and pull the format button to the middle.
 - `PropertyEditor.svelte` takes an optional `fieldHint(field, row, index) => string | null`. A non-null hint paints the cell with `--danger-bg`/`--danger-text`, sets `aria-invalid` and puts the localized reason in `title`. `index` is the row index, or `-1` for the add-row draft; the draft is validated like a row, so the name cell is checked even while it is empty. `commitDraft()` refuses an invalid draft and refuses to create a row when only the value is filled, so a broken name or value never becomes a row; the text stays on screen highlighted for correction.
 
 ## 5. Persistence, IPC, and Backend
@@ -337,7 +339,8 @@ Persistence behavior:
 - `loadEditorState` prefers SQLite, falls back to `localStorage` when Tauri returns `null` or fails.
 - Formatter/URL autosave debounce is 450 ms; Compare uses 500 ms.
 - localStorage prefixes: `devtools.editor.`, `devtools.setting.`.
-- Theme and locale are stored in `localStorage` only. `get_setting`/`set_setting` exist for future settings.
+- Theme and locale are stored in `localStorage` only.
+- Settings in `app_settings` go through `get_setting`/`set_setting` (`services/db.ts` mirrors them to `localStorage`). Keys in use: `rest.activeProject` and `rest.activeRequest` — the explorer selection restored at startup; an empty string means "no project / no request selected".
 
 ### Tauri commands
 
@@ -418,7 +421,7 @@ All commands use `#[tauri::command(rename_all = "snake_case")]`. Frontend invoke
 - **URL:** `src/routes/url/+page.svelte` → `encodeUrl`/`decodeUrl` in `formatters.ts`. Uses `encodeURI`/`decodeURI`, not `encodeURIComponent`.
 - **Compare:** `src/routes/compare/+page.svelte` → `diffTexts`/`lineOffsets`/`splitLines` in `diff.ts`; highlights are applied through `CodeMirrorEditor`.
 - **Share (desktop):** `src/routes/share/+page.svelte` → `services/share.ts` → `share.rs` + `http_server.rs`; uploads go to `shared_uploads` in `db.rs`. Draft content arrives from `XmlJsonFormatter.svelte` through the `draftShare` store (`readOnly: true`). Viewer: `src/routes/view/+page.svelte` opened via deep link or `/view?server=...&id=...`.
-- **Rest client:** `src/routes/rest/+page.svelte` → `RestExplorer.svelte` + `PropertyEditor.svelte` → `services/rest.ts` → `utils/rest.ts` → `rest.rs`. Projects/requests persist in `rest_projects`, `rest_requests`, `rest_request_properties` (headers) and `rest_request_form` (Form-encode rows). Execution goes through the Rust backend in Tauri; browser mode falls back to `fetch` and `localStorage`. cURL shell quoting (`tokenizeCurl`), imported-body de-escaping (`unescapeImportedBody`) and export quoting (`buildCurl`, `quotePosix`, `quoteWindows`) live in `utils/rest.ts` and are covered by `utils/rest.test.ts`. RFC validation lives in `utils/rest.ts` (`validateRequest`, `validateProperties`, `validateRowName`, `validateQueryUrl`); the page maps `ValidationKind` to the `rest.validation.*` keys, passes `fieldHint` to every `PropertyEditor`, and blocks send/cURL/download when issues exist.
+- **Rest client:** `src/routes/rest/+page.svelte` → `RestExplorer.svelte` + `PropertyEditor.svelte` → `services/rest.ts` → `utils/rest.ts` → `rest.rs`. Projects/requests persist in `rest_projects`, `rest_requests`, `rest_request_properties` (headers) and `rest_request_form` (Form-encode rows). Execution goes through the Rust backend in Tauri; browser mode falls back to `fetch` and `localStorage`. cURL shell quoting (`tokenizeCurl`), imported-body de-escaping (`unescapeImportedBody`) and export quoting (`buildCurl`, `quotePosix`, `quoteWindows`) live in `utils/rest.ts` and are covered by `utils/rest.test.ts`. RFC validation lives in `utils/rest.ts` (`validateRequest`, `validateProperties`, `validateRowName`, `validateQueryUrl`); the page maps `ValidationKind` to the `rest.validation.*` keys, passes `fieldHint` to every `PropertyEditor`, and blocks send/cURL/download when issues exist. Explorer selection persistence lives in `services/rest.ts` (`loadRestSelection`, `saveRestSelection`, pure `resolveRestSelection`, covered by `services/rest.test.ts`): `+page.svelte` restores it in `onMount` and writes it from an `$effect` that is gated on `hydrated` and on a non-reactive `savedSelection` key, so the restore does not rewrite identical values. The project of the open request is rendered by `{#snippet projectTag()}` at the right end of all three tab strips, with `rest.projectNone` for an unassigned request.
 - **Notifications:** `stores/toast.ts` → `Toaster.svelte` in `+layout.svelte`. `utils/clipboard.ts` emits success/failure notifications; pages report errors through `notify`/`notifyError`. Toast text is centered: the message span is `flex-1` with symmetric `px-7`, and the close button is absolutely positioned at `right-2 top-1/2`, so long messages wrap without colliding with it.
 - **Theme/i18n:** `theme.ts`, `i18n.ts`, `Navbar.svelte`, `app.html`.
 - **Loading splash:** `src/app.html` markup + inline CSS + pre-hydration label script → `utils/splash.ts` → `+layout.svelte` `onMount`. Tests in `utils/splash.test.ts`. No new storage keys: it reads `devtools.theme` and `devtools.locale`.

@@ -1,4 +1,4 @@
-import { invokeCommand, isTauriRuntime } from './db';
+import { getSetting, invokeCommand, isTauriRuntime, setSetting } from './db';
 import {
 	buildRawRequestPreview,
 	defaultContentType,
@@ -49,6 +49,12 @@ export interface RestRequestDraft {
 
 export interface RestRequestUpdate extends RestRequestDraft {
 	id: string;
+}
+
+/** What the explorer had open: a project (or the no-project view) and a request. */
+export interface RestSelection {
+	project_id: string | null;
+	request_id: string | null;
 }
 
 export interface RestExecutionInput {
@@ -316,6 +322,58 @@ export async function clearRestResponse(id: string): Promise<void> {
 			: request
 	);
 	saveLocal(state);
+}
+
+const SELECTION_PROJECT_KEY = 'rest.activeProject';
+const SELECTION_REQUEST_KEY = 'rest.activeRequest';
+
+/**
+ * Turns a stored selection into one the current data can actually show. Ids of
+ * deleted projects or requests are dropped, and the returned project always has the
+ * returned request visible in its list — the explorer never restores a row that is
+ * filtered out.
+ */
+export function resolveRestSelection(
+	projects: RestProject[],
+	requests: RestRequest[],
+	stored: RestSelection
+): RestSelection {
+	const storedProject = projects.some((project) => project.id === stored.project_id)
+		? stored.project_id
+		: null;
+	// `null` is the no-project view, which lists every request, so any row is visible.
+	const isVisible = (request: RestRequest) =>
+		storedProject === null || request.project_id === storedProject;
+
+	const storedRequest = requests.find((request) => request.id === stored.request_id) ?? null;
+	if (storedRequest) {
+		if (isVisible(storedRequest)) {
+			return { project_id: storedProject, request_id: storedRequest.id };
+		}
+		// The stored project no longer holds this request: follow the request instead
+		// of silently selecting another row.
+		const owner = projects.find((project) => project.id === storedRequest.project_id) ?? null;
+		return { project_id: owner?.id ?? null, request_id: storedRequest.id };
+	}
+
+	const visible = requests.filter(isVisible);
+	return { project_id: storedProject, request_id: visible[0]?.id ?? null };
+}
+
+export async function loadRestSelection(): Promise<RestSelection> {
+	const [project, request] = await Promise.all([
+		getSetting(SELECTION_PROJECT_KEY),
+		getSetting(SELECTION_REQUEST_KEY)
+	]);
+	return { project_id: project || null, request_id: request || null };
+}
+
+/** An absent selection is stored as an empty string so a cleared row stays cleared. */
+export async function saveRestSelection(selection: RestSelection): Promise<void> {
+	await Promise.all([
+		setSetting(SELECTION_PROJECT_KEY, selection.project_id ?? ''),
+		setSetting(SELECTION_REQUEST_KEY, selection.request_id ?? '')
+	]);
 }
 
 function normalizeUrl(raw: string): URL {
