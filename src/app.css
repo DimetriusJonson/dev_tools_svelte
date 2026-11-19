@@ -7,6 +7,8 @@
 	--panel-bg: #ffffff;
 	--panel-bg-alt: #f3f4f6;
 	--panel-bg-soft: #ffffff;
+	--row-hover: #d3e2f7;
+	--row-active: #d3e2f7;
 	--header-bg: #e5e7eb;
 	--text: #111827;
 	--text-muted: #4b5563;
@@ -33,6 +35,8 @@ html[data-theme='dark'] {
 	--panel-bg: #1e1e1e;
 	--panel-bg-alt: #242424;
 	--panel-bg-soft: #262626;
+	--row-hover: #1f467d;
+	--row-active: #1f467d;
 	--header-bg: #2a2a2a;
 	--text: #e5e5e5;
 	--text-muted: #9ca3af;

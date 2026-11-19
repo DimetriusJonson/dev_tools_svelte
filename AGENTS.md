@@ -175,6 +175,7 @@ getEditorValue(): string;
 ### Styling and themes
 
 - Use CSS variables from `src/app.css`; do not hardcode palette colors in new components when an existing variable fits.
+- List-row states use `--row-hover` and `--row-active` (light: gray hover + amber-tinted active, dark: lighter gray + amber-tinted active), not `--panel-bg-alt`, because `--panel-bg-alt` is nearly invisible on the white panel. The selected REST request row also paints an inset accent stripe (`shadow-[inset_3px_0_0_var(--accent)]`) so the selection is legible in both themes.
 - Theme is applied by toggling `.dark` and `data-theme` on `document.documentElement`.
 - Pre-hydration theme initialization is in `src/app.html`; keep it to avoid a flash of the wrong theme.
 - Theme order: `system → dark → light`; default `system`; storage key `devtools.theme`.

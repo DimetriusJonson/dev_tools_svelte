@@ -297,8 +297,8 @@
 									openRequestMenu(event, request.id);
 								}}
 								class="flex h-9 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left transition-colors duration-150 {active
-									? 'bg-[var(--panel-bg-alt)]'
-									: 'hover:bg-[var(--panel-bg-alt)]'}"
+									? 'bg-[var(--row-active)] shadow-[inset_3px_0_0_var(--accent)]'
+									: 'hover:bg-[var(--row-hover)]'}"
 								title={requestLabel(request)}
 							>
 								<span class="w-11 shrink-0 text-[11px] font-black {methodClass(request.method)}">
@@ -311,7 +311,7 @@
 							<button
 								type="button"
 								onclick={(event) => openRequestMenu(event, request.id)}
-								class="absolute right-1 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md bg-[var(--panel-bg-alt)] text-[var(--text-muted)] transition-all duration-150 hover:scale-110 hover:text-[var(--text)] {active
+								class="absolute right-1 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md bg-[var(--panel-bg)] text-[var(--text-muted)] transition-all duration-150 hover:scale-110 hover:text-[var(--text)] {active
 									? 'opacity-100'
 									: 'opacity-0 group-hover:opacity-100'}"
 								title={$t('rest.requestMenu')}
