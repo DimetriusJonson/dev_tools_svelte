@@ -203,7 +203,8 @@ getEditorValue(): string;
 ### Layout interactions
 
 - Vertical resizer uses `.resizer-v`; horizontal resizer uses `.resizer-h`; active state adds `.active`.
-- XML/JSON layout columns: source, 10px vertical resizer, 232px controls, 14px spacer, result.
+- XML/JSON layout columns: source, 10px vertical resizer, 232px controls, 14px spacer, result. The grid has a single row.
+- Both XML/JSON panels use an `h-11` header bar above the editor: the source panel holds the hidden file input, `Select file`, the current file name/status, and the `Format` file button; the output panel holds share/copy/download.
 - URL layout: source textarea, 12px horizontal resizer, centered buttons, result textarea.
 - Compare layout: two equal panes and a fixed 160px center column; it must fill the available height.
 - Copy feedback lasts 1.5 s. Formatter errors clear after 4.5 s.

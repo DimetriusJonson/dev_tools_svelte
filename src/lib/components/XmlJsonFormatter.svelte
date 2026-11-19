@@ -275,21 +275,53 @@
 <div class="relative flex h-full min-h-0 flex-col px-3 pb-3 pt-3">
 	<div
 		class="grid min-h-0 flex-1"
-		style="grid-template-columns: {leftWidth}px 10px 232px 14px minmax(260px, 1fr); grid-template-rows: minmax(0, 1fr) auto;"
+		style="grid-template-columns: {leftWidth}px 10px 232px 14px minmax(260px, 1fr); grid-template-rows: minmax(0, 1fr);"
 	>
 		<section
-			class="relative min-h-0 overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--panel-bg)] shadow-[var(--shadow)]"
+			class="relative flex min-h-0 flex-col overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--panel-bg)] shadow-[var(--shadow)]"
 			style="grid-column: 1; grid-row: 1;"
 			aria-label={$t('formatter.source')}
 		>
-			<CodeMirrorEditor
-				value={source}
-				language={mode}
-				dark={isDarkTheme}
-				placeholder={placeholderSource}
-				ariaLabel={$t('formatter.source')}
-				onchange={(next) => (source = next)}
-			/>
+			<div class="flex h-11 shrink-0 items-center gap-2 px-3">
+				<input
+					bind:this={fileInput}
+					type="file"
+					accept={mode === 'xml' ? '.xml,text/xml,application/xml' : '.json,application/json'}
+					class="hidden"
+					onchange={onFilePicked}
+				/>
+				<button
+					type="button"
+					onclick={selectFile}
+					class="flex h-8 shrink-0 items-center rounded-full bg-[var(--secondary-bg)] px-4 text-[13px] font-bold text-[var(--secondary-text)] transition-all duration-150 hover:scale-105 active:scale-95"
+				>
+					{$t('common.selectFile')}
+				</button>
+				<span
+					class="min-w-0 flex-1 truncate text-[13px] font-semibold text-[var(--text)]"
+					title={status}
+				>
+					{status || $t('common.noFile')}
+				</span>
+				<button
+					type="button"
+					onclick={formatSelectedFile}
+					disabled={busy}
+					class="flex h-8 shrink-0 items-center rounded-full bg-[var(--accent)] px-4 text-[13px] font-bold text-[var(--accent-text)] transition-all duration-150 hover:scale-105 hover:bg-[var(--accent-hover)] active:scale-95 disabled:cursor-not-allowed disabled:opacity-60"
+				>
+					{busy ? $t('common.formatting') : $t('common.format')}
+				</button>
+			</div>
+			<div class="min-h-0 flex-1">
+				<CodeMirrorEditor
+					value={source}
+					language={mode}
+					dark={isDarkTheme}
+					placeholder={placeholderSource}
+					ariaLabel={$t('formatter.source')}
+					onchange={(next) => (source = next)}
+				/>
+			</div>
 		</section>
 
 		<div
@@ -376,7 +408,7 @@
 
 		<section
 			class="relative flex min-h-0 flex-col overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--panel-bg)] shadow-[var(--shadow)]"
-			style="grid-column: 5; grid-row: 1 / span 2;"
+			style="grid-column: 5; grid-row: 1;"
 			aria-label={$t('formatter.output')}
 		>
 			<div class="flex h-11 shrink-0 items-center justify-end gap-1.5 px-3">
@@ -424,34 +456,6 @@
 				/>
 			</div>
 		</section>
-
-		<div class="mt-3 flex items-center gap-5" style="grid-column: 1 / span 3; grid-row: 2;">
-			<input
-				bind:this={fileInput}
-				type="file"
-				accept={mode === 'xml' ? '.xml,text/xml,application/xml' : '.json,application/json'}
-				class="hidden"
-				onchange={onFilePicked}
-			/>
-			<button
-				type="button"
-				onclick={selectFile}
-				class="shrink-0 rounded-full bg-[var(--secondary-bg)] px-6 py-3 text-[15px] font-bold text-[var(--secondary-text)] transition-all duration-150 hover:scale-105 active:scale-95"
-			>
-				{$t('common.selectFile')}
-			</button>
-			<span class="min-w-[220px] truncate text-[15px] font-semibold text-[var(--text)]" title={status}>
-				{status || $t('common.noFile')}
-			</span>
-			<button
-				type="button"
-				onclick={formatSelectedFile}
-				disabled={busy}
-				class="shrink-0 rounded-full bg-[var(--accent)] px-6 py-3 text-[15px] font-bold text-[var(--accent-text)] transition-all duration-150 hover:scale-105 hover:bg-[var(--accent-hover)] active:scale-95"
-			>
-				{busy ? $t('common.formatting') : $t('common.format')}
-			</button>
-		</div>
 	</div>
 
 </div>
