@@ -381,15 +381,43 @@ All commands use `#[tauri::command(rename_all = "snake_case")]`. Frontend invoke
 `ProcessResult` contains `output_path`, `bytes_in`, `bytes_out`.
 `ShareServerStatus` contains `running`, `port`, `error`. `ShareUploadResult` contains `id`, `link`, `server`, `filename`, `size`.
 
+### Tolerant XML/JSON formatting
+
+Invalid markup and invalid JSON are formatted, not rejected. Both layers run the strict path first and fall back to a byte-preserving re-indent, and the client and Rust outputs are kept identical:
+
+```ts
+// src/lib/utils/formatters.ts
+type XmlVirtual = { kind: 'text'; text: string; verbatim?: boolean }
+	| { kind: 'raw'; text: string; block: boolean }
+	| { kind: 'element'; name: string; attrs: string; children: XmlVirtual[] };
+toVirtualNode(node: Node): XmlVirtual | null;   // strict DOM → virtual tree
+serializeVirtual(node, depth, pad, block): string; // one serializer for both paths
+tokenizeXml(markup): XmlToken[];                // never validates, never throws
+buildTolerantTree(tokens): XmlVirtual[];
+prettyJsonTolerant(source, indent): string;     // structural JSON pretty printer
+```
+
+```rust
+// src-tauri/src/processor.rs
+format_xml_tolerant(source: &str, indent: usize) -> Option<String>;
+format_json_tolerant(source: &str, indent: usize) -> Option<String>;
+```
+
+- Strict XML is `DOMParser`; when it reports `parsererror`, every candidate (`source`, plus `decodeXmlEntities(source)` when unescaping is on) is tokenized and the one with the most markup tokens becomes the tolerant tree. `buildTolerantTree` drops unmatched closing tags from the stack (unclosed elements close where their parent does, so they serialize as `<a/>`) and keeps a stray `</x>` as a literal content line.
+- Tolerant text nodes carry `verbatim: true` and are emitted trimmed but **not** re-escaped: the strict path still escapes `'` to `&apos;`, the tolerant one must not double-escape `&lt;`/`&amp;` that are already entity text in the source.
+- Tolerant JSON runs on the body after any loose content: `splitJsonJunk` (client) and `split_json_junk` (Rust) put junk before the first `{`/`[` on its own line and format the body strictly when it parses; junk containing `<` is refused so HTML bodies still report an error, and junk plus a bracket body with no quoted string is refused too, so prose like `Error occurred in {module}` is not treated as JSON. The body itself is scanned by `prettyJsonTolerant`/`format_json_tolerant`: strings are copied verbatim (including their escapes), `{[`/`}`/`]`/`,` break lines with depth, `:` becomes `: `, collapsed whitespace outside strings becomes one space, real newlines start a new line, and nothing is invented for unclosed brackets. `jsonShapeScore`/`jsonTolerantCandidate` pick the unescape candidate with more structural characters.
+- Both paths still throw when there is no structure at all — plain `hello world`, or an HTML body in JSON mode — so `formatter.invalid` and the REST format/download guards keep working for content that genuinely cannot be formatted.
+- `write_xml_pretty` validates the document shape while streaming (one root, no non-whitespace text at depth 0, balanced start/end names) because `quick-xml` accepts junk before the declaration and multiple roots that `DOMParser` rejects. Rejecting there is what routes both `format_xml_content` and `stream_xml_pretty` to the tolerant path.
+
 ### File processing
 
 - `process_large_file` is async and runs `process_file` in `spawn_blocking`.
 - `write_temp` writes a temporary `.<name>.<pid>.tmp` next to the destination, then copies it to the final path and deletes the temp file.
-- XML: streaming `Reader`/`Writer::new_with_indent`, preserving declarations; text is trimmed and escaped. Whitespace-only text nodes are dropped.
-- JSON: parsed into `serde_json::Value` and pretty-serialized with a custom 2/3/4-space `PrettyFormatter`.
-- Fast streaming paths are used only when `do_format = true` and `do_unescape = false`. With unescaping enabled, the whole file is read into memory.
+- XML: streaming `Reader`/`Writer::new_with_indent`, preserving declarations; text is trimmed and escaped. Whitespace-only text nodes are dropped. A document that fails the shape check (junk outside the root, a second root, an unclosed or unmatched tag) is re-read and re-indented by `format_xml_tolerant`.
+- JSON: parsed into `serde_json::Value` and pretty-serialized with a custom 2/3/4-space `PrettyFormatter`; when parsing fails and the text looks like JSON, `format_json_tolerant` re-indents it instead.
+- Fast streaming paths are used only when `do_format = true` and `do_unescape = false`. With unescaping enabled, or when streaming cannot parse the file, the whole file is read into memory and formatted through `process_content`.
 - Escape mode reads the whole file and writes escaped content; the XML/JSON formatter UI currently passes `do_escape: false`.
-- Invalid input returns a user-facing error string; temp files are cleaned up.
+- Input with no markup and no JSON structure returns a user-facing error string; temp files are cleaned up. Malformed markup/JSON is no longer an error — see “Tolerant XML/JSON formatting”.
 - The frontend defaults the output path to `<name>.formatted.<ext>`.
 - Browser mode has no backend file processing: selecting a file loads it into the left editor and formatting stays client-side.
 
@@ -416,7 +444,7 @@ All commands use `#[tauri::command(rename_all = "snake_case")]`. Frontend invoke
 
 ## 6. Feature Implementation Map
 
-- **XML/JSON formatter:** `src/routes/{xml,json}/+page.svelte` → `XmlJsonFormatter.svelte` → `formatters.ts`. Client-side format/escape; file mode uses `processLargeFile`.
+- **XML/JSON formatter:** `src/routes/{xml,json}/+page.svelte` → `XmlJsonFormatter.svelte` → `formatters.ts`. Client-side format/escape; file mode uses `processLargeFile`. Both `formatXmlText` and `formatJsonText` fall back to the tolerant re-indent path (`tokenizeXml`/`buildTolerantTree`/`prettyJsonTolerant`) when the strict parse fails, so the `formatter.invalid` toast only appears for text with no markup or no JSON structure.
 - **URL:** `src/routes/url/+page.svelte` → `encodeUrl`/`decodeUrl` in `formatters.ts`. Uses `encodeURI`/`decodeURI`, not `encodeURIComponent`.
 - **Compare:** `src/routes/compare/+page.svelte` → `diffTexts`/`lineOffsets`/`splitLines` in `diff.ts`; highlights are applied through `CodeMirrorEditor`.
 - **Share (desktop):** `src/routes/share/+page.svelte` → `services/share.ts` → `share.rs` + `http_server.rs`; uploads go to `shared_uploads` in `db.rs`. Draft content arrives from `XmlJsonFormatter.svelte` through the `draftShare` store (`readOnly: true`). Viewer: `src/routes/view/+page.svelte` opened via deep link or `/view?server=...&id=...`.
@@ -430,7 +458,8 @@ All commands use `#[tauri::command(rename_all = "snake_case")]`. Frontend invoke
 ## 7. Known Pitfalls & Invariants
 
 - Use `serde_json`'s `preserve_order` feature to keep JSON key order stable.
-- XML text must be escaped after entity decoding; `quick-xml` `BytesText::from_escaped` expects already-escaped text. Existing tests assert `&apos;` output.
+- XML text must be escaped after entity decoding; `quick-xml` `BytesText::from_escaped` expects already-escaped text. Existing tests assert `&apos;` output. That rule applies to the strict path only: the tolerant re-indent path emits source text verbatim, because re-escaping text that already contains entities double-escapes it.
+- Malformed markup and malformed JSON are formatted, not rejected (`formatters.ts`, `processor.rs`). Keep the strict path first, keep the tolerant path free of invented closers or brackets, and keep the client and Rust implementations in step; do not widen the "no structure at all" throw into a generic catch-all success, or plain-text REST responses would stop reporting errors.
 - `quick-xml` `GeneralRef` events need explicit handling; do not silently drop character references.
 - URL encoding must use `encodeURI`/`decodeURI` to preserve URL structure. Invalid decode input should return the original string.
 - Compare LCS is capped at 4,000,000 cells and inline token diff at 250,000 cells. Over the cap, fall back to prefix/suffix or whole-line detection; do not allocate unbounded DP tables.

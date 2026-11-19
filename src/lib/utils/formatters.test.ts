@@ -9,6 +9,7 @@ import {
 	formatContent,
 	formatJsonText,
 	formatXmlText,
+	prettyJsonTolerant,
 	unescapeJson
 } from './formatters';
 
@@ -48,8 +49,39 @@ describe('JSON formatting', () => {
 		expect(unescapeJson(escaped)).toBe(value);
 	});
 
-	it('throws for invalid JSON', () => {
-		expect(() => formatJsonText('{invalid', 2)).toThrow();
+	it('formats JSON with junk text before the document', () => {
+		const messy = `aaa\n${source}`;
+		expect(formatJsonText(messy, 2)).toBe(`aaa\n${formatJsonText(source, 2)}`);
+		expect(
+			formatContent('json', messy, { indent: 4, doFormat: true, doUnescape: true }).startsWith('aaa\n{')
+		).toBe(true);
+	});
+
+	it('keeps junk as its own line when the body is broken too', () => {
+		expect(formatJsonText('aaa\n{"a":1,,}', 2)).toBe('aaa\n{\n  "a": 1,\n  ,\n}');
+		expect(formatJsonText('{"a":1}\nbbb', 2)).toBe('{\n  "a": 1\n}\nbbb');
+	});
+
+	it('re-indents JSON that does not parse instead of failing', () => {
+		expect(formatJsonText('{invalid', 2)).toBe('{\n  invalid');
+		expect(formatJsonText('{"a":1,}', 2)).toBe('{\n  "a": 1,\n}');
+		expect(formatJsonText('[{"a":[1,2]', 2)).toBe('[\n  {\n    "a": [\n      1,\n      2\n    ]');
+	});
+
+	it('keeps strings and unquoted text verbatim when re-indenting', () => {
+		expect(prettyJsonTolerant('{"a":"x, y" garbage}', 2)).toBe('{\n  "a": "x, y" garbage\n}');
+		expect(prettyJsonTolerant('some: thing, other', 2)).toBe('some: thing,\nother');
+	});
+
+	it('unescapes and re-indents a broken escaped payload', () => {
+		expect(formatJsonText('{\\"a\\":1,,}', 2, true)).toBe('{\n  "a": 1,\n  ,\n}');
+	});
+
+	it('throws for text that has no JSON structure', () => {
+		expect(() => formatJsonText('hello world', 2)).toThrow();
+		expect(() => formatJsonText('<!DOCTYPE html><html>', 2)).toThrow();
+		expect(() => formatJsonText('<html><body>{ a }</body></html>', 2)).toThrow();
+		expect(() => formatJsonText('Error occurred in {module}', 2)).toThrow();
 	});
 });
 
@@ -92,8 +124,48 @@ describe('XML formatting', () => {
 		expect(decodeXmlEntities('&lt;root&gt;&amp;&#39;&#x41;')).toBe("<root>&'A");
 	});
 
-	it('throws for invalid XML', () => {
-		expect(() => formatXmlText('<root><a></root>', 2)).toThrow();
+	it('re-indents malformed markup instead of failing', () => {
+		expect(formatXmlText('<root><a></root>', 2)).toBe('<root>\n  <a/>\n</root>');
+		expect(formatXmlText('<a><b><c>d', 2)).toBe('<a>\n  <b>\n    <c>d</c>\n  </b>\n</a>');
+		expect(formatXmlText('<!DOCTYPE html><html><body>x</body>', 2)).toBe(
+			'<!DOCTYPE html>\n<html>\n  <body>x</body>\n</html>'
+		);
+	});
+
+	it('re-indents markup with junk before the declaration', () => {
+		const messy = `aaa\n${source}`;
+		expect(formatContent('xml', messy, { indent: 4, doFormat: true, doUnescape: true })).toBe(
+			[
+				'aaa',
+				'<?xml version="1.0" encoding="UTF-8"?>',
+				'<catalog>',
+				'    <book id="bk101">',
+				'        <author>Gambardella, Matthew</author>',
+				"        <title>XML Developer's Guide</title>",
+				'    </book>',
+				'</catalog>'
+			].join('\n')
+		);
+	});
+
+	it('keeps source entities verbatim in tolerant mode', () => {
+		expect(formatXmlText('<a title="x &amp; y">a &lt; b</a><oops>', 2)).toBe(
+			'<a title="x &amp; y">a &lt; b</a>\n<oops/>'
+		);
+	});
+
+	it('keeps a stray closing tag as content', () => {
+		expect(formatXmlText('<a><b></c></a>', 2)).toBe('<a>\n  <b>\n    </c>\n  </b>\n</a>');
+	});
+
+	it('unescapes malformed markup only when the unescaped form has markup', () => {
+		expect(formatXmlText('&lt;root&gt;&lt;a&gt;1', 2, true)).toBe('<root>\n  <a>1</a>\n</root>');
+		expect(() => formatXmlText('&lt;root&gt;&lt;a&gt;1', 2, false)).toThrow();
+	});
+
+	it('throws for text that contains no markup', () => {
+		expect(() => formatXmlText('hello world', 2)).toThrow();
+		expect(() => formatContent('xml', 'hello', { indent: 2, doFormat: true, doUnescape: true })).toThrow();
 	});
 });
 
