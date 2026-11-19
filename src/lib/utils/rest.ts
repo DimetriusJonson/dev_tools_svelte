@@ -374,7 +374,14 @@ const CURL_FLAGS_IGNORED = new Set([
 ]);
 
 export function parseCurl(command: string): ParsedCurl | null {
-	const normalized = command.replace(/\\\r?\n|\^\r?\n/g, ' ');
+	let normalized = command.replace(/\\\r?\n|\^\r?\n/g, ' ');
+	// Windows commands quote arguments either plainly (`"value"`) or with a caret
+	// (`^"value^"`), and batch files double `%`. Detect curl.exe so the normalization
+	// never touches POSIX commands that keep carets or percent signs literally.
+	const firstWord = normalized.trimStart().split(/\s+/)[0] ?? '';
+	if (firstWord.toLowerCase().endsWith('curl.exe')) {
+		normalized = normalized.replace(/\^"/g, '"').replace(/%%/g, '%');
+	}
 	const tokens = tokenizeCurl(normalized);
 	if (tokens.length === 0) return null;
 
@@ -502,8 +509,20 @@ function quotePosix(value: string): string {
 	return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+/**
+ * Quotes an argument for cmd.exe. Plain double quotes delimit the argument, and the
+ * cmd.exe/CRT argv parser turns `\"` into a literal quote inside them; `^"value^"` is
+ * deliberately not used because it does not enter cmd quoting mode, so `&` would split
+ * the command. `%` stays single: interactive cmd.exe keeps it literal, which preserves
+ * percent-encoded URLs (batch files need manual `%%`, see README). Newlines inside a
+ * value would break the command, so they collapse to spaces.
+ */
 function quoteWindows(value: string): string {
-	return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+	const inner = value
+		.replace(/[\r\n]+/g, ' ')
+		.replace(/\\/g, '\\\\')
+		.replace(/"/g, '\\"');
+	return `"${inner}"`;
 }
 
 export function buildCurl(
@@ -517,15 +536,17 @@ export function buildCurl(
 ): string {
 	const quote = shell === 'posix' ? quotePosix : quoteWindows;
 	const executable = shell === 'posix' ? 'curl' : 'curl.exe';
-	const parts = [
-		executable,
-		'--request',
-		request.method.toUpperCase(),
-		...request.headers
-			.filter((header) => header.name.trim())
-			.map((header) => `-H ${quote(`${header.name}: ${header.value}`)}`),
-		...(request.body ? [`--data-raw ${quote(request.body)}`] : []),
-		quote(request.url)
-	];
-	return parts.join(' ');
+	// cmd.exe needs ` ^` before every newline so the lines are one command.
+	const joiner = shell === 'posix' ? ' ' : ' ^\r\n';
+	const methodPart = `--request ${request.method.toUpperCase()}`;
+	const headerParts = request.headers
+		.filter((header) => header.name.trim())
+		.map((header) => `-H ${quote(`${header.name}: ${header.value}`)}`);
+	const bodyParts = request.body ? [`--data-raw ${quote(request.body)}`] : [];
+	// cmd.exe is picky about the URL token position, so it goes right after curl.exe.
+	const parts =
+		shell === 'posix'
+			? [executable, methodPart, ...headerParts, ...bodyParts, quote(request.url)]
+			: [`${executable} ${quote(request.url)}`, methodPart, ...headerParts, ...bodyParts];
+	return parts.join(joiner);
 }

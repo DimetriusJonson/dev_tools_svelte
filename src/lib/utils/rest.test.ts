@@ -124,6 +124,17 @@ describe('cURL import', () => {
 		]);
 	});
 
+	it('reads caret-quoted Windows commands with batch percent signs', () => {
+		const parsed = parseCurl(
+			`curl.exe ^"http://example.com/x?a=1&b=2^" ^\r\n-H ^"X Pct: 100%%^" ^\r\n-H ^"Accept: application/json^"`
+		);
+		expect(parsed?.url).toBe('http://example.com/x?a=1&b=2');
+		expect(parsed?.headers).toEqual([
+			{ name: 'X Pct', value: '100%' },
+			{ name: 'Accept', value: 'application/json' }
+		]);
+	});
+
 	it('keeps the form table independent from the text buffer when importing', () => {
 		const parsed = parseCurl(
 			`curl 'https://example.com/login' --data 'user=a&pass=b' -H 'Content-Type: application/x-www-form-urlencoded'`
@@ -156,12 +167,56 @@ describe('cURL export', () => {
 		body: '{"a":"it\'s"}'
 	};
 
-	it('generates POSIX and Windows commands', () => {
+	it('generates POSIX commands on one line', () => {
 		expect(buildCurl(request, 'posix')).toBe(
 			`curl --request POST -H 'Accept: application/json' --data-raw '{"a":"it'\\''s"}' 'https://example.com/api'`
 		);
-		expect(buildCurl(request, 'windows')).toContain('curl.exe --request POST');
-		expect(buildCurl(request, 'windows')).toContain('"Accept: application/json"');
+	});
+
+	it('escapes Windows commands for cmd.exe', () => {
+		const command = buildCurl(
+			{
+				method: 'GET',
+				url: 'http://127.0.0.1:3005/test_json',
+				headers: [
+					{ name: 'Accept', value: 'application/json' },
+					{ name: 'Accept-Language', value: 'ru' }
+				],
+				body: ''
+			},
+			'windows'
+		);
+		expect(command).toBe(
+			'curl.exe "http://127.0.0.1:3005/test_json" ^\r\n' +
+				'--request GET ^\r\n' +
+				'-H "Accept: application/json" ^\r\n' +
+				'-H "Accept-Language: ru"'
+		);
+	});
+
+	it('escapes quotes and keeps percent signs literal in Windows arguments', () => {
+		const command = buildCurl(
+			{
+				method: 'POST',
+				url: 'https://example.com/api?q=100%',
+				headers: [{ name: 'X Note', value: 'say "hi"' }],
+				body: '{"a":1}'
+			},
+			'windows'
+		);
+		expect(command).toContain('curl.exe "https://example.com/api?q=100%"');
+		expect(command).toContain('-H "X Note: say \\"hi\\""');
+		expect(command).toContain('--data-raw "{\\"a\\":1}"');
+	});
+
+	it('reads back its own Windows command', () => {
+		const command = buildCurl(request, 'windows');
+		const parsed = parseCurl(command);
+		expect(parsed?.method).toBe('POST');
+		expect(parsed?.url).toBe('https://example.com/api');
+		expect(parsed?.headers).toEqual([{ name: 'Accept', value: 'application/json' }]);
+		expect(parsed?.bodyType).toBe('json');
+		expect(parsed?.body).toBe(`{"a":"it's"}`);
 	});
 });
 
