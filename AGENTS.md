@@ -43,6 +43,7 @@ npm run tauri build -- --no-bundle
 
 - `npm run dev` runs Vite on `http://localhost:1420` with `strictPort: true`.
 - If `npm run tauri dev` fails with "Port 1420 is already in use", a stale Vite is holding it. When Tauri runs on Windows while a WSL-side `npm run dev` is alive, WSL localhost forwarding reserves 1420 on the Windows side too; find it with `ss -ltnp | grep 1420` (WSL) and stop that `vite` process.
+- `node_modules` installed from Windows only carries the win32 rollup/esbuild binaries, so Vitest, `npm run check` and `npm run build` fail under WSL with "Cannot find module @rollup/rollup-linux-x64-gnu". Restore them without touching `package-lock.json`: `npm pack @rollup/rollup-linux-x64-gnu@<rollup version> @esbuild/linux-x64@<esbuild version>`, then `tar -xzf <tgz> -C node_modules/@rollup/rollup-linux-x64-gnu --strip-components=1` (and `-C node_modules/@esbuild/linux-x64`), then `chmod +x node_modules/@esbuild/linux-x64/bin/esbuild`. A Windows-side `npm i` deletes these directories again; `npm ci` inside WSL is the persistent fix.
 - `npm run check` runs `svelte-kit sync && svelte-check`.
 - `npm run build` writes the static frontend to `build/`.
 - Rust tests live in `src-tauri/src/*.rs` under `#[cfg(test)]`.
