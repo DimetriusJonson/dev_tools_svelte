@@ -171,7 +171,7 @@ getEditorValue(): string;
 - **No external icon libraries.** All icons live in `ICON_PATHS` in `src/lib/components/Icon.svelte`.
 - Store one or more SVG `d` strings per icon. Render only `<path d={...} />`.
 - **Never** use empty fragments `<>...</>` inside `<svg>`.
-- Current names include `copy`, `download`, `share`, `chevronDown`, `sun`, `moon`, `monitor`, `arrowRight`, `check`, `swap`, `file`, `compare`, `server`, `sparkles`, `globe`, `more`, `plus`, `trash`, `clipboard`, `braces`, `alignLeft`, `eraser`, `eye`, `play`, `folder`, `close`.
+- Every name in `ICON_PATHS` is rendered by at least one component. Current names: `copy`, `download`, `share`, `chevronDown`, `sun`, `moon`, `monitor`, `arrowRight`, `check`, `swap`, `file`, `server`, `sparkles`, `globe`, `more`, `plus`, `trash`, `clipboard`, `braces`, `alignLeft`, `eraser`, `eye`, `close`. Do not park unused icons in the dictionary — remove the entry when the last usage goes away.
 
 ### Styling and themes
 
