@@ -23,22 +23,22 @@ function splitFragment(url: string): { withoutFragment: string; fragment: string
 	return { withoutFragment: url.slice(0, index), fragment: url.slice(index) };
 }
 
-export function parseQuery(url: string): RestProperty[] {
+function querySegments(url: string): string[] {
 	const { withoutFragment } = splitFragment(url);
 	const index = withoutFragment.indexOf('?');
 	if (index < 0) return [];
 	const query = withoutFragment.slice(index + 1);
 	if (!query) return [];
+	return query.split('&').filter((segment) => segment.length > 0);
+}
 
-	return query
-		.split('&')
-		.filter((segment) => segment.length > 0)
-		.map((segment) => {
-			const separator = segment.indexOf('=');
-			const rawName = separator < 0 ? segment : segment.slice(0, separator);
-			const rawValue = separator < 0 ? '' : segment.slice(separator + 1);
-			return { name: decodeQueryPart(rawName), value: decodeQueryPart(rawValue) };
-		});
+export function parseQuery(url: string): RestProperty[] {
+	return querySegments(url).map((segment) => {
+		const separator = segment.indexOf('=');
+		const rawName = separator < 0 ? segment : segment.slice(0, separator);
+		const rawValue = separator < 0 ? '' : segment.slice(separator + 1);
+		return { name: decodeQueryPart(rawName), value: decodeQueryPart(rawValue) };
+	});
 }
 
 function decodeQueryPart(value: string): string {
@@ -197,6 +197,211 @@ export function defaultContentType(bodyType: BodyType): string {
 		default:
 			return 'text/plain';
 	}
+}
+
+/** Which property table a value belongs to; each one has its own grammar. */
+export type PropertyKind = 'header' | 'cookie' | 'query' | 'form';
+
+export type ValidationKind =
+	| 'header-name'
+	| 'header-value'
+	| 'cookie-name'
+	| 'cookie-value'
+	| 'query-param'
+	| 'form-param';
+
+export interface ValidationIssue {
+	kind: ValidationKind;
+	field: 'name' | 'value';
+	/** Property name for display; it falls back to the offending text. */
+	name: string;
+	/** The offending character in a displayable form, such as `␍` or `U+0000`. */
+	char: string;
+	/** Row index within the table or the query string; absent for a single cell. */
+	row?: number;
+}
+
+// RFC 9110 §5.6.2 token. Header names and cookie names are both tokens.
+const TOKEN_PATTERN = /^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/;
+const TOKEN_CHARACTER = /[A-Za-z0-9!#$%&'*+\-.^_`|~]/;
+// RFC 9110 field-value keeps OWS (SP and HTAB) and printable characters. CR, LF
+// and the rest of the control range would let a value break out of the framing.
+const CONTROL_CHARACTER = /[\u0000-\u0008\u000A-\u001F\u007F]/;
+// RFC 3986 §3.4: query = *( pchar / "/" / "?" ), and pchar already covers
+// unreserved characters, sub-delims, ":" and "@". Percent-escapes are checked apart.
+const QUERY_CHARACTER = /[A-Za-z0-9\-._~!$&'()*+,;=:@/?]/;
+const PERCENT_ESCAPE = /^[0-9A-Fa-f]{2}/;
+// RFC 6265 §4.1.1 cookie-value: printable ASCII without DQUOTE, comma, semicolon
+// or backslash, because those delimit or quote the Cookie header.
+const COOKIE_VALUE_CHARACTER = /[\u0021\u0023-\u002B\u002D-\u003A\u003C-\u005B\u005D-\u007E]/;
+
+export function describeCharacter(character: string): string {
+	switch (character) {
+		case '\r':
+			return '␍';
+		case '\n':
+			return '␊';
+		case '\t':
+			return '␉';
+		case ' ':
+			return '␠';
+		default: {
+			const code = character.codePointAt(0) ?? 0;
+			if (code < 0x20 || code === 0x7f) {
+				return `U+${code.toString(16).toUpperCase().padStart(4, '0')}`;
+			}
+			return character;
+		}
+	}
+}
+
+function firstDisallowed(text: string, allowed: RegExp): string {
+	for (const character of text) {
+		if (!allowed.test(character)) return character;
+	}
+	return '';
+}
+
+// A percent sign is legal only as the start of a complete `%XX` escape, so the
+// scan skips the two hexadecimal digits with it instead of judging them apart.
+function firstQueryViolation(text: string): string {
+	for (let index = 0; index < text.length; index += 1) {
+		const character = text[index];
+		if (character === '%') {
+			if (!PERCENT_ESCAPE.test(text.slice(index + 1))) return '%';
+			index += 2;
+			continue;
+		}
+		if (!QUERY_CHARACTER.test(character)) return character;
+	}
+	return '';
+}
+
+function makeIssue(
+	kind: ValidationKind,
+	field: 'name' | 'value',
+	text: string,
+	character: string
+): ValidationIssue {
+	return { kind, field, name: text, char: describeCharacter(character) };
+}
+
+export function validateHeaderName(name: string): ValidationIssue | null {
+	if (!name) return null;
+	if (!TOKEN_PATTERN.test(name)) {
+		return makeIssue('header-name', 'name', name, firstDisallowed(name, TOKEN_CHARACTER));
+	}
+	return null;
+}
+
+export function validateHeaderValue(value: string): ValidationIssue | null {
+	if (!value) return null;
+	const match = CONTROL_CHARACTER.exec(value);
+	if (match) return makeIssue('header-value', 'value', value, match[0]);
+	return null;
+}
+
+export function validateCookieName(name: string): ValidationIssue | null {
+	if (!name) return null;
+	if (!TOKEN_PATTERN.test(name)) {
+		return makeIssue('cookie-name', 'name', name, firstDisallowed(name, TOKEN_CHARACTER));
+	}
+	return null;
+}
+
+export function validateCookieValue(value: string): ValidationIssue | null {
+	if (!value) return null;
+	const character = firstDisallowed(value, COOKIE_VALUE_CHARACTER);
+	if (character) return makeIssue('cookie-value', 'value', value, character);
+	return null;
+}
+
+// Query rows are written into the URL verbatim, so they must already be valid.
+function validateQueryText(text: string, field: 'name' | 'value'): ValidationIssue | null {
+	if (!text) return null;
+	const character = firstQueryViolation(text);
+	if (character) return makeIssue('query-param', field, text, character);
+	return null;
+}
+
+// Form rows are percent-encoded when the request is sent, so only characters that
+// cannot survive the message framing are rejected here.
+function validateFormText(text: string, field: 'name' | 'value'): ValidationIssue | null {
+	if (!text) return null;
+	const match = CONTROL_CHARACTER.exec(text);
+	if (match) return makeIssue('form-param', field, text, match[0]);
+	return null;
+}
+
+/** Validates one cell of a property table. Blank cells are not errors. */
+export function validatePropertyField(
+	kind: PropertyKind,
+	field: 'name' | 'value',
+	text: string
+): ValidationIssue | null {
+	if (!text) return null;
+	switch (kind) {
+		case 'header':
+			return field === 'name' ? validateHeaderName(text) : validateHeaderValue(text);
+		case 'cookie':
+			return field === 'name' ? validateCookieName(text) : validateCookieValue(text);
+		case 'query':
+			return validateQueryText(text, field);
+		case 'form':
+			return validateFormText(text, field);
+	}
+}
+
+function validatePropertyRow(
+	kind: PropertyKind,
+	row: RestProperty,
+	index: number
+): ValidationIssue[] {
+	const issues: ValidationIssue[] = [];
+	for (const field of ['name', 'value'] as const) {
+		const issue = validatePropertyField(kind, field, row[field]);
+		if (issue) issues.push({ ...issue, name: row.name.trim() || row[field], row: index });
+	}
+	return issues;
+}
+
+export function validateProperties(kind: PropertyKind, rows: RestProperty[]): ValidationIssue[] {
+	return rows.flatMap((row, index) => validatePropertyRow(kind, row, index));
+}
+
+/**
+ * Query rows are shown decoded, so the raw query string of the URL is what has to
+ * follow RFC 3986. Issues carry the row index they belong to.
+ */
+export function validateQueryUrl(url: string): ValidationIssue[] {
+	return querySegments(url)
+		.map((segment, index): ValidationIssue | null => {
+			const separator = segment.indexOf('=');
+			const rawName = separator < 0 ? segment : segment.slice(0, separator);
+			const rawValue = separator < 0 ? '' : segment.slice(separator + 1);
+			const issue = validateQueryText(rawName, 'name') ?? validateQueryText(rawValue, 'value');
+			if (!issue) return null;
+			return { ...issue, name: rawName || rawValue, row: index };
+		})
+		.filter((issue): issue is ValidationIssue => issue !== null);
+}
+
+export interface RequestValidationSource {
+	url: string;
+	headers: RestProperty[];
+	form: RestProperty[];
+	body_type: BodyType;
+}
+
+/** Everything that goes on the wire: headers, cookies, query and active form rows. */
+export function validateRequest(request: RequestValidationSource): ValidationIssue[] {
+	return [
+		...validateProperties('header', request.headers),
+		...validateProperties('cookie', parseCookies(request.headers)),
+		...validateQueryUrl(request.url),
+		// Form rows only reach the request when the Form-encode tab is selected.
+		...(request.body_type === 'form' ? validateProperties('form', request.form) : [])
+	];
 }
 
 function normalizeUrl(raw: string): URL | null {

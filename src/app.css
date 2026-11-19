@@ -27,6 +27,9 @@
 	--shadow: 0 18px 40px -24px rgba(17, 24, 39, 0.35);
 	--toast-bg: #1f2937;
 	--toast-text: #ffffff;
+	--danger: #dc2626;
+	--danger-bg: #fee2e2;
+	--danger-text: #b91c1c;
 }
 
 html.dark,
@@ -55,6 +58,9 @@ html[data-theme='dark'] {
 	--shadow: 0 24px 60px -30px rgba(0, 0, 0, 0.85);
 	--toast-bg: #f3f4f6;
 	--toast-text: #111827;
+	--danger: #f87171;
+	--danger-bg: #4c1d1d;
+	--danger-text: #fca5a5;
 }
 
 html,

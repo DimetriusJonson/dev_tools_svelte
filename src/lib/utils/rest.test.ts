@@ -4,6 +4,7 @@ import {
 	buildCurl,
 	buildQuery,
 	buildRawRequestPreview,
+	describeCharacter,
 	detectLanguageFromHeaders,
 	encodeForm,
 	formatRestSize,
@@ -14,7 +15,15 @@ import {
 	parseQuery,
 	resolveRequestBody,
 	setCookieRows,
-	updateUrlQuery
+	updateUrlQuery,
+	validateCookieName,
+	validateCookieValue,
+	validateHeaderName,
+	validateHeaderValue,
+	validateProperties,
+	validatePropertyField,
+	validateQueryUrl,
+	validateRequest
 } from './rest';
 
 describe('query parameters', () => {
@@ -253,5 +262,103 @@ describe('response helpers', () => {
 		expect(raw).toContain('content-type: application/json');
 		expect(raw).toContain('content-length: 7');
 		expect(raw.endsWith('\r\n\r\n{"a":1}')).toBe(true);
+	});
+});
+
+describe('header and parameter validation', () => {
+	it('accepts RFC 9110 token names and rejects separators', () => {
+		expect(validateHeaderName('X-Custom-Header_1')).toBeNull();
+		expect(validateHeaderName('Content-Type')).toBeNull();
+		expect(validateHeaderName('')).toBeNull();
+		expect(validateHeaderName('Con tent')).toMatchObject({ kind: 'header-name', char: '␠' });
+		expect(validateHeaderName('X-Forwarded::For')).toMatchObject({ kind: 'header-name', char: ':' });
+		expect(validateHeaderName('Host\nName')).toMatchObject({ kind: 'header-name', char: '␊' });
+	});
+
+	it('rejects CR, LF and control characters in header values and keeps HTAB', () => {
+		expect(validateHeaderValue('application/json; charset=utf-8')).toBeNull();
+		expect(validateHeaderValue('a\tb')).toBeNull();
+		expect(validateHeaderValue('a\r\nX-Injected: 1')).toMatchObject({
+			kind: 'header-value',
+			char: '␍'
+		});
+		expect(validateHeaderValue('a\u0000b')).toMatchObject({ kind: 'header-value', char: 'U+0000' });
+	});
+
+	it('describes the offending character for the message', () => {
+		expect(describeCharacter('\r')).toBe('␍');
+		expect(describeCharacter(' ')).toBe('␠');
+		expect(describeCharacter('\u001f')).toBe('U+001F');
+		expect(describeCharacter('x')).toBe('x');
+	});
+
+	it('checks cookie names and values against RFC 6265', () => {
+		expect(validateCookieName('sid')).toBeNull();
+		expect(validateCookieName('sid one')).toMatchObject({ kind: 'cookie-name', char: '␠' });
+		expect(validateCookieValue('a=b%20c')).toBeNull();
+		expect(validateCookieValue('a,b')).toMatchObject({ kind: 'cookie-value', char: ',' });
+		expect(validateCookieValue('a b')).toMatchObject({ kind: 'cookie-value', char: '␠' });
+		expect(validateCookieValue('a"b')).toMatchObject({ kind: 'cookie-value', char: '"' });
+		expect(
+			validateProperties('cookie', parseCookies([{ name: 'Cookie', value: 'my cookie=1' }]))
+		).toEqual([expect.objectContaining({ kind: 'cookie-name', row: 0 })]);
+	});
+
+	it('validates the raw query string, not the decoded rows', () => {
+		expect(validateQueryUrl('https://example.com/?a=1&b=2')).toEqual([]);
+		expect(validateQueryUrl('https://example.com/?q=hello%20world')).toEqual([]);
+		expect(validateQueryUrl('https://example.com/?q=hello world')).toEqual([
+			{ kind: 'query-param', field: 'value', name: 'q', char: '␠', row: 0 }
+		]);
+		expect(validateQueryUrl('https://example.com/?a b=1')).toEqual([
+			{ kind: 'query-param', field: 'name', name: 'a b', char: '␠', row: 0 }
+		]);
+		expect(validateQueryUrl('https://example.com/?a=1&b=%zz')).toEqual([
+			{ kind: 'query-param', field: 'value', name: 'b', char: '%', row: 1 }
+		]);
+		expect(validateQueryUrl('https://example.com/?a=1#frag ment')).toEqual([]);
+	});
+
+	it('only rejects form fields that cannot survive the wire', () => {
+		expect(validatePropertyField('form', 'name', 'user name')).toBeNull();
+		expect(validatePropertyField('form', 'value', 'a b & c')).toBeNull();
+		expect(validatePropertyField('form', 'value', 'a\nb')).toMatchObject({
+			kind: 'form-param',
+			char: '␊'
+		});
+		expect(validatePropertyField('query', 'name', 'a b')).toMatchObject({
+			kind: 'query-param',
+			char: '␠'
+		});
+	});
+
+	it('collects every problem that blocks a request', () => {
+		const issues = validateRequest({
+			url: 'https://example.com/?a b=1',
+			headers: [
+				{ name: 'Content Type', value: 'ok' },
+				{ name: 'Cookie', value: 'sid=1; other=2 3' }
+			],
+			form: [{ name: 'x', value: 'a\nb' }],
+			body_type: 'json'
+		});
+		expect(issues.map((issue) => issue.kind)).toEqual([
+			'header-name',
+			'cookie-value',
+			'query-param'
+		]);
+	});
+
+	it('validates form rows only when the Form-encode tab is active', () => {
+		const request = {
+			url: 'https://example.com/',
+			headers: [],
+			form: [{ name: 'x', value: 'a\nb' }],
+			body_type: 'json' as const
+		};
+		expect(validateRequest(request)).toEqual([]);
+		expect(validateRequest({ ...request, body_type: 'form' })).toEqual([
+			{ kind: 'form-param', field: 'value', name: 'x', char: '␊', row: 0 }
+		]);
 	});
 });

@@ -46,8 +46,16 @@
 		resolveRequestBody,
 		setCookieRows,
 		updateUrlQuery,
+		validateProperties,
+		validatePropertyField,
+		validateQueryUrl,
+		validateRequest,
 		type CurlShell,
-		type RestProperty
+		type PropertyKind,
+		type RequestValidationSource,
+		type RestProperty,
+		type ValidationIssue,
+		type ValidationKind
 	} from '$lib/utils/rest';
 
 	type RequestTab = 'headers' | 'query' | 'cookies';
@@ -262,6 +270,58 @@
 		patchActive({ form: rows });
 	}
 
+	const VALIDATION_KEYS: Record<ValidationKind, string> = {
+		'header-name': 'rest.validation.headerName',
+		'header-value': 'rest.validation.headerValue',
+		'cookie-name': 'rest.validation.cookieName',
+		'cookie-value': 'rest.validation.cookieValue',
+		'query-param': 'rest.validation.queryParam',
+		'form-param': 'rest.validation.formParam'
+	};
+
+	function validationMessage(issue: ValidationIssue): string {
+		return $t(VALIDATION_KEYS[issue.kind], { name: issue.name || '—', char: issue.char });
+	}
+
+	/** Cell-level hints for PropertyEditor: a localized reason, or `null` when valid. */
+	function hintFor(kind: PropertyKind) {
+		return (field: 'name' | 'value', row: RestProperty, index: number): string | null => {
+			// Query rows are decoded, so the raw URL decides which row is at fault.
+			if (kind === 'query') {
+				const issue = validateQueryUrl(active?.url ?? '').find(
+					(item) => item.row === index && item.field === field
+				);
+				return issue ? validationMessage(issue) : null;
+			}
+			const issue = validatePropertyField(kind, field, row[field]);
+			if (!issue) return null;
+			return validationMessage({ ...issue, name: row.name.trim() || row[field], row: index });
+		};
+	}
+
+	/** Message that explains why a request cannot be sent, or `null` when it is valid. */
+	function validationFailure(request: RequestValidationSource): string | null {
+		const issues = validateRequest(request);
+		if (!issues.length) return null;
+		return $t('rest.validation.blocked', { detail: validationMessage(issues[0]) });
+	}
+
+	const headerIssues = $derived(active ? validateProperties('header', active.headers) : []);
+	const queryIssues = $derived(active ? validateQueryUrl(active.url) : []);
+	const cookieIssues = $derived(
+		active ? validateProperties('cookie', parseCookies(active.headers)) : []
+	);
+	const formIssues = $derived(
+		active && active.body_type === 'form' ? validateProperties('form', active.form) : []
+	);
+	// The URL field is the source of the query rows, so it carries the same error.
+	const urlClass = $derived(
+		'h-11 min-w-0 flex-1 rounded-lg border bg-[var(--panel-bg)] px-3 font-mono text-sm text-[var(--text)] outline-none transition-colors duration-150 placeholder:text-[var(--text-muted)] disabled:opacity-50 ' +
+			(queryIssues.length
+				? 'border-[var(--danger)] focus-visible:ring-2 focus-visible:ring-[var(--danger)]'
+				: 'border-[var(--border-strong)] hover:border-[var(--accent)] focus-visible:ring-2 focus-visible:ring-[var(--accent)]')
+	);
+
 	function formatBody(): void {
 		if (!active) return;
 		if (active.body_type !== 'json' && active.body_type !== 'xml') return;
@@ -309,6 +369,12 @@
 		if (!active) return;
 		if (!active.url.trim()) {
 			notify($t('rest.urlRequired'), 'error');
+			return;
+		}
+		// Rows that break RFC 9110/3986 never reach the network; they stay highlighted.
+		const failure = validationFailure(active);
+		if (failure) {
+			notify(failure, 'error');
 			return;
 		}
 
@@ -542,6 +608,11 @@
 	async function copyCurl(id: string, shell: CurlShell): Promise<void> {
 		const request = requests.find((item) => item.id === id);
 		if (!request) return;
+		const failure = validationFailure(request);
+		if (failure) {
+			notify(failure, 'error');
+			return;
+		}
 		const body = resolveRequestBody(request);
 		const command = buildCurl(
 			{
@@ -557,6 +628,11 @@
 
 	async function copyRawCurl(shell: CurlShell): Promise<void> {
 		if (!active) return;
+		const failure = validationFailure(active);
+		if (failure) {
+			notify(failure, 'error');
+			return;
+		}
 		const command = buildCurl(
 			{
 				method: active.method,
@@ -571,6 +647,11 @@
 
 	async function downloadResponse(): Promise<void> {
 		if (!active) return;
+		const failure = validationFailure(active);
+		if (failure) {
+			notify(failure, 'error');
+			return;
+		}
 		const name = attachmentName || 'response.bin';
 		const input = {
 			method: active.method,
@@ -770,8 +851,10 @@
 				spellcheck="false"
 				autocapitalize="off"
 				autocorrect="off"
-				class="h-11 min-w-0 flex-1 rounded-lg border border-[var(--border-strong)] bg-[var(--panel-bg)] px-3 font-mono text-sm text-[var(--text)] outline-none transition-colors duration-150 placeholder:text-[var(--text-muted)] hover:border-[var(--accent)] focus-visible:ring-2 focus-visible:ring-[var(--accent)] disabled:opacity-50"
+				class={urlClass}
 				aria-label={$t('rest.url')}
+				aria-invalid={queryIssues.length > 0}
+				title={queryIssues.length ? validationMessage(queryIssues[0]) : undefined}
 			/>
 
 			<button
@@ -830,32 +913,50 @@
 							<button
 								type="button"
 								onclick={() => (requestTab = 'headers')}
-								class="rounded-md px-3 py-1.5 text-sm font-bold transition-colors duration-150 {requestTab ===
+								class="flex items-center gap-1 rounded-md px-3 py-1.5 text-sm font-bold transition-colors duration-150 {requestTab ===
 								'headers'
 									? 'bg-[var(--panel-bg-alt)] text-[var(--text)]'
 									: 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
 							>
 								{$t('rest.tabHeaders')}
+								{#if headerIssues.length}
+									<span
+										class="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--danger)]"
+										title={validationMessage(headerIssues[0])}
+									></span>
+								{/if}
 							</button>
 							<button
 								type="button"
 								onclick={() => (requestTab = 'query')}
-								class="rounded-md px-3 py-1.5 text-sm font-bold transition-colors duration-150 {requestTab ===
+								class="flex items-center gap-1 rounded-md px-3 py-1.5 text-sm font-bold transition-colors duration-150 {requestTab ===
 								'query'
 									? 'bg-[var(--panel-bg-alt)] text-[var(--text)]'
 									: 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
 							>
 								{$t('rest.tabQuery')}
+								{#if queryIssues.length}
+									<span
+										class="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--danger)]"
+										title={validationMessage(queryIssues[0])}
+									></span>
+								{/if}
 							</button>
 							<button
 								type="button"
 								onclick={() => (requestTab = 'cookies')}
-								class="rounded-md px-3 py-1.5 text-sm font-bold transition-colors duration-150 {requestTab ===
+								class="flex items-center gap-1 rounded-md px-3 py-1.5 text-sm font-bold transition-colors duration-150 {requestTab ===
 								'cookies'
 									? 'bg-[var(--panel-bg-alt)] text-[var(--text)]'
 									: 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
 							>
 								{$t('rest.tabCookies')}
+								{#if cookieIssues.length}
+									<span
+										class="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--danger)]"
+										title={validationMessage(cookieIssues[0])}
+									></span>
+								{/if}
 							</button>
 						</div>
 						<div class="min-h-0 flex-1 p-2">
@@ -863,6 +964,7 @@
 								<PropertyEditor
 									rows={active.headers}
 									onchange={onHeadersChange}
+									fieldHint={hintFor('header')}
 									nameLabel={$t('rest.headerName')}
 									valueLabel={$t('rest.headerValue')}
 									namePlaceholder={$t('rest.headerName')}
@@ -875,6 +977,7 @@
 								<PropertyEditor
 									rows={queryRows}
 									onchange={onQueryChange}
+									fieldHint={hintFor('query')}
 									nameLabel={$t('rest.paramName')}
 									valueLabel={$t('rest.paramValue')}
 									namePlaceholder={$t('rest.paramName')}
@@ -886,6 +989,7 @@
 								<PropertyEditor
 									rows={cookieRows}
 									onchange={onCookiesChange}
+									fieldHint={hintFor('cookie')}
 									nameLabel={$t('rest.cookieName')}
 									valueLabel={$t('rest.cookieValue')}
 									namePlaceholder={$t('rest.cookieName')}
@@ -914,12 +1018,18 @@
 								<button
 									type="button"
 									onclick={() => setBodyType(bodyType)}
-									class="rounded-md px-3 py-1.5 text-sm font-bold transition-colors duration-150 {active.body_type ===
+									class="flex items-center gap-1 rounded-md px-3 py-1.5 text-sm font-bold transition-colors duration-150 {active.body_type ===
 									bodyType
 										? 'bg-[var(--panel-bg-alt)] text-[var(--text)]'
 										: 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
 								>
 									{$t(`rest.body.${bodyType}`)}
+									{#if bodyType === 'form' && formIssues.length}
+										<span
+											class="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--danger)]"
+											title={validationMessage(formIssues[0])}
+										></span>
+									{/if}
 								</button>
 							{/each}
 							{#if active.body_type === 'json' || active.body_type === 'xml'}
@@ -944,6 +1054,7 @@
 									<PropertyEditor
 										rows={active.form}
 										onchange={onFormChange}
+										fieldHint={hintFor('form')}
 										nameLabel={$t('rest.paramName')}
 										valueLabel={$t('rest.paramValue')}
 										namePlaceholder={$t('rest.paramName')}

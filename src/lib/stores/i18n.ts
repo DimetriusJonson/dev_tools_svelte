@@ -145,6 +145,19 @@ const en: Dictionary = {
 	'rest.cookieValue': 'Cookie value',
 	'rest.addProperty': 'Add',
 	'rest.removeProperty': 'Remove',
+	'rest.validation.headerName':
+		"Header name “{name}” is invalid. RFC 9110 allows letters, digits and !#$%&'*+-.^_`|~ only ({char})",
+	'rest.validation.headerValue':
+		'Header “{name}” has an invalid value: line breaks and control characters are not allowed ({char})',
+	'rest.validation.cookieName':
+		"Cookie name “{name}” is invalid. RFC 6265 allows letters, digits and !#$%&'*+-.^_`|~ only ({char})",
+	'rest.validation.cookieValue':
+		'Cookie “{name}” has an invalid value: no spaces, commas, semicolons, quotes, backslashes or control characters ({char})',
+	'rest.validation.queryParam':
+		'Query parameter “{name}” has a character RFC 3986 does not allow ({char}). Percent-encode it as %XX',
+	'rest.validation.formParam':
+		'Form field “{name}” has a control character ({char}). Percent-encode it as %XX',
+	'rest.validation.blocked': 'Request not sent: {detail}',
 	'rest.body': 'Request body',
 	'rest.bodyPlaceholder': 'Enter the request body…',
 	'rest.body.json': 'JSON',
@@ -322,6 +335,19 @@ const ru: Dictionary = {
 	'rest.cookieValue': 'Значение Cookie',
 	'rest.addProperty': 'Добавить',
 	'rest.removeProperty': 'Удалить',
+	'rest.validation.headerName':
+		"Имя заголовка «{name}» недопустимо. RFC 9110 разрешает только буквы, цифры и !#$%&'*+-.^_`|~ ({char})",
+	'rest.validation.headerValue':
+		'Значение заголовка «{name}» недопустимо: переводы строк и управляющие символы запрещены ({char})',
+	'rest.validation.cookieName':
+		"Имя cookie «{name}» недопустимо. RFC 6265 разрешает только буквы, цифры и !#$%&'*+-.^_`|~ ({char})",
+	'rest.validation.cookieValue':
+		'Значение cookie «{name}» недопустимо: без пробелов, запятых, точек с запятой, кавычек, обратного слэша и управляющих символов ({char})',
+	'rest.validation.queryParam':
+		'Параметр query «{name}» содержит символ, недопустимый по RFC 3986 ({char}). Закодируйте его через %XX',
+	'rest.validation.formParam':
+		'Поле формы «{name}» содержит управляющий символ ({char}). Закодируйте его через %XX',
+	'rest.validation.blocked': 'Запрос не отправлен: {detail}',
 	'rest.body': 'Тело запроса',
 	'rest.bodyPlaceholder': 'Введите тело запроса…',
 	'rest.body.json': 'JSON',
