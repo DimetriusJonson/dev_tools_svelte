@@ -157,6 +157,8 @@ const en: Dictionary = {
 		'Query parameter “{name}” has a character RFC 3986 does not allow ({char}). Percent-encode it as %XX',
 	'rest.validation.formParam':
 		'Form field “{name}” has a control character ({char}). Percent-encode it as %XX',
+	'rest.validation.nameRequired':
+		'A name is required: a row without a name is not sent. Fill in the name or remove the row.',
 	'rest.validation.blocked': 'Request not sent: {detail}',
 	'rest.body': 'Request body',
 	'rest.bodyPlaceholder': 'Enter the request body…',
@@ -347,6 +349,8 @@ const ru: Dictionary = {
 		'Параметр query «{name}» содержит символ, недопустимый по RFC 3986 ({char}). Закодируйте его через %XX',
 	'rest.validation.formParam':
 		'Поле формы «{name}» содержит управляющий символ ({char}). Закодируйте его через %XX',
+	'rest.validation.nameRequired':
+		'Название обязательно: строка без названия не отправляется. Заполните название или удалите строку.',
 	'rest.validation.blocked': 'Запрос не отправлен: {detail}',
 	'rest.body': 'Тело запроса',
 	'rest.bodyPlaceholder': 'Введите тело запроса…',

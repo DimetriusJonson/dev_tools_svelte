@@ -200,7 +200,7 @@ getEditorValue(): string;
 - Locale storage key: `devtools.locale`; default is `ru` when `navigator.language` starts with `ru`, otherwise `en`.
 - Keep `document.documentElement.lang` in sync with the selected locale. `src/app.html` sets `lang` and the localized splash/document title from the stored locale before the bundle loads; the layout then owns the real title (`app.title` + version).
 - The window/tab title comes from the `app.title` key plus the app version (`$app/environment` `version`, set from `package.json` via `kit.version.name` in `svelte.config.js`). `+layout.svelte` updates `document.title` and the Tauri window title through `getCurrentWindow().setTitle()` on locale change.
-- REST validation messages live in `rest.validation.headerName|headerValue|cookieName|cookieValue|queryParam|formParam|blocked`. They interpolate `{name}` and `{char}`; `+page.svelte` maps each `ValidationKind` to its key through `VALIDATION_KEYS`, and `blocked` wraps the first issue as `{detail}`. The en strings use double quotes because the RFC token character list contains an apostrophe.
+- REST validation messages live in `rest.validation.headerName|headerValue|cookieName|cookieValue|queryParam|formParam|nameRequired|blocked`. They interpolate `{name}` and `{char}`; `+page.svelte` maps each `ValidationKind` to its key through `VALIDATION_KEYS`, and `blocked` wraps the first issue as `{detail}`. `nameRequired` has no placeholders and renders with `name: '—'` and an empty `char`. The en strings use double quotes because the RFC token character list contains an apostrophe.
 
 ### Layout interactions
 
@@ -211,7 +211,7 @@ getEditorValue(): string;
 - Compare layout: two equal panes and a fixed 160px center column; it must fill the available height.
 - Copy feedback lasts 1.5 s. Formatter errors clear after 4.5 s.
 - `PropertyEditor.svelte` renders no column-title header row; `nameLabel`/`valueLabel` props are used only in `aria-label`, and placeholders convey the column meaning. Keep the add-row input directly under the container border.
-- `PropertyEditor.svelte` takes an optional `fieldHint(field, row, index) => string | null`. A non-null hint paints the cell with `--danger-bg`/`--danger-text`, sets `aria-invalid` and puts the localized reason in `title`. `commitDraft()` refuses an invalid draft, so a broken name or value never becomes a row; the text stays on screen highlighted for correction.
+- `PropertyEditor.svelte` takes an optional `fieldHint(field, row, index) => string | null`. A non-null hint paints the cell with `--danger-bg`/`--danger-text`, sets `aria-invalid` and puts the localized reason in `title`. `index` is the row index, or `-1` for the add-row draft; the draft is validated like a row, so the name cell is checked even while it is empty. `commitDraft()` refuses an invalid draft and refuses to create a row when only the value is filled, so a broken name or value never becomes a row; the text stays on screen highlighted for correction.
 
 ## 5. Persistence, IPC, and Backend
 
@@ -292,6 +292,7 @@ Rest storage:
 
 - `rest_requests.body` is only the JSON/XML/Text editor buffer. Form-encode rows are never serialized into it.
 - `rest_request_form` holds the Form-encode tab table (`name`, `value`, `sort_order`) independently of the text buffer; `write_form` drops rows with a blank name, like header rows.
+- Unnamed header and Form-encode rows are therefore not persisted and vanish after a restart, while unnamed `Query`/`Cookies` values survive in the URL and in the `Cookie` header as `=value`. Both are reported as `name-required`, so nothing disappears without a visible reason.
 - `init_schema` migrates legacy `rest_request_properties` rows with `kind = 'form'` into `rest_request_form` and deletes them. Only `kind = 'header'` is written today.
 - `rest.rs::resolve_body` (client mirrors: `utils/rest.ts::resolveRequestBody`, `services/rest.ts::wireBody`) gives form rows priority when `body_type = 'form'`: the wire body is `encode_form_urlencoded(form)`, the default content type is `application/x-www-form-urlencoded`, and the text buffer is ignored and left untouched.
 
@@ -301,13 +302,14 @@ REST validation (client-side only, `utils/rest.ts`):
 type PropertyKind = 'header' | 'cookie' | 'query' | 'form';
 type ValidationKind =
   | 'header-name' | 'header-value' | 'cookie-name'
-  | 'cookie-value' | 'query-param' | 'form-param';
+  | 'cookie-value' | 'query-param' | 'form-param' | 'name-required';
 
 interface ValidationIssue { kind; field: 'name' | 'value'; name; char; row?: number }
 
 validateHeaderName(name) / validateHeaderValue(value)
 validateCookieName(name) / validateCookieValue(value)
 validatePropertyField(kind, field, text)      // single cell, blank text is never an issue
+validateRowName(row)                          // value present but name blank ⇒ 'name-required'
 validateProperties(kind, rows)                // table, issues carry `row`
 validateQueryUrl(url)                         // raw query segments, issues carry `row`
 validateRequest({ url, headers, form, body_type })  // everything that goes on the wire
@@ -318,7 +320,9 @@ describeCharacter(character)                  // ␍ ␊ ␉ ␠ or U+XXXX
 - Cookie values follow RFC 6265 §4.1.1: printable ASCII without DQUOTE, comma, semicolon or backslash. Cookie rows are derived from the `Cookie` header, so they are validated with the cookie rules, not the generic header rules.
 - `validateQueryUrl` inspects the **raw** query segments of the URL, not the decoded rows, because the URL field can hold hand-typed text. `buildQuery` percent-encodes every table row, so query rows typed in the table cannot produce an invalid URL and are intentionally not checked cell-by-cell; the row index comes from `querySegments`, which `parseQuery` shares so hint indices line up.
 - `%` counts as valid only as a complete `%XX` escape: `firstQueryViolation` consumes the escape with the percent sign, so `hello%20world` passes and `%zz` fails with `char: '%'`.
-- Form rows are only checked for control characters (`validateFormText`) because `encodeFormUrlencoded` percent-encodes them on send; spaces, `&` and `=` in form values are intentional.
+- To keep a value editable when its name is cleared, `buildQuery` and `buildCookieHeader` emit `=value` for a name-less row (and drop a row with neither name nor value), while `parseCookies` no longer filters name-less pairs. `validateQueryUrl` reports `?=value` as `name-required` — a bare flag like `?debug` and a bare `?=` are legal and unreported.
+- Form rows are only checked for control characters (`validateFormText`) because `encodeForm`/`encode_form_urlencoded` percent-encode them on send; spaces, `&` and `=` in form values are intentional. Both encoders skip blank-name rows, which is why a name-less row is reported instead of sent.
+- A row with a value but a blank name is `name-required`: `write_headers`/`write_form` drop such rows and `parseCookies` used to discard them, so the value would silently never be sent. A row with an empty name **and** empty value is noise and stays unreported, and an empty value with a name is legal. `validatePropertyField` deliberately keeps reporting nothing for blank text so the add-row draft is not flagged while typing; the row-level check belongs to `validateRowName`, which `validatePropertyRow` runs first and `/rest` also applies to the draft inside `hintFor`.
 - `validateRequest` collects header rows, cookie rows via `parseCookies`, `validateQueryUrl(url)` and form rows only when `body_type === 'form'`. `/rest` blocks `runRequest`, `copyCurl`, `copyRawCurl` and `downloadResponse` with `rest.validation.blocked` when it returns any issue, paints a red dot on the `Headers`/`Query`/`Cookies`/`Form-encode` tabs, and marks the URL input when the query is invalid.
 
 Editor keys in use:
@@ -414,7 +418,7 @@ All commands use `#[tauri::command(rename_all = "snake_case")]`. Frontend invoke
 - **URL:** `src/routes/url/+page.svelte` → `encodeUrl`/`decodeUrl` in `formatters.ts`. Uses `encodeURI`/`decodeURI`, not `encodeURIComponent`.
 - **Compare:** `src/routes/compare/+page.svelte` → `diffTexts`/`lineOffsets`/`splitLines` in `diff.ts`; highlights are applied through `CodeMirrorEditor`.
 - **Share (desktop):** `src/routes/share/+page.svelte` → `services/share.ts` → `share.rs` + `http_server.rs`; uploads go to `shared_uploads` in `db.rs`. Draft content arrives from `XmlJsonFormatter.svelte` through the `draftShare` store (`readOnly: true`). Viewer: `src/routes/view/+page.svelte` opened via deep link or `/view?server=...&id=...`.
-- **Rest client:** `src/routes/rest/+page.svelte` → `RestExplorer.svelte` + `PropertyEditor.svelte` → `services/rest.ts` → `utils/rest.ts` → `rest.rs`. Projects/requests persist in `rest_projects`, `rest_requests`, `rest_request_properties` (headers) and `rest_request_form` (Form-encode rows). Execution goes through the Rust backend in Tauri; browser mode falls back to `fetch` and `localStorage`. RFC validation lives in `utils/rest.ts` (`validateRequest`, `validateProperties`, `validateQueryUrl`); the page maps `ValidationKind` to the `rest.validation.*` keys, passes `fieldHint` to every `PropertyEditor`, and blocks send/cURL/download when issues exist.
+- **Rest client:** `src/routes/rest/+page.svelte` → `RestExplorer.svelte` + `PropertyEditor.svelte` → `services/rest.ts` → `utils/rest.ts` → `rest.rs`. Projects/requests persist in `rest_projects`, `rest_requests`, `rest_request_properties` (headers) and `rest_request_form` (Form-encode rows). Execution goes through the Rust backend in Tauri; browser mode falls back to `fetch` and `localStorage`. RFC validation lives in `utils/rest.ts` (`validateRequest`, `validateProperties`, `validateRowName`, `validateQueryUrl`); the page maps `ValidationKind` to the `rest.validation.*` keys, passes `fieldHint` to every `PropertyEditor`, and blocks send/cURL/download when issues exist.
 - **Notifications:** `stores/toast.ts` → `Toaster.svelte` in `+layout.svelte`. `utils/clipboard.ts` emits success/failure notifications; pages report errors through `notify`/`notifyError`. Toast text is centered: the message span is `flex-1` with symmetric `px-7`, and the close button is absolutely positioned at `right-2 top-1/2`, so long messages wrap without colliding with it.
 - **Theme/i18n:** `theme.ts`, `i18n.ts`, `Navbar.svelte`, `app.html`.
 - **Loading splash:** `src/app.html` markup + inline CSS + pre-hydration label script → `utils/splash.ts` → `+layout.svelte` `onMount`. Tests in `utils/splash.test.ts`. No new storage keys: it reads `devtools.theme` and `devtools.locale`.
@@ -442,8 +446,9 @@ All commands use `#[tauri::command(rename_all = "snake_case")]`. Frontend invoke
 - New Tauri APIs may require capability updates; check `capabilities/default.json`.
 - REST command functions are Rust `cmd_*` wrappers with `#[tauri::command(rename = "...", rename_all = "snake_case")]` because the DB helpers already use the public names. Keep the invoke names unchanged when adding commands.
 - Query rows are derived from the URL and Cookies rows are derived from the `Cookie` header. Do not store them twice; edit the URL or header through the shared helpers in `utils/rest.ts`.
-- Validation must follow the wire format, not the UI text: query hints read the raw query segments (`validateQueryUrl`) because table rows are re-encoded by `buildQuery`, and form rows only reject control characters because `encodeFormUrlencoded` escapes the rest. Validating decoded query rows would flag perfectly good URLs (`a%20b` decodes to `a b`), and validating form values against RFC 3986 would reject input the client encodes correctly.
+- Validation must follow the wire format, not the UI text: query hints read the raw query segments (`validateQueryUrl`) because table rows are re-encoded by `buildQuery`, and form rows only reject control characters because `encodeForm` escapes the rest. Validating decoded query rows would flag perfectly good URLs (`a%20b` decodes to `a b`), and validating form values against RFC 3986 would reject input the client encodes correctly.
 - Keep send, cURL copy/export and response download gated by the same `validateRequest` result; a request that cannot be sent must not be exported as a cURL command either.
+- Do not let a row's name become optional in the UI: `write_headers`/`write_form` drop blank-name rows and `parseCookies` must keep name-less pairs. Dropping the value instead of keeping `=value` would delete what the user typed the moment they cleared the name; keep `validatePropertyField` silent on blank text so typing a long value before the name is not flagged, and use `validateRowName`/`validateRequest` for the mandatory-name rule.
 - Form-encode rows are the only source of truth for `application/x-www-form-urlencoded` bodies and live in `rest_request_form`. Do not serialize them into `rest_requests.body`, and do not parse the text buffer into rows or overwrite the buffer when switching body tabs. `prepare_call` calls `resolve_body`, so the table wins whenever `body_type = 'form'`; the client uses `resolveRequestBody` for the raw preview and cURL export, and `execute_rest_request`/`download_rest_response` receive `form` alongside `body`.
 - `buildCurl` Windows output is cmd.exe-safe: arguments use plain `"..."` quotes (caret `^"value^"` is **not** used — cmd does not enter quoting mode with it, so `&` would split the command), inner quotes become `\"`, backslashes double, `%` stays single for interactive cmd.exe paste (batch files require manual `%%`, documented in README), values collapse newlines to spaces, the URL sits right after `curl.exe` on the first line, and parts join with `' ^\r\n'` so cmd.exe runs the multi-line command as one line. `parseCurl` detects the `curl.exe` flavor, strips caret quotes and collapses `%%`, so both the current plain-quote format and legacy/foreign caret-quoted commands round-trip; POSIX carets and percent signs stay untouched.
 - The REST Save checkbox applies to text responses only. Attachments and binary responses must be fetched with `download_rest_response` instead of being loaded into the editor.

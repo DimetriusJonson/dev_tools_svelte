@@ -362,3 +362,72 @@ describe('header and parameter validation', () => {
 		]);
 	});
 });
+
+describe('required parameter names', () => {
+	it('flags a value that has no name and ignores a fully empty row', () => {
+		expect(validateProperties('header', [{ name: '', value: 'application/json' }])).toEqual([
+			{ kind: 'name-required', field: 'name', name: '', char: '', row: 0 }
+		]);
+		expect(validateProperties('form', [{ name: '   ', value: 'x' }])).toEqual([
+			{ kind: 'name-required', field: 'name', name: '', char: '', row: 0 }
+		]);
+		expect(validateProperties('header', [{ name: '', value: '' }])).toEqual([]);
+		// A name with an empty value is a legal header field.
+		expect(validateProperties('header', [{ name: 'X-Note', value: '' }])).toEqual([]);
+		// Cell-level checks stay lenient so the add-row draft is never flagged.
+		expect(validatePropertyField('header', 'name', '')).toBeNull();
+	});
+
+	it('keeps a value when the query name is cleared and reports it', () => {
+		expect(buildQuery([{ name: '', value: '1' }])).toBe('=1');
+		expect(buildQuery([{ name: '', value: '  ' }, { name: '', value: '' }])).toBe('');
+		expect(updateUrlQuery('https://example.com/a?x=1', [{ name: '', value: '1' }])).toBe(
+			'https://example.com/a?=1'
+		);
+		expect(validateQueryUrl('https://example.com/a?=1')).toEqual([
+			{ kind: 'name-required', field: 'name', name: '', char: '', row: 0 }
+		]);
+		// A bare flag with no `=` is a legal name-less value pair, not a missing name.
+		expect(validateQueryUrl('https://example.com/a?debug')).toEqual([]);
+		expect(validateQueryUrl('https://example.com/a?=')).toEqual([]);
+	});
+
+	it('keeps a value when the cookie name is cleared and reports it', () => {
+		expect(buildCookieHeader([{ name: '', value: 'abc' }])).toBe('=abc');
+		expect(buildCookieHeader([{ name: '', value: '' }])).toBe('');
+		expect(parseCookies([{ name: 'Cookie', value: 'aid=1; =2' }])).toEqual([
+			{ name: 'aid', value: '1' },
+			{ name: '', value: '2' }
+		]);
+		expect(validateProperties('cookie', parseCookies([{ name: 'Cookie', value: 'aid=1; =2' }]))).toEqual(
+			[{ kind: 'name-required', field: 'name', name: '', char: '', row: 1 }]
+		);
+		expect(setCookieRows([{ name: 'Accept', value: '*/*' }], [{ name: '', value: 'abc' }])).toEqual([
+			{ name: 'Accept', value: '*/*' },
+			{ name: 'Cookie', value: '=abc' }
+		]);
+	});
+
+	it('blocks the request when a name is missing', () => {
+		const base = {
+			url: 'https://example.com/',
+			headers: [{ name: '', value: 'application/json' }],
+			form: [],
+			body_type: 'json' as const
+		};
+		expect(validateRequest(base).map((issue) => issue.kind)).toEqual(['name-required']);
+		expect(
+			validateRequest({ ...base, headers: [], url: 'https://example.com/?=1' }).map(
+				(issue) => issue.kind
+			)
+		).toEqual(['name-required']);
+		expect(
+			validateRequest({
+				...base,
+				headers: [],
+				form: [{ name: '', value: 'x' }],
+				body_type: 'form'
+			}).map((issue) => issue.kind)
+		).toEqual(['name-required']);
+	});
+});

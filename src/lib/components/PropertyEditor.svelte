@@ -23,7 +23,10 @@
 		addLabel?: string;
 		removeLabel?: string;
 		headerAutocomplete?: boolean;
-		/** Localized reason a cell is invalid, or `null` when it follows the standard. */
+		/**
+		 * Localized reason a cell is invalid, or `null` when it follows the standard.
+		 * `index` is the row index, or `-1` for the add-row draft.
+		 */
 		fieldHint?: (field: 'name' | 'value', row: RestProperty, index: number) => string | null;
 	} = $props();
 
@@ -69,16 +72,15 @@
 	);
 
 	// The draft is checked before it can be stored, so an invalid name or value
-	// never becomes a row and never reaches the request.
+	// never becomes a row and never reaches the request. The name cell is checked
+	// even while it is empty: a value without a name would be an unusable row.
 	const draftNameHint = $derived(
-		draftName
-			? (fieldHint?.('name', { name: draftName, value: draftValue }, rows.length) ?? null)
+		draftName || draftValue
+			? (fieldHint?.('name', { name: draftName, value: draftValue }, -1) ?? null)
 			: null
 	);
 	const draftValueHint = $derived(
-		draftValue
-			? (fieldHint?.('value', { name: draftName, value: draftValue }, rows.length) ?? null)
-			: null
+		draftValue ? (fieldHint?.('value', { name: draftName, value: draftValue }, -1) ?? null) : null
 	);
 
 	function hint(field: 'name' | 'value', row: RestProperty, index: number): string | null {
@@ -105,6 +107,9 @@
 	function commitDraft(): void {
 		const name = draftName.trim();
 		if (!name) {
+			// A value without a name stays in the draft: dropping it would throw away
+			// what was typed, and the name cell already explains what is missing.
+			if (draftValue.trim()) return;
 			draftName = '';
 			draftValue = '';
 			return;

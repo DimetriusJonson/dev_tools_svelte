@@ -50,6 +50,7 @@
 		validatePropertyField,
 		validateQueryUrl,
 		validateRequest,
+		validateRowName,
 		type CurlShell,
 		type PropertyKind,
 		type RequestValidationSource,
@@ -276,7 +277,8 @@
 		'cookie-name': 'rest.validation.cookieName',
 		'cookie-value': 'rest.validation.cookieValue',
 		'query-param': 'rest.validation.queryParam',
-		'form-param': 'rest.validation.formParam'
+		'form-param': 'rest.validation.formParam',
+		'name-required': 'rest.validation.nameRequired'
 	};
 
 	function validationMessage(issue: ValidationIssue): string {
@@ -286,6 +288,13 @@
 	/** Cell-level hints for PropertyEditor: a localized reason, or `null` when valid. */
 	function hintFor(kind: PropertyKind) {
 		return (field: 'name' | 'value', row: RestProperty, index: number): string | null => {
+			// A name is mandatory: the row is dropped on persistence and on the wire,
+			// so a value with a blank name would silently never be sent. This also
+			// covers the add-row draft (`index === -1`).
+			if (field === 'name') {
+				const missing = validateRowName(row);
+				if (missing) return validationMessage({ ...missing, row: index });
+			}
 			// Query rows are decoded, so the raw URL decides which row is at fault.
 			if (kind === 'query') {
 				const issue = validateQueryUrl(active?.url ?? '').find(

@@ -51,7 +51,10 @@ function decodeQueryPart(value: string): string {
 
 export function buildQuery(rows: RestProperty[]): string {
 	return rows
-		.filter((row) => row.name.trim().length > 0)
+		// A row with no name and no value is noise and goes away; a value with no
+		// name is kept as `=value` so editing the name does not delete the value.
+		// `validateQueryUrl` reports it, and the request stays blocked until it is fixed.
+		.filter((row) => row.name.trim().length > 0 || row.value.trim().length > 0)
 		.map(
 			(row) =>
 				`${encodeURIComponent(row.name)}=${encodeURIComponent(row.value)}`
@@ -86,13 +89,15 @@ export function parseCookies(headers: RestProperty[]): RestProperty[] {
 				name: segment.slice(0, separator).trim(),
 				value: segment.slice(separator + 1).trim()
 			};
-		})
-		.filter((row) => row.name.length > 0);
+		});
 }
 
 export function buildCookieHeader(rows: RestProperty[]): string {
 	return rows
-		.filter((row) => row.name.trim().length > 0)
+		// A cookie with no name and no value is noise; a value with no name is kept
+		// as `=value` so clearing the name does not delete the value, and
+		// `validateProperties('cookie', …)` reports it as a missing name.
+		.filter((row) => row.name.trim().length > 0 || row.value.trim().length > 0)
 		.map((row) => `${row.name.trim()}=${row.value}`)
 		.join('; ');
 }
@@ -208,7 +213,8 @@ export type ValidationKind =
 	| 'cookie-name'
 	| 'cookie-value'
 	| 'query-param'
-	| 'form-param';
+	| 'form-param'
+	| 'name-required';
 
 export interface ValidationIssue {
 	kind: ValidationKind;
@@ -352,12 +358,25 @@ export function validatePropertyField(
 	}
 }
 
+/**
+ * A row needs a name to reach the request at all: header rows, cookie rows and
+ * form rows with a blank name are dropped on persistence and on the wire, so the
+ * value in such a row silently disappears. A fully empty row is harmless noise and
+ * is not reported, while a value without a name is.
+ */
+export function validateRowName(row: RestProperty): ValidationIssue | null {
+	if (row.name.trim() || !row.value.trim()) return null;
+	return { kind: 'name-required', field: 'name', name: '', char: '' };
+}
+
 function validatePropertyRow(
 	kind: PropertyKind,
 	row: RestProperty,
 	index: number
 ): ValidationIssue[] {
 	const issues: ValidationIssue[] = [];
+	const missingName = validateRowName(row);
+	if (missingName) issues.push({ ...missingName, row: index });
 	for (const field of ['name', 'value'] as const) {
 		const issue = validatePropertyField(kind, field, row[field]);
 		if (issue) issues.push({ ...issue, name: row.name.trim() || row[field], row: index });
@@ -379,6 +398,11 @@ export function validateQueryUrl(url: string): ValidationIssue[] {
 			const separator = segment.indexOf('=');
 			const rawName = separator < 0 ? segment : segment.slice(0, separator);
 			const rawValue = separator < 0 ? '' : segment.slice(separator + 1);
+			// `?=1` is syntactically legal RFC 3986 but carries no name, so the
+			// table row cannot be edited into anything sensible.
+			if (!rawName && rawValue) {
+				return { kind: 'name-required', field: 'name', name: '', char: '', row: index };
+			}
 			const issue = validateQueryText(rawName, 'name') ?? validateQueryText(rawValue, 'value');
 			if (!issue) return null;
 			return { ...issue, name: rawName || rawValue, row: index };
