@@ -388,7 +388,7 @@
 			<button
 				type="button"
 				onclick={execute}
-				class="flex h-12 w-full items-center justify-center rounded-full bg-[var(--accent)] text-[var(--accent-text)] transition-all duration-150 hover:scale-105 hover:bg-[var(--accent-hover)] active:scale-95"
+				class="flex h-10 w-full items-center justify-center rounded-full bg-[var(--accent)] text-[var(--accent-text)] transition-all duration-150 hover:scale-105 hover:bg-[var(--accent-hover)] active:scale-95"
 				aria-label={$t('formatter.format')}
 				title={$t('formatter.format')}
 			>
@@ -398,7 +398,7 @@
 			<button
 				type="button"
 				onclick={escapeSource}
-				class="h-12 w-full rounded-full bg-[var(--accent)] px-3 text-[15px] font-bold text-[var(--accent-text)] transition-all duration-150 hover:scale-105 hover:bg-[var(--accent-hover)] active:scale-95"
+				class="h-10 w-full rounded-full bg-[var(--accent)] px-3 text-[15px] font-bold text-[var(--accent-text)] transition-all duration-150 hover:scale-105 hover:bg-[var(--accent-hover)] active:scale-95"
 			>
 				{$t('common.escape')}
 			</button>
