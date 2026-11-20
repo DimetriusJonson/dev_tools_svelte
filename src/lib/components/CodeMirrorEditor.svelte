@@ -154,10 +154,7 @@
 				}),
 				highlightField,
 				languageCompartment.of(languageExtension(language)),
-				readonlyCompartment.of([
-					EditorState.readOnly.of(readonly),
-					EditorView.editable.of(!readonly)
-				]),
+		        EditorState.readOnly.of(readonly),
 				placeholderCompartment.of(cmPlaceholder(placeholder)),
 				themeCompartment.of(themeExtension(dark)),
 				EditorView.updateListener.of((update) => {
