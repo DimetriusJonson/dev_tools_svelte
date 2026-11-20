@@ -77,6 +77,10 @@ describe('JSON formatting', () => {
 		expect(formatJsonText('{\\"a\\":1,,}', 2, true)).toBe('{\n  "a": 1,\n  ,\n}');
 	});
 
+	it('re-indents the candidate with more structural characters', () => {
+		expect(formatJsonText('{&quot;a}', 2, true)).toBe('{\n  "a}');
+	});
+
 	it('throws for text that has no JSON structure', () => {
 		expect(() => formatJsonText('hello world', 2)).toThrow();
 		expect(() => formatJsonText('<!DOCTYPE html><html>', 2)).toThrow();

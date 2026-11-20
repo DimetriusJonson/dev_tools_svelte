@@ -269,14 +269,6 @@ fn parse_json_value(source: &str, do_unescape: bool) -> Result<Value, String> {
     Err(last_error)
 }
 
-/** Structural characters decide which unescape candidate is the better layout source. */
-fn json_shape_score(source: &str) -> usize {
-    source
-        .chars()
-        .filter(|character| matches!(character, '{' | '}' | '[' | ']' | '"'))
-        .count()
-}
-
 /// Splits loose content before the first JSON bracket from the JSON body itself, so `aaa`
 /// followed by a JSON document still gets formatted. Markup junk (`<`) is refused: an HTML
 /// body has no JSON structure to re-indent. Mirrors `splitJsonJunk`.
@@ -307,6 +299,17 @@ fn with_json_junk(junk: &str, body: String) -> String {
     }
 }
 
+/** Structural characters decide which unescape candidate is the better layout source. */
+fn json_shape_score(source: &str) -> usize {
+    source
+        .chars()
+        .filter(|character| matches!(character, '{' | '}' | '[' | ']' | '"'))
+        .count()
+}
+
+/// Picks the candidate the tolerant layout runs on, mirroring `jsonTolerantCandidate`: only
+/// candidates that split into junk + body count, and the last candidate with the highest
+/// structural score wins a tie.
 fn json_tolerant_candidate(candidates: &[String]) -> Option<&String> {
     let mut best: Option<&String> = None;
     let mut best_score = 0usize;
@@ -369,7 +372,10 @@ fn format_json_content(
     };
 
     let candidates = json_unescape_candidates(source, do_unescape);
-    // Junk around a real JSON document is kept as its own line; a broken body is re-indented.
+
+    // Junk around a real JSON document is kept as its own line, and every candidate gets a
+    // strict parse before any tolerant layout is allowed. This is the order `formatJsonText`
+    // uses, so the same input formats the same way in the browser and in `process_large_file`.
     for candidate in &candidates {
         let Some((junk, body)) = split_json_junk(candidate) else {
             continue;
@@ -377,12 +383,21 @@ fn format_json_content(
         if let Ok(value) = parse_json_value(body, do_unescape) {
             return Ok(with_json_junk(junk, serialize_json_value(&value, indent)?));
         }
-        if let Some(formatted) = format_json_tolerant(body, indent) {
-            return Ok(with_json_junk(junk, formatted));
-        }
     }
 
-    Err(strict_error)
+    // Nothing parses: re-indent the candidate with the most structural characters, like
+    // `jsonTolerantCandidate` on the client. The selector only scores candidates that split,
+    // so the guards below cannot fire for a selected candidate.
+    let Some(candidate) = json_tolerant_candidate(&candidates) else {
+        return Err(strict_error);
+    };
+    let Some((junk, body)) = split_json_junk(candidate) else {
+        return Err(strict_error);
+    };
+    let Some(formatted) = format_json_tolerant(body, indent) else {
+        return Err(strict_error);
+    };
+    Ok(with_json_junk(junk, formatted))
 }
 
 fn general_ref_text(reference: &BytesRef<'_>) -> String {
@@ -1121,6 +1136,16 @@ mod tests {
         assert_eq!(
             process_content("[{\"a\":[1,2]", "json", 2, true, false, false).expect("unclosed"),
             "[\n  {\n    \"a\": [\n      1,\n      2\n    ]"
+        );
+    }
+
+    #[test]
+    fn re_indents_the_candidate_with_more_structural_characters() {
+        // The decoded candidate `{"a}` scores more structural characters than the entity-text
+        // source, so it is the layout source. `formatters.test.ts` asserts the same output.
+        assert_eq!(
+            process_content("{&quot;a}", "json", 2, true, true, false).expect("tolerant json"),
+            "{\n  \"a}"
         );
     }
 
