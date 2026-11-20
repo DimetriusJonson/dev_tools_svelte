@@ -176,7 +176,9 @@ getEditorValue(): string;
 ### Styling and themes
 
 - Use CSS variables from `src/app.css`; do not hardcode palette colors in new components when an existing variable fits.
-- List-row states use `--row-hover` and `--row-active` (light: gray hover + amber-tinted active, dark: lighter gray + amber-tinted active), not `--panel-bg-alt`, because `--panel-bg-alt` is nearly invisible on the white panel. The selected REST request row also paints an inset accent stripe (`shadow-[inset_3px_0_0_var(--accent)]`) so the selection is legible in both themes. The REST row `...` actions button is rendered only for the selected request (`{#if active}`), never revealed by hover; right-click still opens the menu on any row.
+- List-row states read `--row-hover` and `--row-active` as neutral grays (`#f3f4f6` light, `#242424` dark). They currently hold the same values as `--panel-bg-alt`, but keep them as separate tokens so row states can be retinted without repainting every panel; do not read row states straight from `--panel-bg-alt` in components.
+- Row selection is not a tinted background: `--row-hover` and `--row-active` are the same gray in both themes, and the selected REST request row is identified by the inset accent stripe (`shadow-[inset_3px_0_0_var(--accent)]`), which is what keeps the selection legible. Amber (`--accent`) is reserved for buttons, the accent stripe and the method colors, not for row backgrounds.
+- The REST row `...` actions button is rendered only for the selected request (`{#if active}`), never revealed by hover; right-click still opens the menu on any row.
 - Theme is applied by toggling `.dark` and `data-theme` on `document.documentElement`.
 - Pre-hydration theme initialization is in `src/app.html`; keep it to avoid a flash of the wrong theme.
 - Theme order: `system → dark → light`; default `system`; storage key `devtools.theme`.
@@ -208,6 +210,7 @@ getEditorValue(): string;
 - Vertical resizer uses `.resizer-v`; horizontal resizer uses `.resizer-h`; active state adds `.active`.
 - XML/JSON layout columns: source, 10px vertical resizer, 232px controls, 14px spacer, result. The grid has a single row.
 - Both XML/JSON panels use an `h-11` header bar above the editor: the source panel holds the hidden file input, `Select file`, the current file name/status, and the `Format` file button; the output panel holds share/copy/download.
+- The XML/JSON controls column action buttons are `h-10` rounded accent pills (`Format` and `Escape`); keep both the same height so the column stays balanced.
 - URL layout: source textarea, 12px horizontal resizer, centered buttons, result textarea.
 - Compare layout: two equal panes and a fixed 160px center column; it must fill the available height.
 - Copy feedback lasts 1.5 s. Formatter errors clear after 4.5 s.
