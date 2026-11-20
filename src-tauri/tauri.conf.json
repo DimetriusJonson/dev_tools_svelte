@@ -30,6 +30,7 @@
 	"bundle": {
 		"active": true,
 		"targets": "all",
+		"createUpdaterArtifacts": true,
 		"category": "DeveloperTool",
 		"shortDescription": "XML, JSON and URL tools for web developers",
 		"longDescription": "Format and unescape XML/JSON, encode and decode URLs, and compare text snippets in a fast native desktop app.",
@@ -43,6 +44,16 @@
 		]
 	},
 	"plugins": {
+		"updater": {
+			"pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU3RTlGOUIwRTY4MDNCMTkKUldRWk80RG1zUG5wNTJPOWRTU3FFOE1pNzU5VHRSZWdad2VPUzBoMzF1TDBqRy9GNnp6c0pldWwK",
+			"endpoints": [
+				"https://github.com/DimetriusJonson/dev_tools_svelte/releases/latest/download/latest.json"
+			],
+			"requireSignedVersion": true,
+			"windows": {
+				"installMode": "passive"
+			}
+		},
 		"deep-link": {
 			"desktop": {
 				"schemes": [

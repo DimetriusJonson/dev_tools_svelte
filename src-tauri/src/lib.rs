@@ -3,6 +3,7 @@ mod http_server;
 mod processor;
 mod rest;
 mod share;
+mod update;
 
 use std::sync::{Arc, Mutex};
 
@@ -57,6 +58,7 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
@@ -129,7 +131,8 @@ pub fn run() {
             rest::cmd_clear_rest_response,
             rest::cmd_execute_rest_request,
             rest::cmd_cancel_rest_request,
-            rest::cmd_download_rest_response
+            rest::cmd_download_rest_response,
+            update::restart_app
         ])
         .build(tauri::generate_context!())
         .expect("error while building the Tauri application")

@@ -23,6 +23,7 @@
 		"@tauri-apps/api": "^2.2.0",
 		"@tauri-apps/plugin-clipboard-manager": "^2.5.0",
 		"@tauri-apps/plugin-dialog": "^2.2.0",
+		"@tauri-apps/plugin-updater": "^2.14.1",
 		"codemirror": "^6.0.1"
 	},
 	"devDependencies": {

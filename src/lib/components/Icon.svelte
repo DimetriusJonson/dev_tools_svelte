@@ -78,7 +78,9 @@
 			'M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z',
 			'M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z'
 		],
-		close: ['M6 6l12 12', 'M18 6L6 18']
+		close: ['M6 6l12 12', 'M18 6L6 18'],
+		refresh: ['M21 12a9 9 0 1 1-2.64-6.36', 'M21 3v6h-6'],
+		update: ['M12 3v10', 'm7 9 5 5 5-5', 'M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4']
 	} satisfies Record<string, string[]>;
 
 	export type IconName = keyof typeof ICON_PATHS;

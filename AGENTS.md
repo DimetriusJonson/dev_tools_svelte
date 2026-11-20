@@ -16,9 +16,9 @@
 - **Editors:** CodeMirror 6 (`basicSetup`, JSON/XML language packages, one-dark highlight style).
 - **Database:** SQLite via `rusqlite` with `bundled` feature. Not `tauri-plugin-sql`.
 - **File processing:** `quick-xml 0.42`, `serde_json` with `preserve_order`.
-- **Tauri plugins:** `dialog`, `single-instance`, `deep-link`, `clipboard-manager`.
+- **Tauri plugins:** `dialog`, `single-instance`, `deep-link`, `clipboard-manager`, `updater`.
 - **Testing:** Vitest + jsdom for frontend; Rust unit tests for DB, processing, and tray mapping.
-- **Current status:** XML, JSON, URL, Compare, Share (desktop only), Rest client (including `multipart/form-data` bodies with fields and file parts), themes, i18n, persistence, notifications, tray, single-instance, deep links, and large-file processing are implemented.
+- **Current status:** XML, JSON, URL, Compare, Share (desktop only), Rest client (including `multipart/form-data` bodies with fields and file parts), themes, i18n, persistence, notifications, tray, single-instance, deep links, updates (desktop only: startup + navbar check, banner with install), and large-file processing are implemented. The updater's install path is unverified until a signed release with a `latest.json` asset is published.
 
 ## 2. Commands & Definition of Done
 
@@ -39,6 +39,8 @@ Useful variants:
 ```bash
 npm run test:watch
 npm run tauri build -- --no-bundle
+npx tauri signer generate -w ~/.tauri/webdev-useful-tools.key --ci
+TAURI_SIGNING_PRIVATE_KEY=~/.tauri/webdev-useful-tools.key npm run tauri build
 ```
 
 - `npm run dev` runs Vite on `http://localhost:1420` with `strictPort: true`.
@@ -46,6 +48,7 @@ npm run tauri build -- --no-bundle
 - `node_modules` installed from Windows only carries the win32 rollup/esbuild binaries, so Vitest, `npm run check` and `npm run build` fail under WSL with "Cannot find module @rollup/rollup-linux-x64-gnu". Restore them without touching `package-lock.json`: `npm pack @rollup/rollup-linux-x64-gnu@<rollup version> @esbuild/linux-x64@<esbuild version>`, then `tar -xzf <tgz> -C node_modules/@rollup/rollup-linux-x64-gnu --strip-components=1` (and `-C node_modules/@esbuild/linux-x64`), then `chmod +x node_modules/@esbuild/linux-x64/bin/esbuild`. A Windows-side `npm i` deletes these directories again; `npm ci` inside WSL is the persistent fix.
 - `npm run check` runs `svelte-kit sync && svelte-check`.
 - `npm run build` writes the static frontend to `build/`.
+- `npm run tauri build` also produces updater artifacts because `bundle.createUpdaterArtifacts` is `true`; that requires `TAURI_SIGNING_PRIVATE_KEY` (and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` if the key has a password). Ship `latest.json` plus the installer and its `.sig` as release assets, or every check answers "not found".
 - Rust tests live in `src-tauri/src/*.rs` under `#[cfg(test)]`.
 
 Definition of Done for a code change:
@@ -67,11 +70,12 @@ src/
 │   ├── components/
 │   │   ├── CodeMirrorEditor.svelte       # reusable CodeMirror wrapper + highlight API
 │   │   ├── Icon.svelte                   # inline SVG path dictionary
-│   │   ├── Navbar.svelte                 # nav pills, language, theme controls
+│   │   ├── Navbar.svelte                 # nav pills, language, theme controls, desktop update check
 │   │   ├── PropertyEditor.svelte         # shared name/value table for REST properties + invalid-cell hints
 │   │   ├── PropertyFilesEditor.svelte    # Form tab's Files table: name cell + native file picker cell
 │   │   ├── RestExplorer.svelte           # REST projects and request list UI
 │   │   ├── Toaster.svelte                # global notification stack
+│   │   ├── UpdateBanner.svelte           # update banner: version, notes, progress, install/restart
 │   │   └── XmlJsonFormatter.svelte       # shared XML/JSON tool UI
 │   ├── services/
 │   │   ├── db.ts                         # Tauri IPC + localStorage fallback
@@ -79,12 +83,14 @@ src/
 │   │   ├── rest.ts                       # REST IPC wrappers + browser fallback + explorer selection persistence
 │   │   ├── rest.test.ts                  # selection restore rules and browser-storage round trip
 │   │   ├── share.ts                      # share IPC wrappers + viewer URL helpers
-│   │   └── share.test.ts
+│   │   ├── share.test.ts
+│   │   └── updater.ts                    # plugin check/downloadAndInstall/close wrappers + restart_app
 │   ├── stores/
 │   │   ├── i18n.ts                       # en/ru dictionaries, locale detection
 │   │   ├── share.ts                      # draftShare handoff from XML/JSON result
 │   │   ├── theme.ts                      # system/dark/light mode
-│   │   └── toast.ts                      # transient success/error/info notifications
+│   │   ├── toast.ts                      # transient success/error/info notifications
+│   │   └── update.ts                     # shared update flow: one check feeds banner and navbar
 │   └── utils/
 │       ├── clipboard.ts                  # clipboard read/write with notification fallback
 │       ├── diff.ts                       # line LCS + inline token diff
@@ -94,9 +100,11 @@ src/
 │       ├── rest.ts                       # query/cookies/form + cURL helpers + RFC validation
 │       ├── rest.test.ts
 │       ├── splash.ts                     # loading splash labels, version, dismissal
-│       └── splash.test.ts
+│       ├── splash.test.ts
+│       ├── update.ts                     # update phases, percent, dismiss check, error grouping
+│       └── update.test.ts
 └── routes/
-    ├── +layout.svelte                    # navbar, full-height shell, splash dismissal, deep-link navigation
+    ├── +layout.svelte                    # navbar, banner, full-height shell, splash dismissal, deep-link navigation, startup update check
     ├── +layout.ts                        # ssr = false; prerender = false
     ├── +page.ts                          # 307 redirect to /xml
     ├── xml/+page.svelte                  # XmlJsonFormatter mode="xml"
@@ -120,6 +128,7 @@ src-tauri/
     ├── processor.rs                      # large-file XML/JSON processing
     ├── rest.rs                           # REST projects/requests persistence, multipart encoding, execution, cancellation
     ├── share.rs                          # interfaces, deep link, upload/viewer commands, server state
+    ├── update.rs                         # restart_app command used outside Windows after an update installs
     └── http_server.rs                    # read-only axum share server on port 3030
 
 src-tauri/tests/http_client.rs            # reqwest/axum plain-HTTP round trip
@@ -172,7 +181,7 @@ getEditorValue(): string;
 - **No external icon libraries.** All icons live in `ICON_PATHS` in `src/lib/components/Icon.svelte`.
 - Store one or more SVG `d` strings per icon. Render only `<path d={...} />`.
 - **Never** use empty fragments `<>...</>` inside `<svg>`.
-- Every name in `ICON_PATHS` is rendered by at least one component. Current names: `copy`, `download`, `share`, `chevronDown`, `sun`, `moon`, `monitor`, `arrowRight`, `check`, `swap`, `file`, `server`, `sparkles`, `globe`, `more`, `plus`, `trash`, `clipboard`, `braces`, `alignLeft`, `eraser`, `eye`, `close`. Do not park unused icons in the dictionary — remove the entry when the last usage goes away.
+- Every name in `ICON_PATHS` is rendered by at least one component. Current names: `copy`, `download`, `share`, `chevronDown`, `sun`, `moon`, `monitor`, `arrowRight`, `check`, `swap`, `file`, `server`, `sparkles`, `globe`, `more`, `plus`, `trash`, `clipboard`, `braces`, `alignLeft`, `eraser`, `eye`, `close`, `refresh`, `update`. Do not park unused icons in the dictionary — remove the entry when the last usage goes away.
 
 ### Styling and themes
 
@@ -196,6 +205,14 @@ getEditorValue(): string;
 - Minimum visible time is 350 ms and the fade is 260 ms, then the element is removed. `dismissSplash` and the setters are idempotent no-ops once the splash is gone.
 - The `app.html` watchdog reveals a restart hint after 12 s so a bundle that never hydrates does not leave a silent spinner.
 - Tests pass `elapsed` explicitly instead of relying on `performance.now()` under fake timers.
+
+### Update banner
+
+- `UpdateBanner.svelte` sits between `Navbar.svelte` and `<main>` in `+layout.svelte` as a `shrink-0` row, so it never steals editor height with `flex-1`. It renders only for `phase !== 'idle' && phase !== 'checking'`: the navbar spinner carries the "checking" state.
+- The banner reads the shared `updateState` store, not its own copy. Phases: `available` (Install + Not now), `downloading` (percent label + `role="progressbar"` bar), `installing`, `ready` (Restart + Later), `error` (`--danger-bg`/`--danger-text`, `role="alert"`, close button that calls `clearUpdate`). Non-error phases use `role="status"` and `aria-live="polite"`.
+- Row background stays `--panel-bg`; only failures read `--danger-bg`. Row-state tokens are not used here because the banner is not a list row.
+- The Windows installer hint (`update.windowsHint`) shows during `installing`, and the restart hint (`update.readyHint`) shows in `ready` only outside Windows — `isWindowsUserAgent(navigator.userAgent)` is the client-side discriminator, kept in `utils/update.ts` so it is testable.
+- The navbar check button is rendered only when `isTauriRuntime()`, uses `update` while idle and `refresh` with `animate-spin` while checking, is `disabled` while `isUpdateBusy(phase)`, and follows the navbar pill look (`h-11 w-11 rounded-full bg-[var(--nav-active-bg)] text-white`, scale on hover, no background hover highlight). Localized text lives in `title`/`aria-label` (`update.checkAction` / `update.checking`).
 
 ### Localization
 
@@ -371,7 +388,7 @@ Persistence behavior:
 - Formatter/URL autosave debounce is 450 ms; Compare uses 500 ms.
 - localStorage prefixes: `devtools.editor.`, `devtools.setting.`.
 - Theme and locale are stored in `localStorage` only.
-- Settings in `app_settings` go through `get_setting`/`set_setting` (`services/db.ts` mirrors them to `localStorage`). Keys in use: `rest.activeProject` and `rest.activeRequest` — the explorer selection restored at startup; an empty string means "no project / no request selected".
+- Settings in `app_settings` go through `get_setting`/`set_setting` (`services/db.ts` mirrors them to `localStorage`). Keys in use: `rest.activeProject` and `rest.activeRequest` — the explorer selection restored at startup; an empty string means "no project / no request selected"; `update.dismissedVersion` — the release version hidden with "Not now" (empty/absent means nothing was dismissed).
 
 ### Tauri commands
 
@@ -409,6 +426,7 @@ All commands use `#[tauri::command(rename_all = "snake_case")]`. Frontend invoke
 | `execute_rest_request` | `method`, `url`, `headers`, `body`, `body_type`, `form`, `multipart`, `files` | `RestResponse` |
 | `cancel_rest_request` | — | `boolean` |
 | `download_rest_response` | `method`, `url`, `headers`, `body`, `body_type`, `form`, `multipart`, `files`, `path` | `u64` |
+| `restart_app` | — | `void` |
 
 `ProcessResult` contains `output_path`, `bytes_in`, `bytes_out`.
 `ShareServerStatus` contains `running`, `port`, `error`. `ShareUploadResult` contains `id`, `link`, `server`, `filename`, `size`.
@@ -466,6 +484,16 @@ json_tolerant_candidate(candidates: &[String]) -> Option<&String>; // mirrors js
 - Frontend share pages must gate uploads on `ShareServerStatus.running`; the Share UI shows a Retry button that calls `restart_share_server`.
 - `reqwest` is used with `default-features = false, features = ["json", "rustls", "gzip"]`. REST requests support HTTP and HTTPS, automatic gzip decompression, a 120-second timeout, and up to 10 redirects. `src-tauri/tests/http_client.rs` still guards the plain-HTTP client path.
 
+### Updater (desktop)
+
+- `tauri.conf.json > plugins.updater` holds the minisign `pubkey` inline, the single endpoint `https://github.com/DimetriusJonson/dev_tools_svelte/releases/latest/download/latest.json`, `requireSignedVersion: true`, and `windows.installMode: "passive"` (valid: `passive | quiet | basicUi`). `bundle.createUpdaterArtifacts: true` makes `tauri build` emit `<artifact>.sig` and `latest.json`; the private key lives in `~/.tauri/webdev-useful-tools.key` (no password) and is never committed — builds need `TAURI_SIGNING_PRIVATE_KEY`.
+- `tauri_plugin_updater::Builder::new().build()` is registered in `lib.rs` (the builder reads the config above through `api.config()`); `build()` is the only method — there is no `init()`. Capability `updater:default` is in `capabilities/default.json`; `tauri-plugin-process` is deliberately not a dependency, restart goes through `update.rs::restart_app`, which calls `AppHandle::request_restart()` so `RunEvent::ExitRequested`/`Exit` still run and stop the share server. `#[tauri::command]` items must live in a submodule and be listed as `update::restart_app`: defining a `pub` command in the crate root and listing it bare in `generate_handler!` collides on `__cmd__*` macros.
+- `src/lib/services/updater.ts` wraps the plugin (`check` with a 20 s timeout, `downloadAndInstall` with 300 s, `close`) and invokes `restart_app`; it is a desktop-only service (`isUpdaterSupported()` is `isTauriRuntime()`), so the browser build never imports the plugin.
+- `src/lib/stores/update.ts` owns the flow shared by the navbar button and `UpdateBanner.svelte`: one `checkForUpdates({ manual })` feeds both, re-entry is refused while `checking | downloading | installing` and while a finished update is waiting in `ready`. The announced `Update` handle is kept in a module variable and released with `closeUpdate()` whenever the banner is dismissed or replaced — dropping it leaks a temp download.
+- Startup checks are silent (`STARTUP_UPDATE_DELAY_MS = 1200` after hydration): they only raise the banner and log to the console. Manual checks always answer with a toast. `classifyUpdateFailure` groups plugin text into `unavailable` (no endpoints, non-HTTPS endpoint, unsupported OS/arch) → error toast, `notFound` (release JSON unfetchable, or no entry for this platform/fallback platform) → info toast with no banner, and `failed` → red banner with the reason. Match the plugin's own wording from `plugins/updater/src/error.rs`: `Could not fetch a valid release JSON from the remote`, `the platform \`…\` was not found in the response \`platforms\` object`, `None of the fallback platforms … were found in the response \`platforms\` object`.
+- `installUpdate()` never calls `restartApplication()`: the installer owns relaunch. On Windows `downloadAndInstall` exits the process before launching `msiexec /passive`, so the promise never resolves and the banner stays on "installing" with the Windows hint. Outside Windows the bundle is replaced in place and the banner's `ready` phase offers a manual Restart button that calls `restart_app`.
+- "Not now" persists exactly the announced version in `app_settings.update.dismissedVersion`; `isDismissedVersion` is exact-match only, so a newer release is reported again. A manual check ignores the dismissal.
+
 ### Desktop integration
 
 - `tauri-plugin-single-instance` (with the `deep-link` feature) focuses and unminimizes `main` when a second instance starts.
@@ -473,7 +501,7 @@ json_tolerant_candidate(candidates: &[String]) -> Option<&String>; // mirrors js
 - Tray menu IDs `open` and `quit` map to `TrayAction::Open` / `Quit`; unknown IDs are ignored.
 - Closing the `main` window prevents close and hides it to the tray. Quit exits the process.
 - Window title `<localized app.title> <version>` from `package.json`, set by the frontend via `setTitle`; `tauri.conf.json > app > windows > title` is only the initial value. 1440×920, minimum 1100×700.
-- Capabilities in `src-tauri/capabilities/default.json`: `core:default`, `core:window:allow-set-title`, `dialog:default`, `dialog:allow-open`, `dialog:allow-save`, `clipboard-manager:allow-read-text`.
+- Capabilities in `src-tauri/capabilities/default.json`: `core:default`, `core:window:allow-set-title`, `dialog:default`, `dialog:allow-open`, `dialog:allow-save`, `clipboard-manager:allow-read-text`, `updater:default`.
 - Clipboard reads go through `tauri-plugin-clipboard-manager` in Tauri. Do not call `navigator.clipboard.readText()` directly from pages: WebView2/WKWebView reject it with a permissions error. In browser mode `utils/clipboard.ts` falls back to `navigator.clipboard` and requires a secure context.
 - Custom icon source is `src-tauri/icon-source.png`; SVG companion is `src-tauri/icons/app-icon.svg`. Regenerate the bundle with `npx tauri icon src-tauri/icon-source.png` when the icon changes.
 
@@ -484,6 +512,7 @@ json_tolerant_candidate(candidates: &[String]) -> Option<&String>; // mirrors js
 - **Compare:** `src/routes/compare/+page.svelte` → `diffTexts`/`lineOffsets`/`splitLines` in `diff.ts`; highlights are applied through `CodeMirrorEditor`.
 - **Share (desktop):** `src/routes/share/+page.svelte` → `services/share.ts` → `share.rs` + `http_server.rs`; uploads go to `shared_uploads` in `db.rs`. Draft content arrives from `XmlJsonFormatter.svelte` through the `draftShare` store (`readOnly: true`). Viewer: `src/routes/view/+page.svelte` opened via deep link or `/view?server=...&id=...`.
 - **Rest client:** `src/routes/rest/+page.svelte` → `RestExplorer.svelte` + `PropertyEditor.svelte` + `PropertyFilesEditor.svelte` → `services/rest.ts` → `utils/rest.ts` → `rest.rs`. Projects/requests persist in `rest_projects`, `rest_requests`, `rest_request_properties` (headers), `rest_request_form` (Form-encode rows), `rest_request_multipart` (Form tab fields) and `rest_request_files` (Form tab file rows, path + display name only). Execution goes through the Rust backend in Tauri; browser mode falls back to `fetch` + `FormData` and `localStorage`. cURL shell quoting (`tokenizeCurl`), imported-body de-escaping (`unescapeImportedBody`), form-part parsing (`splitFormParameters`) and export quoting (`buildCurl`, `multipartCurlParts`, `quotePosix`, `quoteWindows`) live in `utils/rest.ts` and are covered by `utils/rest.test.ts`. Multipart is assembled client-side by `resolveRequestBody`/`buildMultipartPreview`/`buildMultipartFormData` and server-side by `rest.rs::encode_multipart` + `multipart_dump`, both from `multipart_boundary()`; file picking goes through `services/files.ts::pickPartFile`. RFC validation lives in `utils/rest.ts` (`validateRequest`, `validateProperties`, `validateRowName`, `validateFileRows`, `validateQueryUrl`); the page maps `ValidationKind` to the `rest.validation.*` keys, passes `fieldHint` to every table (`hintFor`/`fileHint`), and blocks send/cURL/download when issues exist. Explorer selection persistence lives in `services/rest.ts` (`loadRestSelection`, `saveRestSelection`, pure `resolveRestSelection`, covered by `services/rest.test.ts`): `+page.svelte` restores it in `onMount` and writes it from an `$effect` that is gated on `hydrated` and on a non-reactive `savedSelection` key, so the restore does not rewrite identical values.
+- **Updates (desktop):** `src/routes/+layout.svelte` (startup check + banner slot) + `Navbar.svelte` (manual check) → `UpdateBanner.svelte` → `stores/update.ts` → `services/updater.ts` → `utils/update.ts` → `tauri-plugin-updater` + `src-tauri/src/update.rs`. Dismissal persists through `set_setting`/`get_setting` (`app_settings.update.dismissedVersion`). Pure helpers (percent, dismissal match, failure classification, Windows UA) are covered by `utils/update.test.ts`. Behavior and acceptance criteria: README section «Обновления».
 - **Notifications:** `stores/toast.ts` → `Toaster.svelte` in `+layout.svelte`. `utils/clipboard.ts` emits success/failure notifications; pages report errors through `notify`/`notifyError`. Toast text is centered: the message span is `flex-1` with symmetric `px-7`, and the close button is absolutely positioned at `right-2 top-1/2`, so long messages wrap without colliding with it.
 - **Theme/i18n:** `theme.ts`, `i18n.ts`, `Navbar.svelte`, `app.html`.
 - **Loading splash:** `src/app.html` markup + inline CSS + pre-hydration label script → `utils/splash.ts` → `+layout.svelte` `onMount`. Tests in `utils/splash.test.ts`. No new storage keys: it reads `devtools.theme` and `devtools.locale`.
@@ -531,6 +560,12 @@ json_tolerant_candidate(candidates: &[String]) -> Option<&String>; // mirrors js
 - The REST Save checkbox applies to text responses only. Attachments and binary responses must be fetched with `download_rest_response` instead of being loaded into the editor.
 - Keep REST execution on the Rust backend for desktop to avoid CORS. The browser `fetch` fallback is best-effort and may be blocked by CORS or forbidden headers.
 - Avoid reintroducing nav hover background colors or removing `overflow-y-hidden`/`py-1`; that combination regressed the layout before.
+- Keep the updater endpoint HTTPS-only and signed: `requireSignedVersion` is on, so a release whose minisign signature has no version in its trusted comment is rejected — re-sign old releases with a CLI that records the version instead of relaxing the flag. Do not commit the private key, and do not paste it into `tauri.conf.json`; only the `pubkey` belongs there.
+- The updater is desktop-only. Gate both the navbar button and the startup check on `isTauriRuntime()` (`isUpdaterSupported()`): the browser bundle must not import `@tauri-apps/plugin-updater`, and `isUpdaterSupported()` returns before the state leaves `idle` so no banner can appear.
+- Never auto-restart after `downloadAndInstall`. On Windows the plugin kills the process to hand over to `msiexec`, so a restart call there is dead code at best, and on macOS/Linux the user decides when to leave the app. Keep `restart_app` wired to the banner's Restart button only.
+- Automatic checks must not raise toasts or banners on failure — a user with no network or no published release would get a red error on every start. Only manual checks answer, and `notFound` stays an info toast rather than a red banner; widening `classifyUpdateFailure` matchers requires the plugin's actual `error.rs` strings, so re-read them when the plugin version changes.
+- Release the announced `Update` handle (`closeUpdate`) whenever the banner leaves `available`; keeping it alive leaks the download the plugin already reserved, and the store forgets it in `dismissUpdate`/`clearUpdate`/`handleFailure`.
+- `update.*` i18n keys must exist in both the `en` and `ru` dictionaries; the banner interpolates `{version}` and `{percent}`, and `update.failed` interpolates `{message}` with the raw plugin text (deliberately untranslated — `classifyUpdateFailure` only groups it).
 
 ## 8. Adding a Feature
 

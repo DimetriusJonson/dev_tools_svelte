@@ -1,8 +1,11 @@
 <script lang="ts">
 	import { page } from '$app/stores';
 	import Icon from '$lib/components/Icon.svelte';
+	import { isTauriRuntime } from '$lib/services/db';
 	import { locale, setLocale, t, type Locale } from '$lib/stores/i18n';
+	import { checkForUpdates, updateState } from '$lib/stores/update';
 	import { cycleTheme, themeIcon, themeMode } from '$lib/stores/theme';
+	import { isUpdateBusy } from '$lib/utils/update';
 
 	const items = [
 		{ path: '/xml', label: 'nav.xml' },
@@ -20,6 +23,12 @@
 	function onLocaleChange(event: Event): void {
 		setLocale((event.currentTarget as HTMLSelectElement).value as Locale);
 	}
+
+	// Updates are a desktop capability: the browser build has no signed artifacts to install.
+	const desktop = isTauriRuntime();
+	const checking = $derived($updateState.phase === 'checking');
+	const busy = $derived(isUpdateBusy($updateState.phase));
+	const updateLabel = $derived(checking ? $t('update.checking') : $t('update.checkAction'));
 </script>
 
 <header
@@ -45,6 +54,23 @@
 	</nav>
 
 	<div class="flex shrink-0 items-center gap-2.5">
+		{#if desktop}
+			<button
+				type="button"
+				onclick={() => void checkForUpdates({ manual: true })}
+				disabled={busy}
+				class="flex h-11 w-11 items-center justify-center rounded-full bg-[var(--nav-active-bg)] text-white transition-all duration-150 hover:scale-105 active:scale-95 disabled:cursor-default disabled:opacity-70"
+				title={updateLabel}
+				aria-label={updateLabel}
+			>
+				<Icon
+					name={checking ? 'refresh' : 'update'}
+					size={19}
+					class={checking ? 'animate-spin' : ''}
+				/>
+			</button>
+		{/if}
+
 		<div class="relative">
 			<label class="sr-only" for="locale-select">{$t('lang.label')}</label>
 			<select
