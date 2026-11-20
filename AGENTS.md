@@ -18,7 +18,7 @@
 - **File processing:** `quick-xml 0.42`, `serde_json` with `preserve_order`.
 - **Tauri plugins:** `dialog`, `single-instance`, `deep-link`, `clipboard-manager`.
 - **Testing:** Vitest + jsdom for frontend; Rust unit tests for DB, processing, and tray mapping.
-- **Current status:** XML, JSON, URL, Compare, Share (desktop only), Rest client, themes, i18n, persistence, notifications, tray, single-instance, deep links, and large-file processing are implemented.
+- **Current status:** XML, JSON, URL, Compare, Share (desktop only), Rest client (including `multipart/form-data` bodies with fields and file parts), themes, i18n, persistence, notifications, tray, single-instance, deep links, and large-file processing are implemented.
 
 ## 2. Commands & Definition of Done
 
@@ -69,12 +69,13 @@ src/
 │   │   ├── Icon.svelte                   # inline SVG path dictionary
 │   │   ├── Navbar.svelte                 # nav pills, language, theme controls
 │   │   ├── PropertyEditor.svelte         # shared name/value table for REST properties + invalid-cell hints
+│   │   ├── PropertyFilesEditor.svelte    # Form tab's Files table: name cell + native file picker cell
 │   │   ├── RestExplorer.svelte           # REST projects and request list UI
 │   │   ├── Toaster.svelte                # global notification stack
 │   │   └── XmlJsonFormatter.svelte       # shared XML/JSON tool UI
 │   ├── services/
 │   │   ├── db.ts                         # Tauri IPC + localStorage fallback
-│   │   ├── files.ts                      # native dialogs and path helpers
+│   │   ├── files.ts                      # native dialogs, path helpers, pickPartFile for multipart rows
 │   │   ├── rest.ts                       # REST IPC wrappers + browser fallback + explorer selection persistence
 │   │   ├── rest.test.ts                  # selection restore rules and browser-storage round trip
 │   │   ├── share.ts                      # share IPC wrappers + viewer URL helpers
@@ -117,7 +118,7 @@ src-tauri/
     ├── lib.rs                            # tray, single-instance, DB init, commands, deep link
     ├── db.rs                             # schema, editor/settings CRUD, shared_uploads CRUD
     ├── processor.rs                      # large-file XML/JSON processing
-    ├── rest.rs                           # REST projects/requests persistence, execution, cancellation
+    ├── rest.rs                           # REST projects/requests persistence, multipart encoding, execution, cancellation
     ├── share.rs                          # interfaces, deep link, upload/viewer commands, server state
     └── http_server.rs                    # read-only axum share server on port 3030
 
@@ -217,6 +218,7 @@ getEditorValue(): string;
 - Copy feedback lasts 1.5 s. Formatter errors clear after 4.5 s.
 - `PropertyEditor.svelte` renders no column-title header row; `nameLabel`/`valueLabel` props are used only in `aria-label`, and placeholders convey the column meaning. Keep the add-row input directly under the container border.
 - `PropertyEditor.svelte` takes an optional `fieldHint(field, row, index) => string | null`. A non-null hint paints the cell with `--danger-bg`/`--danger-text`, sets `aria-invalid` and puts the localized reason in `title`. `index` is the row index, or `-1` for the add-row draft; the draft is validated like a row, so the name cell is checked even while it is empty. `commitDraft()` refuses an invalid draft and refuses to create a row when only the value is filled, so a broken name or value never becomes a row; the text stays on screen highlighted for correction.
+- `PropertyFilesEditor.svelte` is the Form tab's Files table and mirrors `PropertyEditor.svelte` — same `h-10` two-column grid, add-row draft under the container border, hover-revealed `trash` button, `fieldHint` cells. The difference is the value cell: it is a `<button>` that opens `pickPartFile`, shows `file` + the file name, and puts the full path (or the localized reason) in `title`. Buttons have no `aria-invalid`, so invalid picker cells are marked by the danger palette and `title` only. `commitDraft()` refuses to create a row when only a name is typed (`draftNeedsFile` makes the file cell explain itself) and refuses when the name is empty but a file was picked, so the pick is never thrown away silently. `picking` holds the row index while the dialog is open and renders a `…` marker.
 
 ## 5. Persistence, IPC, and Backend
 
@@ -291,23 +293,45 @@ CREATE TABLE IF NOT EXISTS rest_request_form (
   value TEXT NOT NULL DEFAULT '',
   sort_order INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS rest_request_multipart (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  request_id TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  value TEXT NOT NULL DEFAULT '',
+  sort_order INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS rest_request_files (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  request_id TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  path TEXT NOT NULL DEFAULT '',
+  filename TEXT NOT NULL DEFAULT '',
+  sort_order INTEGER NOT NULL DEFAULT 0
+);
 ```
 
 Rest storage:
 
 - `rest_requests.body` is only the JSON/XML/Text editor buffer. Form-encode rows are never serialized into it.
 - `rest_request_form` holds the Form-encode tab table (`name`, `value`, `sort_order`) independently of the text buffer; `write_form` drops rows with a blank name, like header rows.
-- Unnamed header and Form-encode rows are therefore not persisted and vanish after a restart, while unnamed `Query`/`Cookies` values survive in the URL and in the `Cookie` header as `=value`. Both are reported as `name-required`, so nothing disappears without a visible reason.
+- `rest_request_multipart` holds the Form tab's **Fields** table and `rest_request_files` its **Files** table (`name`, `path`, `filename`, `sort_order`); `write_multipart` and `write_files` drop blank names too. Only the path and the display name are persisted — never file bytes — and the browser's runtime `File` is stripped by `services/rest.ts::storedFileRow` and by `/rest/+page.svelte::toUpdate`, because `JSON.stringify` would otherwise write `{}` and the row would look loaded.
+- Unnamed header, Form-encode and Form (multipart/file) rows are therefore not persisted and vanish after a restart, while unnamed `Query`/`Cookies` values survive in the URL and in the `Cookie` header as `=value`. Both are reported as `name-required`, so nothing disappears without a visible reason.
 - `init_schema` migrates legacy `rest_request_properties` rows with `kind = 'form'` into `rest_request_form` and deletes them. Only `kind = 'header'` is written today.
 - `rest.rs::resolve_body` (client mirrors: `utils/rest.ts::resolveRequestBody`, `services/rest.ts::wireBody`) gives form rows priority when `body_type = 'form'`: the wire body is `encode_form_urlencoded(form)`, the default content type is `application/x-www-form-urlencoded`, and the text buffer is ignored and left untouched.
+- `resolve_body` returns `ResolvedBody { wire: Vec<u8>, dump: String }` and `PreparedCall.body` is `Vec<u8>`, because a multipart body mixes text parts with file bytes. For `body_type = 'multipart'` the wire bytes come from `encode_multipart` (fields first, then files, in table order, boundary from `multipart_boundary()` = a fresh `Uuid::new_v4()`), the dump replaces every file payload with `<bytes of path>` so the raw-request preview keeps the framing without the payload, and `Content-Length` is the real `wire.len()`. Client mirrors: `resolveRequestBody` returns `''` for multipart, `buildMultipartPreview` renders the dump text with the same framing, and the preview `Content-Length` is the dump's own byte length — file sizes are unknowable client-side.
+- `rest.rs::prepare_headers` retains and re-adds a user `Content-Type` when `body_type = 'multipart'` so the generated `multipart/form-data; boundary=…` always wins; the browser `fetch` path and `buildCurl` drop the user's content type for the same reason.
 
 REST validation (client-side only, `utils/rest.ts`):
 
 ```ts
-type PropertyKind = 'header' | 'cookie' | 'query' | 'form';
+type PropertyKind = 'header' | 'cookie' | 'query' | 'form' | 'multipart';
 type ValidationKind =
   | 'header-name' | 'header-value' | 'cookie-name'
-  | 'cookie-value' | 'query-param' | 'form-param' | 'name-required';
+  | 'cookie-value' | 'query-param' | 'form-param'
+  | 'multipart-field-name' | 'multipart-field-value'
+  | 'multipart-file-name' | 'file-missing' | 'name-required';
 
 interface ValidationIssue { kind; field: 'name' | 'value'; name; char; row?: number }
 
@@ -316,8 +340,9 @@ validateCookieName(name) / validateCookieValue(value)
 validatePropertyField(kind, field, text)      // single cell, blank text is never an issue
 validateRowName(row)                          // value present but name blank ⇒ 'name-required'
 validateProperties(kind, rows)                // table, issues carry `row`
+validateFileRow(row, index) / validateFileRows(rows)  // multipart file rows
 validateQueryUrl(url)                         // raw query segments, issues carry `row`
-validateRequest({ url, headers, form, body_type })  // everything that goes on the wire
+validateRequest({ url, headers, form, multipart, files, body_type })  // everything that goes on the wire
 describeCharacter(character)                  // ␍ ␊ ␉ ␠ or U+XXXX
 ```
 
@@ -327,8 +352,11 @@ describeCharacter(character)                  // ␍ ␊ ␉ ␠ or U+XXXX
 - `%` counts as valid only as a complete `%XX` escape: `firstQueryViolation` consumes the escape with the percent sign, so `hello%20world` passes and `%zz` fails with `char: '%'`.
 - To keep a value editable when its name is cleared, `buildQuery` and `buildCookieHeader` emit `=value` for a name-less row (and drop a row with neither name nor value), while `parseCookies` no longer filters name-less pairs. `validateQueryUrl` reports `?=value` as `name-required` — a bare flag like `?debug` and a bare `?=` are legal and unreported.
 - Form rows are only checked for control characters (`validateFormText`) because `encodeForm`/`encode_form_urlencoded` percent-encode them on send; spaces, `&` and `=` in form values are intentional. Both encoders skip blank-name rows, which is why a name-less row is reported instead of sent.
-- A row with a value but a blank name is `name-required`: `write_headers`/`write_form` drop such rows and `parseCookies` used to discard them, so the value would silently never be sent. A row with an empty name **and** empty value is noise and stays unreported, and an empty value with a name is legal. `validatePropertyField` deliberately keeps reporting nothing for blank text so the add-row draft is not flagged while typing; the row-level check belongs to `validateRowName`, which `validatePropertyRow` runs first and `/rest` also applies to the draft inside `hintFor`.
-- `validateRequest` collects header rows, cookie rows via `parseCookies`, `validateQueryUrl(url)` and form rows only when `body_type === 'form'`. `/rest` blocks `runRequest`, `copyCurl`, `copyRawCurl` and `downloadResponse` with `rest.validation.blocked` when it returns any issue, paints a red dot on the `Headers`/`Query`/`Cookies`/`Form-encode` tabs, and marks the URL input when the query is invalid.
+- Multipart field names (both tables) are RFC 9110 tokens, because `content-disposition: form-data; name="…"` is written without escaping. Field values are written to the body verbatim, so they reject only the control range (`multipart-field-value`, not the `form-param` "percent-encode it" message): spaces, `&` and `=` are intentional there.
+- File rows report `multipart-file-name` for a bad part name and `file-missing` when a row has a `filename` but neither a `path` nor a runtime `File` — that is a persisted row whose bytes were never stored, so the row must not be sent silently. `validateFileRow` takes the index, and `validateFileRows` runs it over the table. Filenames are never validated: `encode_multipart` sanitizes CR/LF and quotes and emits `filename*=UTF-8''<pct-encoded>` alongside a plain `filename` when the name is non-ASCII.
+- Rust keeps its own backstop: `encode_multipart` returns an error for a file row with a blank path, so a request that skipped client validation still fails loudly instead of sending an empty part.
+- A row with a value but a blank name is `name-required`: `write_headers`/`write_form`/`write_multipart`/`write_files` drop such rows and `parseCookies` used to discard them, so the value would silently never be sent. A row with an empty name **and** empty value is noise and stays unreported, and an empty value with a name is legal. `validatePropertyField` deliberately keeps reporting nothing for blank text so the add-row draft is not flagged while typing; the row-level check belongs to `validateRowName`, which `validatePropertyRow` runs first and `/rest` also applies to the draft inside `hintFor`.
+- `validateRequest` collects header rows, cookie rows via `parseCookies`, `validateQueryUrl(url)`, form rows only when `body_type === 'form'`, and — when `body_type === 'multipart'` — the Fields table (`validateProperties('multipart', …)`) plus `validateFileRows(files)`. `/rest` blocks `runRequest`, `copyCurl`, `copyRawCurl` and `downloadResponse` with `rest.validation.blocked` when it returns any issue, paints a red dot on the `Headers`/`Query`/`Cookies`/`Form-encode` tabs, and marks the URL input when the query is invalid. The `Form` tab is a container for two tables, so its dot reads the merged `multipartIssues` while the nested `Fields`/`Files` tabs read their own `multipartFieldIssues`/`multipartFileIssues`.
 
 Editor keys in use:
 
@@ -378,12 +406,13 @@ All commands use `#[tauri::command(rename_all = "snake_case")]`. Frontend invoke
 | `duplicate_rest_request` | `id` | `RestRequest` |
 | `save_rest_response` | `id`, `body`, `headers`, `raw_request` | `void` |
 | `clear_rest_response` | `id` | `void` |
-| `execute_rest_request` | `method`, `url`, `headers`, `body`, `body_type`, `form` | `RestResponse` |
+| `execute_rest_request` | `method`, `url`, `headers`, `body`, `body_type`, `form`, `multipart`, `files` | `RestResponse` |
 | `cancel_rest_request` | — | `boolean` |
-| `download_rest_response` | `method`, `url`, `headers`, `body`, `body_type`, `form`, `path` | `u64` |
+| `download_rest_response` | `method`, `url`, `headers`, `body`, `body_type`, `form`, `multipart`, `files`, `path` | `u64` |
 
 `ProcessResult` contains `output_path`, `bytes_in`, `bytes_out`.
 `ShareServerStatus` contains `running`, `port`, `error`. `ShareUploadResult` contains `id`, `link`, `server`, `filename`, `size`.
+`RestRequest`, `RestRequestDraft` and `RestRequestUpdate` carry `multipart: Vec<RestProperty>` and `files: Vec<RestFileRow>`; both fields are `#[serde(default)]` so requests and localStorage records saved before the Form tab still deserialize. `execute_rest_request` and `download_rest_response` take `multipart`/`files` as `Option<…>` and treat `None` as empty, so callers that only send JSON/XML/Text/Form-encode bodies keep working unchanged.
 
 ### Tolerant XML/JSON formatting
 
@@ -454,7 +483,7 @@ json_tolerant_candidate(candidates: &[String]) -> Option<&String>; // mirrors js
 - **URL:** `src/routes/url/+page.svelte` → `encodeUrl`/`decodeUrl` in `formatters.ts`. Uses `encodeURI`/`decodeURI`, not `encodeURIComponent`.
 - **Compare:** `src/routes/compare/+page.svelte` → `diffTexts`/`lineOffsets`/`splitLines` in `diff.ts`; highlights are applied through `CodeMirrorEditor`.
 - **Share (desktop):** `src/routes/share/+page.svelte` → `services/share.ts` → `share.rs` + `http_server.rs`; uploads go to `shared_uploads` in `db.rs`. Draft content arrives from `XmlJsonFormatter.svelte` through the `draftShare` store (`readOnly: true`). Viewer: `src/routes/view/+page.svelte` opened via deep link or `/view?server=...&id=...`.
-- **Rest client:** `src/routes/rest/+page.svelte` → `RestExplorer.svelte` + `PropertyEditor.svelte` → `services/rest.ts` → `utils/rest.ts` → `rest.rs`. Projects/requests persist in `rest_projects`, `rest_requests`, `rest_request_properties` (headers) and `rest_request_form` (Form-encode rows). Execution goes through the Rust backend in Tauri; browser mode falls back to `fetch` and `localStorage`. cURL shell quoting (`tokenizeCurl`), imported-body de-escaping (`unescapeImportedBody`) and export quoting (`buildCurl`, `quotePosix`, `quoteWindows`) live in `utils/rest.ts` and are covered by `utils/rest.test.ts`. RFC validation lives in `utils/rest.ts` (`validateRequest`, `validateProperties`, `validateRowName`, `validateQueryUrl`); the page maps `ValidationKind` to the `rest.validation.*` keys, passes `fieldHint` to every `PropertyEditor`, and blocks send/cURL/download when issues exist. Explorer selection persistence lives in `services/rest.ts` (`loadRestSelection`, `saveRestSelection`, pure `resolveRestSelection`, covered by `services/rest.test.ts`): `+page.svelte` restores it in `onMount` and writes it from an `$effect` that is gated on `hydrated` and on a non-reactive `savedSelection` key, so the restore does not rewrite identical values.
+- **Rest client:** `src/routes/rest/+page.svelte` → `RestExplorer.svelte` + `PropertyEditor.svelte` + `PropertyFilesEditor.svelte` → `services/rest.ts` → `utils/rest.ts` → `rest.rs`. Projects/requests persist in `rest_projects`, `rest_requests`, `rest_request_properties` (headers), `rest_request_form` (Form-encode rows), `rest_request_multipart` (Form tab fields) and `rest_request_files` (Form tab file rows, path + display name only). Execution goes through the Rust backend in Tauri; browser mode falls back to `fetch` + `FormData` and `localStorage`. cURL shell quoting (`tokenizeCurl`), imported-body de-escaping (`unescapeImportedBody`), form-part parsing (`splitFormParameters`) and export quoting (`buildCurl`, `multipartCurlParts`, `quotePosix`, `quoteWindows`) live in `utils/rest.ts` and are covered by `utils/rest.test.ts`. Multipart is assembled client-side by `resolveRequestBody`/`buildMultipartPreview`/`buildMultipartFormData` and server-side by `rest.rs::encode_multipart` + `multipart_dump`, both from `multipart_boundary()`; file picking goes through `services/files.ts::pickPartFile`. RFC validation lives in `utils/rest.ts` (`validateRequest`, `validateProperties`, `validateRowName`, `validateFileRows`, `validateQueryUrl`); the page maps `ValidationKind` to the `rest.validation.*` keys, passes `fieldHint` to every table (`hintFor`/`fileHint`), and blocks send/cURL/download when issues exist. Explorer selection persistence lives in `services/rest.ts` (`loadRestSelection`, `saveRestSelection`, pure `resolveRestSelection`, covered by `services/rest.test.ts`): `+page.svelte` restores it in `onMount` and writes it from an `$effect` that is gated on `hydrated` and on a non-reactive `savedSelection` key, so the restore does not rewrite identical values.
 - **Notifications:** `stores/toast.ts` → `Toaster.svelte` in `+layout.svelte`. `utils/clipboard.ts` emits success/failure notifications; pages report errors through `notify`/`notifyError`. Toast text is centered: the message span is `flex-1` with symmetric `px-7`, and the close button is absolutely positioned at `right-2 top-1/2`, so long messages wrap without colliding with it.
 - **Theme/i18n:** `theme.ts`, `i18n.ts`, `Navbar.svelte`, `app.html`.
 - **Loading splash:** `src/app.html` markup + inline CSS + pre-hydration label script → `utils/splash.ts` → `+layout.svelte` `onMount`. Tests in `utils/splash.test.ts`. No new storage keys: it reads `devtools.theme` and `devtools.locale`.
@@ -489,8 +518,16 @@ json_tolerant_candidate(candidates: &[String]) -> Option<&String>; // mirrors js
 - Keep send, cURL copy/export and response download gated by the same `validateRequest` result; a request that cannot be sent must not be exported as a cURL command either.
 - Do not let a row's name become optional in the UI: `write_headers`/`write_form` drop blank-name rows and `parseCookies` must keep name-less pairs. Dropping the value instead of keeping `=value` would delete what the user typed the moment they cleared the name; keep `validatePropertyField` silent on blank text so typing a long value before the name is not flagged, and use `validateRowName`/`validateRequest` for the mandatory-name rule.
 - Form-encode rows are the only source of truth for `application/x-www-form-urlencoded` bodies and live in `rest_request_form`. Do not serialize them into `rest_requests.body`, and do not parse the text buffer into rows or overwrite the buffer when switching body tabs. `prepare_call` calls `resolve_body`, so the table wins whenever `body_type = 'form'`; the client uses `resolveRequestBody` for the raw preview and cURL export, and `execute_rest_request`/`download_rest_response` receive `form` alongside `body`.
+- Multipart works the same way for `body_type = 'multipart'`: `rest_request_multipart` (Fields) and `rest_request_files` (Files) are the only source of truth, the text buffer and the Form-encode table stay untouched, and `execute_rest_request`/`download_rest_response` receive `multipart` and `files` alongside `body`.
+- `reqwest` is built with `default-features = false`, so `reqwest::multipart` does not exist. Keep the hand-written `encode_multipart` that assembles the body as `Vec<u8>` and pass it through `builder.body(...)`; do not "simplify" it by enabling reqwest's multipart feature. Files are read with `std::fs`, so no Tauri `fs` capability is needed and none should be added.
+- `prepare_call` always generates a fresh `Uuid::new_v4()` boundary, so a Rust test cannot compare a produced wire body against a fixed-boundary length or bytes: read the boundary back out of the `content-type` header (`value.to_str()` — headers are `(String, HeaderValue)`) and assert the framing with that.
+- `parseCurl` always returns `multipart` and `files`, so every caller must handle `bodyType: 'multipart'` with an empty text body — including `importCurl` in `/rest`, which sets the tab and both tables instead of the buffer.
+- The browser's picked `File` is runtime-only state: `services/rest.ts::storedFileRow` and `/rest/+page.svelte::toUpdate` strip it before persistence, and `buildMultipartFormData` returns `null` without it, so the browser path throws "Choose the file again…". Desktop re-reads bytes from `path` on every run, which is why a moved or renamed file fails at send time rather than at save time, and why `duplicateRestRequest` in the browser loses the file while `duplicate_rest_request` in Rust keeps it.
+- Part media types are deliberately **not** mirrored: the browser uses the `MEDIA_TYPES` table, Rust uses `mime_guess::from_path(..).first_raw()` — note `first_guess()` does not exist on `MimeGuess` — and both fall back to `application/octet-stream`. Do not add cross-platform media-type parity tests.
 - `buildCurl` Windows output is cmd.exe-safe: arguments use plain `"..."` quotes (caret `^"value^"` is **not** used — cmd does not enter quoting mode with it, so `&` would split the command), inner quotes become `\"`, backslashes double, `%` stays single for interactive cmd.exe paste (batch files require manual `%%`, documented in README), values collapse newlines to spaces, the URL sits right after `curl.exe` on the first line, and parts join with `' ^\r\n'` so cmd.exe runs the multi-line command as one line. `parseCurl` detects the `curl.exe` flavor, strips caret quotes and collapses `%%`, so both the current plain-quote format and legacy/foreign caret-quoted commands round-trip; POSIX carets and percent signs stay untouched.
 - `parseCurl` implements three quoting flavors: POSIX single quotes (nothing is escaped, an embedded quote is the `'\''` idiom), POSIX double quotes (the backslash is dropped only in front of `$`, a backtick, `"`, `\` or a newline — `"a\nb"` keeps both characters), and bash ANSI-C `$'…'`, which is what browsers produce for "Copy as cURL (bash)" and which decodes `\n`, `\r`, `\t`, `\\`, `\'`, `\"`, `\xHH`, `\uHHHH` and octal escapes. Empty quoted arguments are tokens of their own so an empty value never shifts the next argument. `unescapeImportedBody` then decodes `\"`, `\'`, `\n`, `\r`, `\t`, `\b`, `\f`, `\v` in an imported non-form body only when the raw text cannot be the payload: a body that already parses as JSON or XML, or one that already contains real CR/LF, is kept verbatim because `\n` there is content rather than an encoded line break. Keep `\u` out of the trigger pattern — JSON bodies use `\uXXXX` as real content.
+- cURL form parts are parsed by `splitFormParameters`, which scans `;filename=` and `;type=` with a global regex in source order (each parameter ends at the next `;`), so parameters arrive in any order and a plain field value like `a;b` keeps its semicolon. `--form-string` stays a Fields row even when the value starts with `@`, because that flag never reads a file, and the imported `multipart/form-data; boundary=…` header is dropped from the header table since the encoder owns the boundary. Export writes `--form name="value"` and `--form name=@"path"[;filename=alias]` through `multipartCurlParts` and never emits `--data-raw` for the Form tab; rows without a readable path are skipped.
+- The Raw-request preview keeps one module-level `previewBoundary = multipartBoundary()` instead of regenerating per keystroke, so the dump does not churn while the user types; the real request always gets a fresh boundary, which is why a stored dump's boundary never matches the one that was actually sent.
 - The REST Save checkbox applies to text responses only. Attachments and binary responses must be fetched with `download_rest_response` instead of being loaded into the editor.
 - Keep REST execution on the Rust backend for desktop to avoid CORS. The browser `fetch` fallback is best-effort and may be blocked by CORS or forbidden headers.
 - Avoid reintroducing nav hover background colors or removing `overflow-y-hidden`/`py-1`; that combination regressed the layout before.

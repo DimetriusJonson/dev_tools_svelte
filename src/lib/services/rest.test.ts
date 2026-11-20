@@ -1,10 +1,15 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
+	createRestRequest,
+	duplicateRestRequest,
+	listRestRequests,
 	loadRestSelection,
 	resolveRestSelection,
 	saveRestSelection,
+	updateRestRequest,
 	type RestProject,
-	type RestRequest
+	type RestRequest,
+	type RestRequestDraft
 } from './rest';
 
 function project(id: string, name: string): RestProject {
@@ -23,6 +28,8 @@ function request(id: string, projectId: string | null): RestRequest {
 		save_response: false,
 		headers: [],
 		form: [],
+		multipart: [],
+		files: [],
 		response_body: null,
 		response_headers: [],
 		raw_request: null,
@@ -98,5 +105,100 @@ describe('REST selection persistence', () => {
 
 	it('returns no selection when nothing was stored', async () => {
 		expect(await loadRestSelection()).toEqual({ project_id: null, request_id: null });
+	});
+});
+
+describe('REST multipart storage in the browser build', () => {
+	beforeEach(() => {
+		window.localStorage.clear();
+	});
+
+	function draft(overrides: Partial<RestRequestDraft> = {}): RestRequestDraft {
+		return {
+			project_id: null,
+			name: 'Upload',
+			method: 'POST',
+			url: 'https://example.com/upload',
+			body: '{"buffer":1}',
+			body_type: 'multipart',
+			save_response: false,
+			headers: [],
+			form: [],
+			multipart: [{ name: 'note', value: 'hi' }],
+			files: [{ name: 'doc', path: '', filename: 'a.txt', file: new File(['x'], 'live.txt') }],
+			...overrides
+		};
+	}
+
+	it('saves the Form tables and keeps the File out of storage', async () => {
+		await createRestRequest(draft());
+		const [saved] = await listRestRequests();
+
+		expect(saved.body_type).toBe('multipart');
+		// Switching to the Form tab never destroys the text buffer.
+		expect(saved.body).toBe('{"buffer":1}');
+		expect(saved.multipart).toEqual([{ name: 'note', value: 'hi' }]);
+		expect(saved.files).toEqual([{ name: 'doc', path: '', filename: 'a.txt' }]);
+
+		const raw = window.localStorage.getItem('devtools.rest') ?? '';
+		expect(raw).not.toContain('"file"');
+	});
+
+	it('reads back a request stored before the Form tab existed', async () => {
+		window.localStorage.setItem(
+			'devtools.rest',
+			JSON.stringify({
+				projects: [],
+				requests: [
+					{
+						id: 'r1',
+						name: 'Old',
+						method: 'GET',
+						url: 'https://example.com/',
+						body: '',
+						body_type: 'text',
+						save_response: false,
+						headers: [{ name: 'Accept', value: '*/*' }],
+						form: [],
+						response_body: null,
+						response_headers: [],
+						raw_request: null,
+						created_at: '2026-01-01 00:00:00',
+						updated_at: '2026-01-01 00:00:00'
+					}
+				]
+			})
+		);
+		const [legacy] = await listRestRequests();
+		// A request written by an older build has neither table: both read as empty.
+		expect(legacy.multipart).toEqual([]);
+		expect(legacy.files).toEqual([]);
+		expect(legacy.headers).toEqual([{ name: 'Accept', value: '*/*' }]);
+	});
+
+	it('writes every file row through the same stripping when the request is edited', async () => {
+		const created = await createRestRequest(draft());
+		await updateRestRequest({
+			...created,
+			multipart: [{ name: 'note', value: 'edited' }],
+			files: [{ name: 'doc', path: '/tmp/a.txt', filename: 'a.txt', file: new File(['x'], 'live.txt') }]
+		});
+		const [saved] = await listRestRequests();
+		expect(saved.multipart).toEqual([{ name: 'note', value: 'edited' }]);
+		expect(saved.files).toEqual([{ name: 'doc', path: '/tmp/a.txt', filename: 'a.txt' }]);
+		expect(window.localStorage.getItem('devtools.rest')).not.toContain('"file"');
+	});
+
+	it('copies the Form tables and keeps storage free of File objects', async () => {
+		const created = await createRestRequest(draft());
+		const copy = await duplicateRestRequest(created.id);
+
+		expect(copy.id).not.toBe(created.id);
+		expect(copy.multipart).toEqual([{ name: 'note', value: 'hi' }]);
+		expect(copy.files).toEqual([{ name: 'doc', path: '', filename: 'a.txt' }]);
+		// The copy is added next to the source, and both stored rows carry path data only.
+		const stored = await listRestRequests();
+		expect(stored.map((request) => request.id)).toEqual([created.id, copy.id]);
+		expect(window.localStorage.getItem('devtools.rest')).not.toContain('"file"');
 	});
 });

@@ -157,6 +157,14 @@ const en: Dictionary = {
 		'Query parameter “{name}” has a character RFC 3986 does not allow ({char}). Percent-encode it as %XX',
 	'rest.validation.formParam':
 		'Form field “{name}” has a control character ({char}). Percent-encode it as %XX',
+	'rest.validation.multipartFieldName':
+		"Field name “{name}” is invalid. RFC 9110 allows letters, digits and !#$%&'*+-.^_`|~ only ({char})",
+	'rest.validation.multipartFieldValue':
+		'Field “{name}” has a control character ({char}). It cannot be written into a multipart body',
+	'rest.validation.multipartFileFieldName':
+		"File part name “{name}” is invalid. RFC 9110 allows letters, digits and !#$%&'*+-.^_`|~ only ({char})",
+	'rest.validation.fileMissing':
+		'The file of part “{name}” is not readable. Pick it again before sending',
 	'rest.validation.nameRequired':
 		'A name is required: a row without a name is not sent. Fill in the name or remove the row.',
 	'rest.validation.blocked': 'Request not sent: {detail}',
@@ -166,6 +174,18 @@ const en: Dictionary = {
 	'rest.body.xml': 'XML',
 	'rest.body.text': 'Text',
 	'rest.body.form': 'Form-encode',
+	'rest.body.multipart': 'Form',
+	'rest.multipart.fields': 'Fields',
+	'rest.multipart.files': 'Files',
+	'rest.multipart.fieldName': 'Field name',
+	'rest.multipart.fieldValue': 'Value',
+	'rest.multipart.partName': 'Part name',
+	'rest.multipart.file': 'File',
+	'rest.multipart.noFile': 'No file',
+	'rest.multipart.pickFile': 'Select file',
+	'rest.multipart.pickTitle': 'Select file to send',
+	'rest.multipart.addFile': 'Add file part',
+	'rest.multipart.removeFile': 'Remove file part',
 	'rest.resizeExplorer': 'Resize explorer',
 	'rest.resizeBody': 'Resize request body',
 	'rest.resizeResponse': 'Resize response',
@@ -349,6 +369,14 @@ const ru: Dictionary = {
 		'Параметр query «{name}» содержит символ, недопустимый по RFC 3986 ({char}). Закодируйте его через %XX',
 	'rest.validation.formParam':
 		'Поле формы «{name}» содержит управляющий символ ({char}). Закодируйте его через %XX',
+	'rest.validation.multipartFieldName':
+		"Название поля «{name}» недопустимо. RFC 9110 разрешает только буквы, цифры и !#$%&'*+-.^_`|~ ({char})",
+	'rest.validation.multipartFieldValue':
+		'Поле «{name}» содержит управляющий символ ({char}), который нельзя поместить в multipart-тело',
+	'rest.validation.multipartFileFieldName':
+		"Имя части с файлом «{name}» недопустимо. RFC 9110 разрешает только буквы, цифры и !#$%&'*+-.^_`|~ ({char})",
+	'rest.validation.fileMissing':
+		'Файл части «{name}» недоступен. Выберите его заново перед отправкой',
 	'rest.validation.nameRequired':
 		'Название обязательно: строка без названия не отправляется. Заполните название или удалите строку.',
 	'rest.validation.blocked': 'Запрос не отправлен: {detail}',
@@ -358,6 +386,18 @@ const ru: Dictionary = {
 	'rest.body.xml': 'XML',
 	'rest.body.text': 'Text',
 	'rest.body.form': 'Form-encode',
+	'rest.body.multipart': 'Form',
+	'rest.multipart.fields': 'Поля',
+	'rest.multipart.files': 'Файлы',
+	'rest.multipart.fieldName': 'Имя поля',
+	'rest.multipart.fieldValue': 'Значение',
+	'rest.multipart.partName': 'Имя части',
+	'rest.multipart.file': 'Файл',
+	'rest.multipart.noFile': 'Файл не выбран',
+	'rest.multipart.pickFile': 'Выбрать файл',
+	'rest.multipart.pickTitle': 'Выберите файл для отправки',
+	'rest.multipart.addFile': 'Добавить часть с файлом',
+	'rest.multipart.removeFile': 'Удалить часть с файлом',
 	'rest.resizeExplorer': 'Изменить ширину проводника',
 	'rest.resizeBody': 'Изменить высоту тела запроса',
 	'rest.resizeResponse': 'Изменить ширину ответа',

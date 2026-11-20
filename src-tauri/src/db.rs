@@ -95,9 +95,28 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 			sort_order INTEGER NOT NULL DEFAULT 0
 		);
 
+		CREATE TABLE IF NOT EXISTS rest_request_multipart (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			request_id TEXT NOT NULL,
+			name TEXT NOT NULL DEFAULT '',
+			value TEXT NOT NULL DEFAULT '',
+			sort_order INTEGER NOT NULL DEFAULT 0
+		);
+
+		CREATE TABLE IF NOT EXISTS rest_request_files (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			request_id TEXT NOT NULL,
+			name TEXT NOT NULL DEFAULT '',
+			path TEXT NOT NULL DEFAULT '',
+			filename TEXT NOT NULL DEFAULT '',
+			sort_order INTEGER NOT NULL DEFAULT 0
+		);
+
 		CREATE INDEX IF NOT EXISTS idx_rest_requests_project ON rest_requests(project_id);
 		CREATE INDEX IF NOT EXISTS idx_rest_properties_request ON rest_request_properties(request_id);
 		CREATE INDEX IF NOT EXISTS idx_rest_form_request ON rest_request_form(request_id);
+		CREATE INDEX IF NOT EXISTS idx_rest_multipart_request ON rest_request_multipart(request_id);
+		CREATE INDEX IF NOT EXISTS idx_rest_files_request ON rest_request_files(request_id);
 
 		INSERT INTO rest_request_form (request_id, name, value, sort_order)
 		SELECT p.request_id, p.name, p.value, p.sort_order

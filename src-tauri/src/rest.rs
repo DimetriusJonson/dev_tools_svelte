@@ -20,6 +20,15 @@ pub struct RestProperty {
     pub value: String,
 }
 
+/// A `multipart/form-data` file part. Only the picked path and the display name are
+/// stored; the bytes are read from disk at send time and never enter the database.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestFileRow {
+    pub name: String,
+    pub path: String,
+    pub filename: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RestProject {
     pub id: String,
@@ -39,6 +48,10 @@ pub struct RestRequest {
     pub save_response: bool,
     pub headers: Vec<RestProperty>,
     pub form: Vec<RestProperty>,
+    #[serde(default)]
+    pub multipart: Vec<RestProperty>,
+    #[serde(default)]
+    pub files: Vec<RestFileRow>,
     pub response_body: Option<String>,
     pub response_headers: Vec<RestProperty>,
     pub raw_request: Option<String>,
@@ -57,6 +70,10 @@ pub struct RestRequestDraft {
     pub save_response: bool,
     pub headers: Vec<RestProperty>,
     pub form: Vec<RestProperty>,
+    #[serde(default)]
+    pub multipart: Vec<RestProperty>,
+    #[serde(default)]
+    pub files: Vec<RestFileRow>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -71,6 +88,10 @@ pub struct RestRequestUpdate {
     pub save_response: bool,
     pub headers: Vec<RestProperty>,
     pub form: Vec<RestProperty>,
+    #[serde(default)]
+    pub multipart: Vec<RestProperty>,
+    #[serde(default)]
+    pub files: Vec<RestFileRow>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -208,6 +229,90 @@ fn write_form(conn: &Connection, request_id: &str, rows: &[RestProperty]) -> rus
     Ok(())
 }
 
+/// The Form tab's field table, stored apart from the Form-encode rows so switching
+/// between the two tabs never rewrites either one.
+fn multipart_for(conn: &Connection, request_id: &str) -> rusqlite::Result<Vec<RestProperty>> {
+    let mut statement = conn.prepare(
+        "SELECT name, value FROM rest_request_multipart WHERE request_id = ?1 ORDER BY sort_order, id",
+    )?;
+    let rows = statement
+        .query_map(params![request_id], |row| {
+            Ok(RestProperty {
+                name: row.get(0)?,
+                value: row.get(1)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+fn write_multipart(
+    conn: &Connection,
+    request_id: &str,
+    rows: &[RestProperty],
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM rest_request_multipart WHERE request_id = ?1",
+        params![request_id],
+    )?;
+    let mut statement = conn.prepare(
+        "INSERT INTO rest_request_multipart (request_id, name, value, sort_order) VALUES (?1, ?2, ?3, ?4)",
+    )?;
+    for (index, property) in rows.iter().enumerate() {
+        if property.name.trim().is_empty() {
+            continue;
+        }
+        statement.execute(params![
+            request_id,
+            property.name,
+            property.value,
+            index as i64
+        ])?;
+    }
+    Ok(())
+}
+
+fn files_for(conn: &Connection, request_id: &str) -> rusqlite::Result<Vec<RestFileRow>> {
+    let mut statement = conn.prepare(
+        "SELECT name, path, filename FROM rest_request_files WHERE request_id = ?1 ORDER BY sort_order, id",
+    )?;
+    let rows = statement
+        .query_map(params![request_id], |row| {
+            Ok(RestFileRow {
+                name: row.get(0)?,
+                path: row.get(1)?,
+                filename: row.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// File rows keep only the path and the display name, so a row whose name is blank has
+/// nothing to attach to and is not stored — the client reports it as `name-required`.
+fn write_files(conn: &Connection, request_id: &str, rows: &[RestFileRow]) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM rest_request_files WHERE request_id = ?1",
+        params![request_id],
+    )?;
+    let mut statement = conn.prepare(
+        "INSERT INTO rest_request_files (request_id, name, path, filename, sort_order) VALUES (?1, ?2, ?3, ?4, ?5)",
+    )?;
+    for (index, file) in rows.iter().enumerate() {
+        if file.name.trim().is_empty() {
+            continue;
+        }
+        statement.execute(params![
+            request_id,
+            file.name,
+            file.path,
+            file.filename,
+            index as i64
+        ])?;
+    }
+    Ok(())
+}
+
 pub fn read_rest_request(conn: &Connection, id: &str) -> rusqlite::Result<Option<RestRequest>> {
     let mut statement = conn.prepare(
         r#"
@@ -232,6 +337,8 @@ pub fn read_rest_request(conn: &Connection, id: &str) -> rusqlite::Result<Option
                 response_headers: serde_json::from_str(&response_headers).unwrap_or_default(),
                 headers: Vec::new(),
                 form: Vec::new(),
+                multipart: Vec::new(),
+                files: Vec::new(),
                 raw_request: row.get(10)?,
                 created_at: row.get(11)?,
                 updated_at: row.get(12)?,
@@ -243,6 +350,8 @@ pub fn read_rest_request(conn: &Connection, id: &str) -> rusqlite::Result<Option
         Some(mut request) => {
             request.headers = properties_for(conn, id, "header")?;
             request.form = form_for(conn, id)?;
+            request.multipart = multipart_for(conn, id)?;
+            request.files = files_for(conn, id)?;
             Ok(Some(request))
         }
         None => Ok(None),
@@ -353,6 +462,8 @@ pub fn create_rest_request(
     .map_err(|error| error.to_string())?;
     write_properties(conn, &id, "header", &draft.headers).map_err(|error| error.to_string())?;
     write_form(conn, &id, &draft.form).map_err(|error| error.to_string())?;
+    write_multipart(conn, &id, &draft.multipart).map_err(|error| error.to_string())?;
+    write_files(conn, &id, &draft.files).map_err(|error| error.to_string())?;
 
     read_rest_request(conn, &id)
         .map_err(|error| error.to_string())?
@@ -388,6 +499,8 @@ pub fn update_rest_request(conn: &Connection, update: &RestRequestUpdate) -> Res
     write_properties(conn, &update.id, "header", &update.headers)
         .map_err(|error| error.to_string())?;
     write_form(conn, &update.id, &update.form).map_err(|error| error.to_string())?;
+    write_multipart(conn, &update.id, &update.multipart).map_err(|error| error.to_string())?;
+    write_files(conn, &update.id, &update.files).map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -408,6 +521,16 @@ pub fn delete_rest_request(conn: &Connection, id: &str) -> Result<(), String> {
     .map_err(|error| error.to_string())?;
     conn.execute(
         "DELETE FROM rest_request_form WHERE request_id = ?1",
+        params![id],
+    )
+    .map_err(|error| error.to_string())?;
+    conn.execute(
+        "DELETE FROM rest_request_multipart WHERE request_id = ?1",
+        params![id],
+    )
+    .map_err(|error| error.to_string())?;
+    conn.execute(
+        "DELETE FROM rest_request_files WHERE request_id = ?1",
         params![id],
     )
     .map_err(|error| error.to_string())?;
@@ -435,6 +558,8 @@ pub fn duplicate_rest_request(conn: &Connection, id: &str) -> Result<RestRequest
         save_response: source.save_response,
         headers: source.headers,
         form: source.form,
+        multipart: source.multipart,
+        files: source.files,
     };
     create_rest_request(conn, &draft)
 }
@@ -612,13 +737,223 @@ fn has_header(headers: &[RestProperty], name: &str) -> bool {
         .any(|header| header.name.eq_ignore_ascii_case(name))
 }
 
-fn default_content_type(body_type: &str) -> &'static str {
+/// Content type of a body. A multipart body always carries its boundary, so the
+/// client can never supply a wrong one by hand.
+fn default_content_type(body_type: &str, boundary: Option<&str>) -> String {
     match body_type {
-        "json" => "application/json",
-        "xml" => "application/xml",
-        "form" => "application/x-www-form-urlencoded",
-        _ => "text/plain",
+        "json" => "application/json".to_string(),
+        "xml" => "application/xml".to_string(),
+        "form" => "application/x-www-form-urlencoded".to_string(),
+        "multipart" => format!(
+            "multipart/form-data; boundary={}",
+            boundary.unwrap_or(MULTIPART_BOUNDARY_PLACEHOLDER)
+        ),
+        _ => "text/plain".to_string(),
     }
+}
+
+/// Stands in for the boundary in a raw dump whose boundary is not chosen yet.
+const MULTIPART_BOUNDARY_PLACEHOLDER: &str = "BoundaryPlaceholder";
+
+/// Media type of a file part: the desktop counterpart of
+/// `utils/rest.ts::contentTypeForFilename`.
+fn content_type_for_path(path: &Path) -> String {
+    mime_guess::from_path(path)
+        .first_raw()
+        .unwrap_or("application/octet-stream")
+        .to_string()
+}
+
+/// Last segment of a POSIX or Windows path.
+fn filename_of(path: &str) -> String {
+    let trimmed = path.trim_end_matches(|char| char == '/' || char == '\\');
+    match trimmed.rfind(|char| char == '/' || char == '\\') {
+        Some(index) => trimmed[index + 1..].to_string(),
+        None => trimmed.to_string(),
+    }
+}
+
+/// Name a file part carries on the wire: the alias the user kept, else the picked
+/// path's file name.
+fn file_part_filename(file: &RestFileRow) -> String {
+    if !file.filename.trim().is_empty() {
+        return file.filename.trim().to_string();
+    }
+    filename_of(file.path.trim())
+}
+
+/// Part names and filenames are written inside the quoting of
+/// `Content-Disposition`, so the quote delimiter and the framing characters are
+/// neutralised instead of breaking the header.
+fn sanitized_parameter(value: &str) -> String {
+    value
+        .chars()
+        .map(|char| match char {
+            '"' | '\\' => '_',
+            '\r' | '\n' => ' ',
+            other => other,
+        })
+        .collect()
+}
+
+/// RFC 5987 `attr-char`: characters a `filename*` may carry unescaped. A filename
+/// outside that set additionally gets the extended parameter, as the client does.
+fn is_attr_char(char: char) -> bool {
+    char.is_ascii_alphanumeric()
+        || matches!(
+            char,
+            ' ' | '!'
+                | '#'
+                | '$'
+                | '%'
+                | '&'
+                | '\''
+                | '*'
+                | '+'
+                | '-'
+                | '.'
+                | '^'
+                | '_'
+                | '`'
+                | '|'
+                | '~'
+                | '@'
+                | '('
+                | ')'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+        )
+}
+
+fn needs_extended_filename(filename: &str) -> bool {
+    !filename.is_empty() && !filename.chars().all(is_attr_char)
+}
+
+/// Same percent set as `encodeURIComponent`, which the client writes in its preview.
+fn percent_encode_attr(value: &str) -> String {
+    let mut out = String::new();
+    for byte in value.as_bytes() {
+        let char = *byte as char;
+        if byte.is_ascii_alphanumeric()
+            || matches!(char, '-' | '_' | '.' | '~' | '!' | '*' | '\'' | '(' | ')')
+        {
+            out.push(char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+fn file_disposition(name: &str, filename: &str) -> String {
+    let mut line = format!(
+        "content-disposition: form-data; name=\"{}\"; filename=\"{}\"",
+        sanitized_parameter(name),
+        sanitized_parameter(filename)
+    );
+    if needs_extended_filename(filename) {
+        line.push_str(&format!(
+            "; filename*=UTF-8''{}",
+            percent_encode_attr(filename)
+        ));
+    }
+    line
+}
+
+/// `reqwest` is compiled without its `multipart` feature, so the body is assembled
+/// here: a boundary, one part per row, and the file bytes read from the picked path.
+/// Rows with a blank name are skipped exactly as they are skipped in storage.
+pub fn encode_multipart(
+    fields: &[RestProperty],
+    files: &[RestFileRow],
+    boundary: &str,
+) -> Result<Vec<u8>, String> {
+    let mut out: Vec<u8> = Vec::new();
+    for field in fields {
+        if field.name.trim().is_empty() {
+            continue;
+        }
+        out.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        out.extend_from_slice(
+            format!(
+                "content-disposition: form-data; name=\"{}\"\r\n\r\n",
+                sanitized_parameter(field.name.trim())
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(field.value.as_bytes());
+        out.extend_from_slice(b"\r\n");
+    }
+    for file in files {
+        if file.name.trim().is_empty() {
+            continue;
+        }
+        let path = file.path.trim();
+        if path.is_empty() {
+            return Err(
+                "This file is not available on this machine. Pick it again before sending."
+                    .to_string(),
+            );
+        }
+        let bytes =
+            std::fs::read(path).map_err(|error| format!("Could not read {path}: {error}"))?;
+        let filename = file_part_filename(file);
+        out.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        out.extend_from_slice(file_disposition(file.name.trim(), &filename).as_bytes());
+        out.extend_from_slice(
+            format!(
+                "\r\ncontent-type: {}\r\n\r\n",
+                content_type_for_path(Path::new(path))
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(&bytes);
+        out.extend_from_slice(b"\r\n");
+    }
+    out.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    Ok(out)
+}
+
+/// Raw-request dump of a multipart body. File payloads are replaced by a marker: the
+/// dump is stored as text, so a binary blob would not survive it. Mirrors
+/// `utils/rest.ts::buildMultipartPreview`.
+pub fn multipart_dump(fields: &[RestProperty], files: &[RestFileRow], boundary: &str) -> String {
+    let mut out = String::new();
+    for field in fields {
+        if field.name.trim().is_empty() {
+            continue;
+        }
+        out.push_str(&format!("--{boundary}\r\n"));
+        out.push_str(&format!(
+            "content-disposition: form-data; name=\"{}\"\r\n\r\n",
+            sanitized_parameter(field.name.trim())
+        ));
+        out.push_str(&field.value);
+        out.push_str("\r\n");
+    }
+    for file in files {
+        if file.name.trim().is_empty() {
+            continue;
+        }
+        let path = file.path.trim();
+        let filename = file_part_filename(file);
+        let guess = if path.is_empty() { &filename } else { path };
+        out.push_str(&format!("--{boundary}\r\n"));
+        out.push_str(&file_disposition(file.name.trim(), &filename));
+        out.push_str(&format!(
+            "\r\ncontent-type: {}\r\n\r\n",
+            content_type_for_path(Path::new(guess))
+        ));
+        if path.is_empty() {
+            out.push_str(&format!("<bytes of {filename}, not loaded>\r\n"));
+        } else {
+            out.push_str(&format!("<bytes of {path}>\r\n"));
+        }
+    }
+    out.push_str(&format!("--{boundary}--\r\n"));
+    out
 }
 
 /// Percent-encode set of `application/x-www-form-urlencoded`: unreserved ASCII plus
@@ -655,15 +990,40 @@ pub fn encode_form_urlencoded(rows: &[RestProperty]) -> String {
     parts.join("&")
 }
 
-/// Chooses the body that goes on the wire. The Form-encode table has its own storage
-/// and takes priority whenever the Form-encode tab is selected; the JSON/XML/Text
-/// buffer is then ignored and never modified.
-pub fn resolve_body(body_type: &str, body: &str, form: &[RestProperty]) -> String {
-    if body_type == "form" {
+/// Body that goes on the wire, plus the text version of the same body for the raw
+/// dump. A multipart dump replaces file payloads with a marker, because the dump is
+/// stored as text and binary bytes would not survive that.
+pub struct ResolvedBody {
+    pub wire: Vec<u8>,
+    pub dump: String,
+}
+
+/// Chooses the body that goes on the wire. The Form-encode table and the Form tab's
+/// tables have their own storage and take priority whenever their tab is selected;
+/// the JSON/XML/Text buffer is then ignored and never modified.
+pub fn resolve_body(
+    body_type: &str,
+    body: &str,
+    form: &[RestProperty],
+    multipart: &[RestProperty],
+    files: &[RestFileRow],
+    boundary: &str,
+) -> Result<ResolvedBody, String> {
+    if body_type == "multipart" {
+        return Ok(ResolvedBody {
+            wire: encode_multipart(multipart, files, boundary)?,
+            dump: multipart_dump(multipart, files, boundary),
+        });
+    }
+    let text = if body_type == "form" {
         encode_form_urlencoded(form)
     } else {
         body.to_string()
-    }
+    };
+    Ok(ResolvedBody {
+        wire: text.clone().into_bytes(),
+        dump: text,
+    })
 }
 
 fn host_header(url: &Url) -> String {
@@ -677,8 +1037,9 @@ fn host_header(url: &Url) -> String {
 fn prepare_headers(
     url: &Url,
     headers: &[RestProperty],
-    body: &str,
+    resolved: &ResolvedBody,
     body_type: &str,
+    boundary: Option<&str>,
 ) -> Vec<RestProperty> {
     let mut prepared = headers
         .iter()
@@ -704,17 +1065,22 @@ fn prepare_headers(
             value: host_header(url),
         });
     }
-    if !body.is_empty() {
+    if !resolved.wire.is_empty() {
+        // A multipart body must carry the boundary the bytes were built with, so a
+        // hand-typed Content-Type is replaced rather than kept.
+        if body_type == "multipart" {
+            prepared.retain(|header| !header.name.eq_ignore_ascii_case("content-type"));
+        }
         if !has_header(&prepared, "content-type") {
             prepared.push(RestProperty {
                 name: "content-type".to_string(),
-                value: default_content_type(body_type).to_string(),
+                value: default_content_type(body_type, boundary),
             });
         }
         if !has_header(&prepared, "content-length") {
             prepared.push(RestProperty {
                 name: "content-length".to_string(),
-                value: body.len().to_string(),
+                value: resolved.wire.len().to_string(),
             });
         }
     }
@@ -765,10 +1131,16 @@ struct PreparedCall {
     method: Method,
     url: Url,
     headers: Vec<(HeaderName, HeaderValue)>,
-    body: String,
+    body: Vec<u8>,
     raw_request: String,
 }
 
+/// A boundary that cannot appear inside the body it separates: a fresh UUID.
+fn multipart_boundary() -> String {
+    Uuid::new_v4().to_string()
+}
+
+#[allow(clippy::too_many_arguments)]
 fn prepare_call(
     method: &str,
     url: &str,
@@ -776,12 +1148,27 @@ fn prepare_call(
     body: &str,
     body_type: &str,
     form: &[RestProperty],
+    multipart: &[RestProperty],
+    files: &[RestFileRow],
 ) -> Result<PreparedCall, String> {
     let parsed = normalize_rest_url(url)?;
     let method = Method::from_bytes(method.trim().to_ascii_uppercase().as_bytes())
         .map_err(|_| format!("Invalid HTTP method: {method}"))?;
-    let body = resolve_body(body_type, body, form);
-    let prepared = prepare_headers(&parsed, headers, &body, body_type);
+    let boundary = match body_type {
+        "multipart" => Some(multipart_boundary()),
+        _ => None,
+    };
+    let resolved = resolve_body(
+        body_type,
+        body,
+        form,
+        multipart,
+        files,
+        boundary
+            .as_deref()
+            .unwrap_or(MULTIPART_BOUNDARY_PLACEHOLDER),
+    )?;
+    let prepared = prepare_headers(&parsed, headers, &resolved, body_type, boundary.as_deref());
     let wire_headers = prepared
         .iter()
         .filter(|header| {
@@ -791,12 +1178,12 @@ fn prepare_call(
         .cloned()
         .collect::<Vec<_>>();
     let header_map = build_headers_map(&wire_headers)?;
-    let raw_request = build_raw_request(method.as_str(), &parsed, &prepared, &body);
+    let raw_request = build_raw_request(method.as_str(), &parsed, &prepared, &resolved.dump);
     Ok(PreparedCall {
         method,
         url: parsed,
         headers: header_map,
-        body,
+        body: resolved.wire,
         raw_request,
     })
 }
@@ -919,6 +1306,8 @@ pub async fn cmd_execute_rest_request(
     body: String,
     body_type: String,
     form: Option<Vec<RestProperty>>,
+    multipart: Option<Vec<RestProperty>>,
+    files: Option<Vec<RestFileRow>>,
 ) -> Result<RestResponse, String> {
     let form = form.unwrap_or_default();
     let PreparedCall {
@@ -927,7 +1316,16 @@ pub async fn cmd_execute_rest_request(
         headers,
         body: request_body,
         raw_request,
-    } = prepare_call(&method, &url, &headers, &body, &body_type, &form)?;
+    } = prepare_call(
+        &method,
+        &url,
+        &headers,
+        &body,
+        &body_type,
+        &form,
+        &multipart.unwrap_or_default(),
+        &files.unwrap_or_default(),
+    )?;
     let client = build_client()?;
     let receiver = cancel.begin();
 
@@ -1022,10 +1420,21 @@ pub async fn cmd_download_rest_response(
     body: String,
     body_type: String,
     form: Option<Vec<RestProperty>>,
+    multipart: Option<Vec<RestProperty>>,
+    files: Option<Vec<RestFileRow>>,
     path: String,
 ) -> Result<u64, String> {
     let form = form.unwrap_or_default();
-    let call = prepare_call(&method, &url, &headers, &body, &body_type, &form)?;
+    let call = prepare_call(
+        &method,
+        &url,
+        &headers,
+        &body,
+        &body_type,
+        &form,
+        &multipart.unwrap_or_default(),
+        &files.unwrap_or_default(),
+    )?;
     let client = build_client()?;
     let mut builder = client.request(call.method.clone(), call.url.clone());
     for (name, value) in &call.headers {
@@ -1138,7 +1547,8 @@ mod tests {
     #[test]
     fn builds_raw_request_with_defaults() {
         let url = normalize_rest_url("https://example.com/api?x=1").expect("url");
-        let headers = prepare_headers(&url, &[], "{\"a\":1}", "json");
+        let resolved = resolve_body("json", "{\"a\":1}", &[], &[], &[], "unused").expect("body");
+        let headers = prepare_headers(&url, &[], &resolved, "json", None);
         let raw = build_raw_request("POST", &url, &headers, "{\"a\":1}");
         assert!(raw.starts_with("POST /api?x=1 HTTP/1.1\r\n"));
         assert!(raw.contains("host: example.com"));
@@ -1162,10 +1572,15 @@ mod tests {
     #[test]
     fn form_table_has_priority_over_text_body() {
         let rows = vec![property("user", "a"), property("pass", "b")];
-        assert_eq!(resolve_body("form", "{\"a\":1}", &rows), "user=a&pass=b");
-        assert_eq!(resolve_body("json", "{\"a\":1}", &rows), "{\"a\":1}");
-        assert_eq!(resolve_body("text", "plain", &rows), "plain");
-        assert_eq!(resolve_body("form", "{\"a\":1}", &[]), "");
+        let resolved = |body_type: &str, body: &str, form: &[RestProperty]| {
+            resolve_body(body_type, body, form, &[], &[], "Boundary").expect("body")
+        };
+        let form = resolved("form", "{\"a\":1}", &rows);
+        assert_eq!(form.dump, "user=a&pass=b");
+        assert_eq!(form.wire, form.dump.as_bytes());
+        assert_eq!(resolved("json", "{\"a\":1}", &rows).dump, "{\"a\":1}");
+        assert_eq!(resolved("text", "plain", &rows).dump, "plain");
+        assert_eq!(resolved("form", "{\"a\":1}", &[]).dump, "");
     }
 
     #[test]
@@ -1177,17 +1592,112 @@ mod tests {
             "{\"ignored\":true}",
             "form",
             &[property("user", "a b"), property("pass", "c&d")],
+            &[],
+            &[],
         )
         .expect("prepared call");
-        assert_eq!(call.body, "user=a+b&pass=c%26d");
+        assert_eq!(call.body, b"user=a+b&pass=c%26d".to_vec());
         assert!(call
             .raw_request
             .contains("content-type: application/x-www-form-urlencoded"));
         assert!(call
             .raw_request
             .contains(&format!("content-length: {}", call.body.len())));
-        assert!(call.raw_request.ends_with(&call.body));
+        assert!(call.raw_request.ends_with("user=a+b&pass=c%26d"));
         assert!(!call.raw_request.contains("ignored"));
+    }
+
+    #[test]
+    fn multipart_body_is_encoded_with_the_boundary_and_a_dump() {
+        let directory = std::env::temp_dir().join(format!("rest-multipart-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).expect("temp dir");
+        let path = directory.join("report.txt");
+        std::fs::write(&path, b"note content").expect("fixture");
+
+        let files = vec![RestFileRow {
+            name: "document".to_string(),
+            path: path.display().to_string(),
+            filename: String::new(),
+        }];
+        let fields = vec![property("comment", "hello world"), property(" ", "dropped")];
+        let resolved = resolve_body("multipart", "{\"ignored\":1}", &[], &fields, &files, "BND")
+            .expect("multipart body");
+
+        let wire = String::from_utf8(resolved.wire.clone()).expect("text body");
+        assert!(wire.contains("--BND\r\ncontent-disposition: form-data; name=\"comment\""));
+        assert!(wire.contains("hello world"));
+        assert!(!wire.contains("dropped"));
+        assert!(wire.contains("filename=\"report.txt\""));
+        assert!(wire.contains("content-type: text/plain"));
+        assert!(wire.contains("note content"));
+        assert!(wire.ends_with("--BND--\r\n"));
+
+        // The dump keeps the same framing without the payload and reports its length.
+        assert!(resolved.dump.contains("<bytes of "));
+        assert!(!resolved.dump.contains("note content"));
+        assert!(!resolved.dump.contains("ignored"));
+
+        let call = prepare_call(
+            "POST",
+            "https://example.com/upload",
+            &[property("content-type", "application/json")],
+            "",
+            "multipart",
+            &[],
+            &fields,
+            &files,
+        )
+        .expect("prepared call");
+        // `prepare_call` generates its own boundary, so only the framing is comparable.
+        let boundary = call
+            .headers
+            .iter()
+            .find(|(name, _)| name.as_str() == "content-type")
+            .map(|(_, value)| {
+                value
+                    .to_str()
+                    .unwrap_or_default()
+                    .replace("multipart/form-data; boundary=", "")
+            })
+            .expect("content type");
+        assert!(boundary.len() >= 8);
+        let body = String::from_utf8(call.body.clone()).expect("utf8 body");
+        assert!(body.contains(&format!(
+            "--{boundary}\r\ncontent-disposition: form-data; name=\"comment\""
+        )));
+        assert!(body.contains("note content"));
+        assert!(body.ends_with(&format!("--{boundary}--\r\n")));
+        assert!(call.raw_request.contains(&format!(
+            "content-type: multipart/form-data; boundary={boundary}"
+        )));
+        assert!(!call.raw_request.contains("application/json"));
+        assert!(call
+            .raw_request
+            .contains(&format!("content-length: {}", call.body.len())));
+        assert_eq!(
+            call.headers
+                .iter()
+                .filter(|(name, _)| name.as_str() == "content-type")
+                .count(),
+            1
+        );
+
+        // A file row with no path cannot be sent: nothing is invented for it.
+        let missing = resolve_body(
+            "multipart",
+            "",
+            &[],
+            &[],
+            &[RestFileRow {
+                name: "document".to_string(),
+                path: String::new(),
+                filename: "gone.txt".to_string(),
+            }],
+            "BND",
+        );
+        assert!(missing.is_err());
+
+        std::fs::remove_dir_all(&directory).ok();
     }
 
     #[test]
@@ -1209,6 +1719,8 @@ mod tests {
             save_response: true,
             headers: vec![property("Accept", "application/json")],
             form: vec![],
+            multipart: vec![],
+            files: vec![],
         };
         let created = create_rest_request(&connection, &draft).expect("request");
         assert_eq!(created.name, "Login");
@@ -1226,6 +1738,8 @@ mod tests {
             save_response: false,
             headers: vec![property("Accept", "text/plain")],
             form: vec![property("a", "1")],
+            multipart: vec![],
+            files: vec![],
         };
         update_rest_request(&connection, &update).expect("update");
         let stored = read_rest_request(&connection, &created.id)
@@ -1283,6 +1797,8 @@ mod tests {
             save_response: false,
             headers: vec![],
             form: rows.clone(),
+            multipart: vec![],
+            files: vec![],
         };
         let created = create_rest_request(&connection, &draft).expect("request");
 
@@ -1297,6 +1813,8 @@ mod tests {
             save_response: false,
             headers: vec![],
             form: rows.clone(),
+            multipart: vec![],
+            files: vec![],
         };
         update_rest_request(&connection, &update).expect("update");
 
@@ -1327,6 +1845,84 @@ mod tests {
         assert_eq!(legacy_rows, 0);
     }
 
+    fn file_row(name: &str, path: &str, filename: &str) -> RestFileRow {
+        RestFileRow {
+            name: name.to_string(),
+            path: path.to_string(),
+            filename: filename.to_string(),
+        }
+    }
+
+    /** (file rows, field rows) still in the tables, to prove deletes clean up. */
+    fn row_counts(connection: &Connection) -> (i64, i64) {
+        let files: i64 = connection
+            .query_row("SELECT COUNT(*) FROM rest_request_files", [], |row| {
+                row.get(0)
+            })
+            .expect("file count");
+        let fields: i64 = connection
+            .query_row("SELECT COUNT(*) FROM rest_request_multipart", [], |row| {
+                row.get(0)
+            })
+            .expect("multipart count");
+        (files, fields)
+    }
+
+    #[test]
+    fn multipart_rows_survive_a_round_trip_a_duplicate_and_a_delete() {
+        let connection = memory_db();
+        let draft = RestRequestDraft {
+            project_id: None,
+            name: "Upload".to_string(),
+            method: "POST".to_string(),
+            url: "https://example.com/upload".to_string(),
+            body: "{\"buffer\":\"untouched\"}".to_string(),
+            body_type: "multipart".to_string(),
+            save_response: false,
+            headers: vec![],
+            form: vec![property("encoded", "1")],
+            multipart: vec![
+                property("comment", "hello world"),
+                property(" ", "dropped with a blank name"),
+                property("flag", ""),
+            ],
+            files: vec![
+                file_row("document", "/tmp/report.txt", "report.txt"),
+                file_row(" ", "/tmp/anonymous.bin", ""),
+            ],
+        };
+        let created = create_rest_request(&connection, &draft).expect("request");
+
+        let stored = read_rest_request(&connection, &created.id)
+            .expect("read")
+            .expect("present");
+        assert_eq!(stored.body_type, "multipart");
+        // Only named rows survive, in the order they were typed.
+        assert_eq!(
+            stored.multipart,
+            vec![property("comment", "hello world"), property("flag", "")]
+        );
+        assert_eq!(
+            stored.files,
+            vec![file_row("document", "/tmp/report.txt", "report.txt")]
+        );
+        // Neither the JSON/XML/Text buffer nor the Form-encode table is rewritten.
+        assert_eq!(stored.body, "{\"buffer\":\"untouched\"}");
+        assert_eq!(stored.form, vec![property("encoded", "1")]);
+
+        let duplicate = duplicate_rest_request(&connection, &created.id).expect("duplicate");
+        assert_eq!(duplicate.body_type, "multipart");
+        assert_eq!(duplicate.multipart, stored.multipart);
+        assert_eq!(duplicate.files, stored.files);
+
+        delete_rest_request(&connection, &created.id).expect("delete request");
+        // Rows belong to a request, so deleting the source leaves the duplicate intact.
+        assert_eq!(row_counts(&connection), (1, 2));
+        delete_rest_request(&connection, &duplicate.id).expect("delete duplicate");
+        // Both requests are gone, and their part rows went with them.
+        assert_eq!(row_counts(&connection), (0, 0));
+    }
+
     #[test]
     fn duplicates_and_deletes_requests() {
         let connection = memory_db();
@@ -1341,6 +1937,8 @@ mod tests {
             save_response: false,
             headers: vec![property("Accept", "*/*")],
             form: vec![],
+            multipart: vec![],
+            files: vec![],
         };
         let created = create_rest_request(&connection, &draft).expect("request");
         let duplicate = duplicate_rest_request(&connection, &created.id).expect("duplicate");

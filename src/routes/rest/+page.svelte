@@ -3,6 +3,7 @@
 	import CodeMirrorEditor from '$lib/components/CodeMirrorEditor.svelte';
 	import Icon from '$lib/components/Icon.svelte';
 	import PropertyEditor from '$lib/components/PropertyEditor.svelte';
+	import PropertyFilesEditor from '$lib/components/PropertyFilesEditor.svelte';
 	import RestExplorer from '$lib/components/RestExplorer.svelte';
 	import { t } from '$lib/stores/i18n';
 	import { isDark } from '$lib/stores/theme';
@@ -43,12 +44,15 @@
 		formatRestSize,
 		formatRestTime,
 		getHeader,
+		multipartBoundary,
 		parseCookies,
 		parseCurl,
 		parseQuery,
 		resolveRequestBody,
 		setCookieRows,
 		updateUrlQuery,
+		validateFileRow,
+		validateFileRows,
 		validateProperties,
 		validatePropertyField,
 		validateQueryUrl,
@@ -57,6 +61,7 @@
 		type CurlShell,
 		type PropertyKind,
 		type RequestValidationSource,
+		type RestFileRow,
 		type RestProperty,
 		type ValidationIssue,
 		type ValidationKind
@@ -64,9 +69,15 @@
 
 	type RequestTab = 'headers' | 'query' | 'cookies';
 	type ResponseTab = 'response' | 'headers' | 'raw';
+	type MultipartTab = 'fields' | 'files';
 
 	const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
-	const BODY_TYPES: BodyType[] = ['json', 'xml', 'text', 'form'];
+	const BODY_TYPES: BodyType[] = ['json', 'xml', 'text', 'form', 'multipart'];
+	const MULTIPART_TABS: MultipartTab[] = ['fields', 'files'];
+	// The raw preview needs a boundary that does not change on every keystroke. The
+	// request itself always gets a fresh one from the encoder, so this marker is only
+	// the layout hint shown before a run.
+	const previewBoundary = multipartBoundary();
 
 	let projects = $state<RestProject[]>([]);
 	let requests = $state<RestRequest[]>([]);
@@ -78,6 +89,7 @@
 	let running = $state(false);
 	let aborting = $state(false);
 	let requestTab = $state<RequestTab>('headers');
+	let multipartTab = $state<MultipartTab>('fields');
 	let responseTab = $state<ResponseTab>('response');
 	let response = $state<RestResponse | null>(null);
 	let responseText = $state('');
@@ -135,7 +147,8 @@
 						active.url,
 						active.headers,
 						effectiveBody,
-						active.body_type
+						active.body_type,
+						{ fields: active.multipart, files: active.files, boundary: previewBoundary }
 					)
 				: '')
 	);
@@ -166,6 +179,10 @@
 			...request,
 			headers: request.headers.map((header) => ({ ...header })),
 			form: request.form.map((row) => ({ ...row })),
+			multipart: request.multipart.map((row) => ({ ...row })),
+			// The picked `File` object is runtime state: a clone must keep it, or the
+			// browser build could not send the part it just picked.
+			files: request.files.map((row) => ({ ...row })),
 			response_headers: request.response_headers.map((header) => ({ ...header }))
 		};
 	}
@@ -180,6 +197,7 @@
 		responseText = found.response_body ?? '';
 		previewEnabled = false;
 		requestTab = 'headers';
+		multipartTab = 'fields';
 		responseTab = 'response';
 	}
 
@@ -223,7 +241,11 @@
 			body_type: request.body_type,
 			save_response: request.save_response,
 			headers: request.headers,
-			form: request.form
+			form: request.form,
+			multipart: request.multipart,
+			// Storage keeps the path and the display name only; the in-memory `File`
+			// belongs to this session and would serialize as an empty object.
+			files: request.files.map(({ name, path, filename }) => ({ name, path, filename }))
 		};
 	}
 
@@ -253,6 +275,8 @@
 		if (!active) return;
 		const next = { ...active, ...patch };
 		active = next;
+		// Each body tab owns its table, so the merged list row always takes the current
+		// tables and buffer from `next` rather than a patch that mentions only some.
 		requests = requests.map((request) =>
 			request.id === next.id
 				? {
@@ -260,7 +284,9 @@
 						...patch,
 						body: next.body,
 						headers: next.headers,
-						form: next.form
+						form: next.form,
+						multipart: next.multipart,
+						files: next.files
 					}
 				: request
 		);
@@ -292,6 +318,14 @@
 		patchActive({ form: rows });
 	}
 
+	function onMultipartFieldChange(rows: RestProperty[]): void {
+		patchActive({ multipart: rows });
+	}
+
+	function onMultipartFileChange(rows: RestFileRow[]): void {
+		patchActive({ files: rows });
+	}
+
 	const VALIDATION_KEYS: Record<ValidationKind, string> = {
 		'header-name': 'rest.validation.headerName',
 		'header-value': 'rest.validation.headerValue',
@@ -299,6 +333,10 @@
 		'cookie-value': 'rest.validation.cookieValue',
 		'query-param': 'rest.validation.queryParam',
 		'form-param': 'rest.validation.formParam',
+		'multipart-field-name': 'rest.validation.multipartFieldName',
+		'multipart-field-value': 'rest.validation.multipartFieldValue',
+		'multipart-file-name': 'rest.validation.multipartFileFieldName',
+		'file-missing': 'rest.validation.fileMissing',
 		'name-required': 'rest.validation.nameRequired'
 	};
 
@@ -329,6 +367,15 @@
 		};
 	}
 
+	/**
+	 * Cell-level hints for the file table. `value` is the file cell: a row that kept a
+	 * filename after a reload has no bytes left, and that is what this explains.
+	 */
+	function fileHint(field: 'name' | 'value', row: RestFileRow, index: number): string | null {
+		const issue = validateFileRow(row, index).find((item) => item.field === field);
+		return issue ? validationMessage(issue) : null;
+	}
+
 	/** Message that explains why a request cannot be sent, or `null` when it is valid. */
 	function validationFailure(request: RequestValidationSource): string | null {
 		const issues = validateRequest(request);
@@ -344,6 +391,22 @@
 	const formIssues = $derived(
 		active && active.body_type === 'form' ? validateProperties('form', active.form) : []
 	);
+	const multipartFieldIssues = $derived(
+		active && active.body_type === 'multipart' ? validateProperties('multipart', active.multipart) : []
+	);
+	const multipartFileIssues = $derived(
+		active && active.body_type === 'multipart' ? validateFileRows(active.files) : []
+	);
+	// The Form tab is a container for two tables, so it is marked when either one fails.
+	const multipartIssues = $derived([...multipartFieldIssues, ...multipartFileIssues]);
+	// Which issues a body tab reports; tabs with no table never have any.
+	const bodyIssues = $derived<Record<BodyType, ValidationIssue[]>>({
+		json: [],
+		xml: [],
+		text: [],
+		form: formIssues,
+		multipart: multipartIssues
+	});
 	// The URL field is the source of the query rows, so it carries the same error.
 	const urlClass = $derived(
 		'h-11 min-w-0 flex-1 rounded-lg border bg-[var(--panel-bg)] px-3 font-mono text-sm text-[var(--text)] outline-none transition-colors duration-150 placeholder:text-[var(--text-muted)] disabled:opacity-50 ' +
@@ -421,8 +484,11 @@
 				headers: target.headers,
 				body: target.body,
 				body_type: target.body_type,
-				// Form-encode rows win over the text body when that tab is active.
-				form: target.form
+				// Form-encode rows win over the text body when that tab is active, and
+				// the Form tables replace it entirely when the Form tab is active.
+				form: target.form,
+				multipart: target.multipart,
+				files: target.files
 			});
 			if (activeId === target.id) {
 				response = result;
@@ -505,7 +571,9 @@
 				body_type: 'json',
 				save_response: false,
 				headers: [],
-				form: []
+				form: [],
+				multipart: [],
+				files: []
 			});
 			requests = [...requests, created];
 			selectRequest(created.id);
@@ -542,7 +610,9 @@
 				body_type: parsed.bodyType,
 				save_response: false,
 				headers: parsed.headers,
-				form: parsed.form
+				form: parsed.form,
+				multipart: parsed.multipart,
+				files: parsed.files
 			});
 			requests = [...requests, created];
 			selectRequest(created.id);
@@ -649,7 +719,10 @@
 				method: request.method,
 				url: request.url,
 				headers: request.headers,
-				body
+				body,
+				body_type: request.body_type,
+				multipart: request.multipart,
+				files: request.files
 			},
 			shell
 		);
@@ -668,7 +741,10 @@
 				method: active.method,
 				url: active.url,
 				headers: active.headers,
-				body: effectiveBody
+				body: effectiveBody,
+				body_type: active.body_type,
+				multipart: active.multipart,
+				files: active.files
 			},
 			shell
 		);
@@ -689,7 +765,9 @@
 			headers: active.headers,
 			body: active.body,
 			body_type: active.body_type,
-			form: active.form
+			form: active.form,
+			multipart: active.multipart,
+			files: active.files
 		};
 		try {
 			if (isTauriRuntime()) {
@@ -1062,10 +1140,10 @@
 										: 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
 								>
 									{$t(`rest.body.${bodyType}`)}
-									{#if bodyType === 'form' && formIssues.length}
+									{#if bodyIssues[bodyType].length}
 										<span
 											class="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--danger)]"
-											title={validationMessage(formIssues[0])}
+											title={validationMessage(bodyIssues[bodyType][0])}
 										></span>
 									{/if}
 								</button>
@@ -1086,7 +1164,7 @@
 								</button>
 							{/if}
 						</div>
-						<div class="min-h-0 flex-1">
+						<div class="min-h-0 flex-1 overflow-hidden">
 							{#if active.body_type === 'form'}
 								<div class="h-full p-2">
 									<PropertyEditor
@@ -1100,6 +1178,63 @@
 										addLabel={$t('rest.addProperty')}
 										removeLabel={$t('rest.removeProperty')}
 									/>
+								</div>
+							{:else if active.body_type === 'multipart'}
+								<div class="flex h-full flex-col">
+									<div class="flex shrink-0 items-center gap-1 px-2 pt-2">
+										{#each MULTIPART_TABS as tab (tab)}
+											<button
+												type="button"
+												onclick={() => (multipartTab = tab)}
+												class="flex items-center gap-1 rounded-md px-3 py-1 text-sm font-bold transition-colors duration-150 {multipartTab ===
+												tab
+													? 'bg-[var(--row-active)] text-[var(--text)]'
+													: 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
+											>
+												{$t(`rest.multipart.${tab}`)}
+												{#if tab === 'fields' && multipartFieldIssues.length}
+													<span
+														class="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--danger)]"
+														title={validationMessage(multipartFieldIssues[0])}
+													></span>
+												{:else if tab === 'files' && multipartFileIssues.length}
+													<span
+														class="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--danger)]"
+														title={validationMessage(multipartFileIssues[0])}
+													></span>
+												{/if}
+											</button>
+										{/each}
+									</div>
+									<div class="min-h-0 flex-1 p-2">
+										{#if multipartTab === 'fields'}
+											<PropertyEditor
+												rows={active.multipart}
+												onchange={onMultipartFieldChange}
+												fieldHint={hintFor('multipart')}
+												nameLabel={$t('rest.multipart.fieldName')}
+												valueLabel={$t('rest.multipart.fieldValue')}
+												namePlaceholder={$t('rest.multipart.fieldName')}
+												valuePlaceholder={$t('rest.multipart.fieldValue')}
+												addLabel={$t('rest.addProperty')}
+												removeLabel={$t('rest.removeProperty')}
+											/>
+										{:else}
+											<PropertyFilesEditor
+												rows={active.files}
+												onchange={onMultipartFileChange}
+												fieldHint={fileHint}
+												nameLabel={$t('rest.multipart.partName')}
+												fileLabel={$t('rest.multipart.file')}
+												namePlaceholder={$t('rest.multipart.partName')}
+												filePlaceholder={$t('rest.multipart.noFile')}
+												addLabel={$t('rest.multipart.addFile')}
+												removeLabel={$t('rest.multipart.removeFile')}
+												pickLabel={$t('rest.multipart.pickFile')}
+												pickTitle={$t('rest.multipart.pickTitle')}
+											/>
+										{/if}
+									</div>
 								</div>
 							{:else}
 								<CodeMirrorEditor

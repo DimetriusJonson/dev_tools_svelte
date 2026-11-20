@@ -69,6 +69,54 @@ export function basename(path: string): string {
 	return index >= 0 ? normalized.slice(index + 1) : normalized;
 }
 
+/** A file chosen for a `multipart/form-data` part. */
+export interface PickedPartFile {
+	path: string;
+	filename: string;
+	file?: File;
+}
+
+/**
+ * Picks the file of a multipart part. Desktop returns the path the backend reads when
+ * the request is sent; the browser hands over the `File` itself, whose bytes live in
+ * memory for this session and cannot be turned back into a path.
+ */
+export async function pickPartFile(title: string): Promise<PickedPartFile | null> {
+	if (isTauriRuntime()) {
+		const { open } = await import('@tauri-apps/plugin-dialog');
+		const selection = await open({
+			multiple: false,
+			directory: false,
+			title,
+			filters: [{ name: 'All files', extensions: ['*'] }]
+		});
+		if (typeof selection !== 'string') return null;
+		return { path: selection, filename: basename(selection) };
+	}
+	return pickBrowserFile();
+}
+
+function pickBrowserFile(): Promise<PickedPartFile | null> {
+	if (typeof document === 'undefined') return Promise.resolve(null);
+	return new Promise((resolve) => {
+		const input = document.createElement('input');
+		input.type = 'file';
+		input.style.position = 'fixed';
+		input.style.left = '-9999px';
+		const finish = (value: PickedPartFile | null): void => {
+			input.remove();
+			resolve(value);
+		};
+		input.addEventListener('change', () => {
+			const file = input.files?.[0];
+			finish(file ? { path: '', filename: file.name, file } : null);
+		});
+		input.addEventListener('cancel', () => finish(null));
+		document.body.appendChild(input);
+		input.click();
+	});
+}
+
 export function formattedPath(path: string, mode: 'xml' | 'json'): string {
 	const extension = `.${mode}`;
 	if (path.toLowerCase().endsWith(extension)) {

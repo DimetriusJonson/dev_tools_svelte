@@ -3,8 +3,20 @@ export interface RestProperty {
 	value: string;
 }
 
-export type BodyType = 'json' | 'xml' | 'text' | 'form';
+export type BodyType = 'json' | 'xml' | 'text' | 'form' | 'multipart';
 export type CurlShell = 'posix' | 'windows';
+
+/**
+ * A `multipart/form-data` file part. `path` is what the desktop dialog picked and
+ * what goes to SQLite; `file` only exists in the browser build, where the bytes come
+ * from an `<input type=file>` and live in memory for the session.
+ */
+export interface RestFileRow {
+	name: string;
+	path: string;
+	filename: string;
+	file?: File | null;
+}
 
 export interface ParsedCurl {
 	method: string;
@@ -13,6 +25,8 @@ export interface ParsedCurl {
 	body: string;
 	bodyType: BodyType;
 	form: RestProperty[];
+	multipart: RestProperty[];
+	files: RestFileRow[];
 }
 
 const DEFAULT_USER_AGENT = 'WebDevUsefulTools Client';
@@ -135,20 +149,26 @@ export interface RestBodySource {
 	body: string;
 	body_type: BodyType;
 	form: RestProperty[];
+	multipart?: RestProperty[];
+	files?: RestFileRow[];
 }
 
 /**
- * Resolves the body that goes on the wire. Form-encode rows are stored in their own
- * table and never mix with the JSON/XML/Text buffer: when the Form-encode tab is
- * active the table wins and the text body is ignored, otherwise the text body is used
- * unchanged.
+ * Resolves the text body that goes on the wire. The Form-encode and Form tables have
+ * their own storage and never mix with the JSON/XML/Text buffer: when either tab is
+ * active the tables win and the text body is ignored. A multipart body is binary, so
+ * it is assembled separately (`buildMultipartPreview` for the raw dump, `FormData` in
+ * the browser and the byte encoder in Rust for the real request).
  */
 export function resolveRequestBody(source: RestBodySource): string {
-	return source.body_type === 'form' ? encodeForm(source.form) : source.body;
+	if (source.body_type === 'form') return encodeForm(source.form);
+	if (source.body_type === 'multipart') return '';
+	return source.body;
 }
 
 export function bodyTypeFromContentType(contentType: string): BodyType | null {
 	const value = contentType.toLowerCase();
+	if (value.includes('multipart/form-data')) return 'multipart';
 	if (value.includes('json')) return 'json';
 	if (value.includes('xml')) return 'xml';
 	if (value.includes('x-www-form-urlencoded')) return 'form';
@@ -191,7 +211,9 @@ export function detectLanguageFromHeaders(
 	return 'text';
 }
 
-export function defaultContentType(bodyType: BodyType): string {
+export const MULTIPART_BOUNDARY_PLACEHOLDER = 'BoundaryPlaceholder';
+
+export function defaultContentType(bodyType: BodyType, boundary?: string): string {
 	switch (bodyType) {
 		case 'json':
 			return 'application/json';
@@ -199,13 +221,166 @@ export function defaultContentType(bodyType: BodyType): string {
 			return 'application/xml';
 		case 'form':
 			return 'application/x-www-form-urlencoded';
+		case 'multipart':
+			return `multipart/form-data; boundary=${boundary ?? MULTIPART_BOUNDARY_PLACEHOLDER}`;
 		default:
 			return 'text/plain';
 	}
 }
 
+/**
+ * A boundary is a random UUID so it cannot collide with the text of a field value.
+ * The desktop encoder generates its own in Rust; this one is used for the browser
+ * request and for the raw-request preview, where it is only display text.
+ */
+export function multipartBoundary(): string {
+	const crypto = globalThis.crypto as Crypto | undefined;
+	if (crypto && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+	const bytes = new Uint8Array(16);
+	if (crypto && typeof crypto.getRandomValues === 'function') crypto.getRandomValues(bytes);
+	else for (let index = 0; index < bytes.length; index += 1) bytes[index] = Math.floor(Math.random() * 256);
+	bytes[6] = (bytes[6] & 0x0f) | 0x40;
+	bytes[8] = (bytes[8] & 0x3f) | 0x80;
+	const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+	return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/**
+ * Media types for the browser build, where there is no OS media-type table. The
+ * desktop encoder resolves the same thing through `mime_guess`, which knows more
+ * extensions; both fall back to `application/octet-stream`.
+ */
+const MEDIA_TYPES: Record<string, string> = {
+	txt: 'text/plain',
+	md: 'text/markdown',
+	csv: 'text/csv',
+	html: 'text/html',
+	htm: 'text/html',
+	xml: 'application/xml',
+	json: 'application/json',
+	yaml: 'application/x-yaml',
+	yml: 'application/x-yaml',
+	toml: 'application/toml',
+	js: 'text/javascript',
+	mjs: 'text/javascript',
+	css: 'text/css',
+	svg: 'image/svg+xml',
+	png: 'image/png',
+	jpg: 'image/jpeg',
+	jpeg: 'image/jpeg',
+	gif: 'image/gif',
+	webp: 'image/webp',
+	pdf: 'application/pdf',
+	zip: 'application/zip',
+	gz: 'application/gzip',
+	tar: 'application/x-tar',
+	mp3: 'audio/mpeg',
+	wav: 'audio/wav',
+	mp4: 'video/mp4',
+	webm: 'video/webm',
+	woff: 'font/woff',
+	woff2: 'font/woff2',
+	ttf: 'font/ttf',
+	otf: 'font/otf',
+	xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+	docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+	pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+};
+
+export function contentTypeForFilename(filename: string): string {
+	const extension = filename.includes('.')
+		? filename.slice(filename.lastIndexOf('.') + 1).toLowerCase()
+		: '';
+	return MEDIA_TYPES[extension] ?? 'application/octet-stream';
+}
+
+/** Last path segment of a POSIX or Windows path. */
+export function basenameOf(path: string): string {
+	const trimmed = path.replace(/[\\/]+$/, '');
+	const index = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
+	return index < 0 ? trimmed : trimmed.slice(index + 1);
+}
+
+/**
+ * Part names and filenames are the only user text inside a part header, so the
+ * encoder keeps them inside the quoting. The token check rejects names the
+ * `Content-Disposition` grammar could not carry; this guard is the last one for a
+ * filename, which is never validated because it comes from the file dialog.
+ */
+function quoteParameter(value: string): string {
+	return value.replace(/["\\]/g, '_').replace(/[\r\n]/g, ' ');
+}
+
+/** True when the filename needs RFC 5987 `filename*` to survive. */
+function needsExtendedFilename(filename: string): boolean {
+	return !/^[A-Za-z0-9 .!#$%&'*+\-.^_`|~@()\[\]{}]+$/.test(filename);
+}
+
+export interface MultipartPreviewOptions {
+	fields: RestProperty[];
+	files: RestFileRow[];
+	boundary: string;
+}
+
+/**
+ * The wire layout of a multipart body with the file payloads replaced by a marker:
+ * neither the browser nor the preview can read the bytes of a disk path, so the raw
+ * dump only shows where the content goes. Parts with a blank name are skipped exactly
+ * as the encoders skip them, which is why such a row is reported as `name-required`.
+ */
+export function buildMultipartPreview(options: MultipartPreviewOptions): string {
+	const { boundary } = options;
+	const lines: string[] = [];
+	for (const field of options.fields) {
+		if (!field.name.trim()) continue;
+		lines.push(
+			`--${boundary}`,
+			`content-disposition: form-data; name="${quoteParameter(field.name.trim())}"`,
+			'',
+			field.value
+		);
+	}
+	for (const file of options.files) {
+		if (!file.name.trim()) continue;
+		const filename = file.filename || (file.path ? basenameOf(file.path) : file.name.trim());
+		const parameters = [
+			`name="${quoteParameter(file.name.trim())}"`,
+			`filename="${quoteParameter(filename)}"`
+		];
+		if (needsExtendedFilename(filename)) parameters.push(`filename*=UTF-8''${encodeURIComponent(filename)}`);
+		lines.push(
+			`--${boundary}`,
+			`content-disposition: form-data; ${parameters.join('; ')}`,
+			`content-type: ${contentTypeForFilename(filename)}`,
+			'',
+			file.path ? `<bytes of ${file.path}>` : `<bytes of ${filename}, not loaded>`
+		);
+	}
+	lines.push(`--${boundary}--`);
+	return `${lines.join('\r\n')}\r\n`;
+}
+
+/**
+ * Browser execution path: the bytes come from the picked `File` object, which only
+ * lives in memory for the current session. `null` means a file row lost its object
+ * after a reload, and `validateRequest` already blocks such a request.
+ */
+export function buildMultipartFormData(fields: RestProperty[], files: RestFileRow[]): FormData | null {
+	const form = new FormData();
+	for (const field of fields) {
+		if (!field.name.trim()) continue;
+		form.append(field.name.trim(), field.value);
+	}
+	for (const file of files) {
+		if (!file.name.trim()) continue;
+		if (!file.file) return null;
+		form.append(file.name.trim(), file.file, file.filename || file.file.name);
+	}
+	return form;
+}
+
 /** Which property table a value belongs to; each one has its own grammar. */
-export type PropertyKind = 'header' | 'cookie' | 'query' | 'form';
+export type PropertyKind = 'header' | 'cookie' | 'query' | 'form' | 'multipart';
 
 export type ValidationKind =
 	| 'header-name'
@@ -214,6 +389,10 @@ export type ValidationKind =
 	| 'cookie-value'
 	| 'query-param'
 	| 'form-param'
+	| 'multipart-field-name'
+	| 'multipart-field-value'
+	| 'multipart-file-name'
+	| 'file-missing'
 	| 'name-required';
 
 export interface ValidationIssue {
@@ -339,6 +518,24 @@ function validateFormText(text: string, field: 'name' | 'value'): ValidationIssu
 	return null;
 }
 
+// A multipart part name is a `Content-Disposition` parameter written inside quotes and
+// it is never percent-encoded, so it has to stay an RFC 9110 token. The value is
+// written raw into the body, so only the framing characters are rejected.
+function validateMultipartName(name: string): ValidationIssue | null {
+	if (!name) return null;
+	if (!TOKEN_PATTERN.test(name)) {
+		return makeIssue('multipart-field-name', 'name', name, firstDisallowed(name, TOKEN_CHARACTER));
+	}
+	return null;
+}
+
+function validateMultipartValue(value: string): ValidationIssue | null {
+	if (!value) return null;
+	const match = CONTROL_CHARACTER.exec(value);
+	if (match) return makeIssue('multipart-field-value', 'value', value, match[0]);
+	return null;
+}
+
 /** Validates one cell of a property table. Blank cells are not errors. */
 export function validatePropertyField(
 	kind: PropertyKind,
@@ -355,6 +552,8 @@ export function validatePropertyField(
 			return validateQueryText(text, field);
 		case 'form':
 			return validateFormText(text, field);
+		case 'multipart':
+			return field === 'name' ? validateMultipartName(text) : validateMultipartValue(text);
 	}
 }
 
@@ -415,16 +614,55 @@ export interface RequestValidationSource {
 	headers: RestProperty[];
 	form: RestProperty[];
 	body_type: BodyType;
+	multipart?: RestProperty[];
+	files?: RestFileRow[];
 }
 
-/** Everything that goes on the wire: headers, cookies, query and active form rows. */
+/**
+ * A file row must point at something the request can read: `path` on the desktop, the
+ * picked `File` in the browser. A row that keeps only its filename after a reload has
+ * no bytes left, so the send has to be blocked rather than silently dropping the part.
+ */
+export function validateFileRow(row: RestFileRow, index: number): ValidationIssue[] {
+	const issues: ValidationIssue[] = [];
+	const name = row.name.trim();
+	// Something was picked, even if its content is gone: that is a row to report, not noise.
+	const hasContent = Boolean(row.path.trim() || row.filename.trim() || row.file);
+	const isReadable = Boolean(row.path.trim() || row.file);
+
+	if (!name && hasContent) {
+		issues.push({ kind: 'name-required', field: 'name', name: '', char: '', row: index });
+	}
+	if (name && !TOKEN_PATTERN.test(name)) {
+		issues.push({
+			...makeIssue('multipart-file-name', 'name', name, firstDisallowed(name, TOKEN_CHARACTER)),
+			row: index
+		});
+	}
+	if (name && !isReadable) {
+		issues.push({ kind: 'file-missing', field: 'value', name, char: '', row: index });
+	}
+	return issues;
+}
+
+export function validateFileRows(rows: RestFileRow[]): ValidationIssue[] {
+	return rows.flatMap((row, index) => validateFileRow(row, index));
+}
+
+/** Everything that goes on the wire: headers, cookies, query and the active body tables. */
 export function validateRequest(request: RequestValidationSource): ValidationIssue[] {
 	return [
 		...validateProperties('header', request.headers),
 		...validateProperties('cookie', parseCookies(request.headers)),
 		...validateQueryUrl(request.url),
-		// Form rows only reach the request when the Form-encode tab is selected.
-		...(request.body_type === 'form' ? validateProperties('form', request.form) : [])
+		// Body tables only reach the request when their tab is selected.
+		...(request.body_type === 'form' ? validateProperties('form', request.form) : []),
+		...(request.body_type === 'multipart'
+			? [
+					...validateProperties('multipart', request.multipart ?? []),
+					...validateFileRows(request.files ?? [])
+				]
+			: [])
 	];
 }
 
@@ -438,17 +676,28 @@ function normalizeUrl(raw: string): URL | null {
 	}
 }
 
+/**
+ * Builds the raw HTTP dump shown in the Raw request tab and stored with a response.
+ * A multipart dump is synthetic by nature: the boundary differs on every run and the
+ * file parts carry a marker instead of their bytes, because neither the browser nor
+ * the preview can read a disk path.
+ */
 export function buildRawRequestPreview(
 	method: string,
 	url: string,
 	headers: RestProperty[],
 	body: string,
-	bodyType: BodyType
+	bodyType: BodyType,
+	options?: MultipartPreviewOptions
 ): string {
 	const parsed = normalizeUrl(url);
 	if (!parsed) return `${method.toUpperCase()} ${url}`;
+	const multipart = bodyType === 'multipart' ? options : undefined;
+	// A multipart boundary belongs inside the content-type, so a hand-typed
+	// Content-Type header is replaced the same way the encoders replace it.
 	const prepared = headers
 		.filter((header) => header.name.trim())
+		.filter((header) => !(multipart && header.name.toLowerCase() === 'content-type'))
 		.map((header) => ({ ...header }));
 	const has = (name: string) =>
 		prepared.some((header) => header.name.toLowerCase() === name.toLowerCase());
@@ -459,19 +708,24 @@ export function buildRawRequestPreview(
 		const port = parsed.port ? `:${parsed.port}` : '';
 		prepared.push({ name: 'host', value: `${parsed.hostname}${port}` });
 	}
-	if (body) {
+
+	const previewBody = multipart ? buildMultipartPreview(multipart) : body;
+	if (multipart || previewBody) {
 		if (!has('content-type')) {
-			prepared.push({ name: 'content-type', value: defaultContentType(bodyType) });
+			const value = multipart
+				? defaultContentType('multipart', multipart.boundary)
+				: defaultContentType(bodyType);
+			prepared.push({ name: 'content-type', value });
 		}
 		if (!has('content-length')) {
-			prepared.push({ name: 'content-length', value: String(new TextEncoder().encode(body).length) });
+			prepared.push({ name: 'content-length', value: String(byteLength(previewBody)) });
 		}
 	}
 
 	const path = `${parsed.pathname || '/'}${parsed.search}`;
 	const lines = [`${method.toUpperCase()} ${path} HTTP/1.1`];
 	for (const header of prepared) lines.push(`${header.name}: ${header.value}`);
-	return `${lines.join('\r\n')}\r\n\r\n${body}`;
+	return `${lines.join('\r\n')}\r\n\r\n${previewBody}`;
 }
 
 export function formatRestSize(bytes: number): string {
@@ -755,6 +1009,28 @@ const CURL_FLAGS_IGNORED = new Set([
 	'--globoff'
 ]);
 
+/**
+ * curl's `-F` grammar puts trailing parameters after the value
+ * (`name=@file.txt;filename=alias.txt;type=text/plain`). Only the trailing pair is
+ * taken apart, so a semicolon inside the value itself survives.
+ */
+function splitFormParameters(raw: string): { value: string; filename: string } {
+	// curl accepts `;filename=` and `;type=` in any order after the value, and each
+	// parameter ends at the next semicolon. Other semicolons stay inside the text, so
+	// a plain field value like `a;b` is not cut apart by this parser.
+	const parameter = /;filename=([^;]*)|;type=([^;]*)/g;
+	let value = '';
+	let filename = '';
+	let cursor = 0;
+	for (const match of raw.matchAll(parameter)) {
+		value += raw.slice(cursor, match.index ?? 0);
+		cursor = (match.index ?? 0) + match[0].length;
+		if (match[1] !== undefined) filename = match[1];
+	}
+	value += raw.slice(cursor);
+	return { value, filename };
+}
+
 export function parseCurl(command: string): ParsedCurl | null {
 	let normalized = command.replace(/\\\r?\n|\^\r?\n/g, ' ');
 	// Windows commands quote arguments either plainly (`"value"`) or with a caret
@@ -774,6 +1050,8 @@ export function parseCurl(command: string): ParsedCurl | null {
 	let url = '';
 	const headers: RestProperty[] = [];
 	const bodyParts: string[] = [];
+	const multipart: RestProperty[] = [];
+	const files: RestFileRow[] = [];
 
 	const addHeader = (value: string) => {
 		const header = splitHeader(value);
@@ -783,6 +1061,21 @@ export function parseCurl(command: string): ParsedCurl | null {
 		);
 		if (existing >= 0) headers[existing] = header;
 		else headers.push(header);
+	};
+
+	// `-F name=@file` uploads a file; `--form-string` keeps `@` as literal text.
+	const addFormPart = (raw: string, interpretFile: boolean) => {
+		const separator = raw.indexOf('=');
+		if (separator < 0) return;
+		const name = raw.slice(0, separator);
+		if (!name) return;
+		const { value, filename } = splitFormParameters(raw.slice(separator + 1));
+		if (interpretFile && value.startsWith('@') && value.length > 1) {
+			const path = value.slice(1);
+			files.push({ name, path, filename: filename || basenameOf(path) });
+		} else {
+			multipart.push({ name, value });
+		}
 	};
 
 	for (let index = 1; index < tokens.length; index += 1) {
@@ -795,6 +1088,16 @@ export function parseCurl(command: string): ParsedCurl | null {
 		}
 		if (token === '-H' || token === '--header') {
 			addHeader(tokens[index + 1] ?? '');
+			index += 1;
+			continue;
+		}
+		if (token === '-F' || token === '--form') {
+			addFormPart(tokens[index + 1] ?? '', true);
+			index += 1;
+			continue;
+		}
+		if (token === '--form-string') {
+			addFormPart(tokens[index + 1] ?? '', false);
 			index += 1;
 			continue;
 		}
@@ -867,24 +1170,36 @@ export function parseCurl(command: string): ParsedCurl | null {
 	if (!url.trim()) return null;
 
 	const rawBody = bodyParts.join('&');
+	const hasFormParts = multipart.length > 0 || files.length > 0;
+	// curl sends `-d` together with `-F` as extra parts of the same multipart body.
+	if (hasFormParts && rawBody) multipart.push(...parseForm(rawBody));
+	const contentTypeIndex = headers.findIndex((header) => header.name.toLowerCase() === 'content-type');
+	// The client generates the boundary, so an imported boundary from another tool is
+	// noise the user cannot act on; dropping it keeps the header list honest.
+	if (hasFormParts && contentTypeIndex >= 0) headers.splice(contentTypeIndex, 1);
+
 	const contentType = getHeader(headers, 'content-type');
-	const importedType = bodyTypeFromContentType(contentType) ?? sniffBodyType(rawBody);
+	const importedType = hasFormParts ? 'multipart' : bodyTypeFromContentType(contentType) ?? sniffBodyType(rawBody);
 	const textBody = unescapeImportedBody(rawBody, importedType);
 	// Re-sniff after de-escaping: an escaped payload usually only looks like JSON or
 	// XML once the escapes are gone, and there is no Content-Type to trust.
-	const bodyType = bodyTypeFromContentType(contentType) ?? sniffBodyType(textBody);
+	const bodyType = hasFormParts
+		? 'multipart'
+		: bodyTypeFromContentType(contentType) ?? sniffBodyType(textBody);
 	const form = bodyType === 'form' ? parseForm(rawBody) : [];
-	// Form-encode rows live in their own table, so an imported form body does not
-	// occupy the JSON/XML/Text buffer.
-	const body = bodyType === 'form' ? '' : textBody;
+	// Form-encode rows and Form tables live in their own storage, so an imported body
+	// of those kinds does not occupy the JSON/XML/Text buffer.
+	const body = bodyType === 'form' || bodyType === 'multipart' ? '' : textBody;
 
 	return {
-		method: (method || (rawBody ? 'POST' : 'GET')).toUpperCase(),
+		method: (method || (rawBody || hasFormParts ? 'POST' : 'GET')).toUpperCase(),
 		url,
 		headers,
 		body,
 		bodyType,
-		form
+		form,
+		multipart,
+		files
 	};
 }
 
@@ -914,6 +1229,9 @@ export function buildCurl(
 		url: string;
 		headers: RestProperty[];
 		body: string;
+		body_type?: BodyType;
+		multipart?: RestProperty[];
+		files?: RestFileRow[];
 	},
 	shell: CurlShell
 ): string {
@@ -922,14 +1240,49 @@ export function buildCurl(
 	// cmd.exe needs ` ^` before every newline so the lines are one command.
 	const joiner = shell === 'posix' ? ' ' : ' ^\r\n';
 	const methodPart = `--request ${request.method.toUpperCase()}`;
+	const isMultipart = request.body_type === 'multipart';
+	// curl sets its own boundary for `--form`, so a Content-Type from the table would
+	// only contradict it.
 	const headerParts = request.headers
 		.filter((header) => header.name.trim())
+		.filter((header) => !(isMultipart && header.name.toLowerCase() === 'content-type'))
 		.map((header) => `-H ${quote(`${header.name}: ${header.value}`)}`);
-	const bodyParts = request.body ? [`--data-raw ${quote(request.body)}`] : [];
+	const bodyParts = isMultipart
+		? multipartCurlParts(request.multipart ?? [], request.files ?? [], quote)
+		: request.body
+			? [`--data-raw ${quote(request.body)}`]
+			: [];
 	// cmd.exe is picky about the URL token position, so it goes right after curl.exe.
 	const parts =
 		shell === 'posix'
 			? [executable, methodPart, ...headerParts, ...bodyParts, quote(request.url)]
 			: [`${executable} ${quote(request.url)}`, methodPart, ...headerParts, ...bodyParts];
 	return parts.join(joiner);
+}
+
+/**
+ * `-F` parts for a multipart body. `--form-string` is not used because curl would
+ * then refuse a `@` at the start of a value; a value with a leading `@` is rare and
+ * the exported command is still readable. File rows without a path cannot be
+ * exported, so they are skipped — `validateRequest` blocks that case beforehand.
+ */
+function multipartCurlParts(
+	fields: RestProperty[],
+	files: RestFileRow[],
+	quote: (value: string) => string
+): string[] {
+	const parts: string[] = [];
+	for (const field of fields) {
+		if (!field.name.trim()) continue;
+		parts.push(`--form ${quote(`${field.name.trim()}=${field.value}`)}`);
+	}
+	for (const file of files) {
+		if (!file.name.trim() || !file.path.trim()) continue;
+		const name = file.name.trim();
+		const alias = file.filename.trim() && file.filename.trim() !== basenameOf(file.path.trim())
+			? `;filename=${file.filename.trim()}`
+			: '';
+		parts.push(`--form ${quote(`${name}=@${file.path.trim()}${alias}`)}`);
+	}
+	return parts;
 }

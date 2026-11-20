@@ -2,8 +2,11 @@ import { describe, expect, it } from 'vitest';
 import {
 	buildCookieHeader,
 	buildCurl,
+	buildMultipartFormData,
+	buildMultipartPreview,
 	buildQuery,
 	buildRawRequestPreview,
+	byteLength,
 	describeCharacter,
 	detectLanguageFromHeaders,
 	encodeForm,
@@ -18,6 +21,7 @@ import {
 	updateUrlQuery,
 	validateCookieName,
 	validateCookieValue,
+	validateFileRow,
 	validateHeaderName,
 	validateHeaderValue,
 	validateProperties,
@@ -507,5 +511,214 @@ describe('required parameter names', () => {
 				body_type: 'form'
 			}).map((issue) => issue.kind)
 		).toEqual(['name-required']);
+	});
+});
+
+describe('multipart form data', () => {
+	it('ignores the text buffer while the Form tab is active', () => {
+		expect(
+			resolveRequestBody({
+				body: '{"keep":1}',
+				body_type: 'multipart',
+				form: [],
+				multipart: [{ name: 'note', value: 'hi' }],
+				files: []
+			})
+		).toBe('');
+		// Form-encode rows still win over the buffer on their own tab.
+		expect(
+			resolveRequestBody({ body: '{"keep":1}', body_type: 'form', form: [{ name: 'q', value: 'a b' }] })
+		).toBe('q=a+b');
+	});
+
+	it('requires RFC 9110 token names and writes values verbatim', () => {
+		expect(validatePropertyField('multipart', 'name', 'upload_file')).toBeNull();
+		expect(validatePropertyField('multipart', 'name', 'bad name')?.kind).toBe('multipart-field-name');
+		// A field value is written raw into the body, so it is not percent-encoded.
+		expect(validatePropertyField('multipart', 'value', 'a b&c=d')).toBeNull();
+		expect(validatePropertyField('multipart', 'value', 'a\rb')?.kind).toBe('multipart-field-value');
+		expect(validateProperties('multipart', [{ name: '', value: 'x' }])).toEqual([
+			{ kind: 'name-required', field: 'name', name: '', char: '', row: 0 }
+		]);
+	});
+
+	it('requires a part name and a readable file for every file row', () => {
+		expect(validateFileRow({ name: 'doc', path: '/tmp/a.pdf', filename: 'a.pdf' }, 0)).toEqual([]);
+		expect(validateFileRow({ name: 'bad name', path: '/tmp/a.pdf', filename: 'a.pdf' }, 2)).toEqual([
+			{ kind: 'multipart-file-name', field: 'name', name: 'bad name', char: '␠', row: 2 }
+		]);
+		expect(validateFileRow({ name: '', path: '/tmp/a.pdf', filename: 'a.pdf' }, 1)).toEqual([
+			{ kind: 'name-required', field: 'name', name: '', char: '', row: 1 }
+		]);
+		// A persisted row has a filename left but no bytes: it must not be sent silently.
+		expect(validateFileRow({ name: 'doc', path: '', filename: 'a.pdf' }, 3)).toEqual([
+			{ kind: 'file-missing', field: 'value', name: 'doc', char: '', row: 3 }
+		]);
+		// The browser build holds the picked File in memory instead of a path.
+		expect(
+			validateFileRow({ name: 'doc', path: '', filename: 'a.pdf', file: new File(['x'], 'a.pdf') }, 0)
+		).toEqual([]);
+		expect(validateFileRow({ name: '', path: '', filename: '' }, 0)).toEqual([]);
+	});
+
+	it('checks the Form tables only when the Form tab is selected', () => {
+		const source = {
+			url: 'https://example.com/upload',
+			headers: [],
+			form: [],
+			multipart: [{ name: 'bad name', value: 'v' }],
+			files: [{ name: 'doc', path: '', filename: 'gone.txt' }]
+		};
+		expect(validateRequest({ ...source, body_type: 'json' as const })).toEqual([]);
+		expect(validateRequest({ ...source, body_type: 'multipart' as const }).map((i) => i.kind)).toEqual([
+			'multipart-field-name',
+			'file-missing'
+		]);
+	});
+
+	it('lays out the body preview with the boundary, a marker and no invented closers', () => {
+		const preview = buildMultipartPreview({
+			boundary: 'B-1',
+			fields: [
+				{ name: 'note', value: 'hello' },
+				{ name: '   ', value: 'dropped' }
+			],
+			files: [{ name: 'doc', path: '/tmp/报告.pdf', filename: '报告.pdf' }]
+		});
+		expect(preview).toBe(
+			[
+				'--B-1',
+				'content-disposition: form-data; name="note"',
+				'',
+				'hello',
+				'--B-1',
+				"content-disposition: form-data; name=\"doc\"; filename=\"报告.pdf\"; filename*=UTF-8''%E6%8A%A5%E5%91%8A.pdf",
+				'content-type: application/pdf',
+				'',
+				'<bytes of /tmp/报告.pdf>',
+				'--B-1--',
+				''
+			].join('\r\n')
+		);
+		// A name-less part is dropped exactly as the encoders drop it.
+		expect(preview).not.toContain('dropped');
+	});
+
+	it('replaces a hand-typed content type in the raw preview', () => {
+		const dump = buildRawRequestPreview(
+			'POST',
+			'https://example.com/upload',
+			[{ name: 'Content-Type', value: 'text/plain' }],
+			'{"ignored":1}',
+			'multipart',
+			{ boundary: 'B-1', fields: [{ name: 'note', value: 'hi' }], files: [] }
+		);
+		expect(dump).toContain('content-type: multipart/form-data; boundary=B-1');
+		expect(dump).not.toContain('text/plain');
+		expect(dump).not.toContain('{"ignored":1}');
+		// The body itself contains \r\n\r\n, so cut at the first header separator only.
+		const split = dump.indexOf('\r\n\r\n');
+		const body = dump.slice(split + 4);
+		expect(dump).toContain(`content-length: ${byteLength(body)}`);
+		expect(body).toBe('--B-1\r\ncontent-disposition: form-data; name="note"\r\n\r\nhi\r\n--B-1--\r\n');
+	});
+
+	it('exports --form parts and never a body that is not on the wire', () => {
+		const command = buildCurl(
+			{
+				method: 'POST',
+				url: 'https://example.com/upload',
+				headers: [{ name: 'Content-Type', value: 'multipart/form-data; boundary=stale' }],
+				body: '{"ignored":1}',
+				body_type: 'multipart',
+				multipart: [
+					{ name: 'note', value: 'a b' },
+					{ name: '   ', value: 'drop' }
+				],
+				files: [
+					{ name: 'doc', path: '/tmp/a.pdf', filename: 'alias.pdf' },
+					// No path means no bytes to export; validation blocks the send first.
+					{ name: 'gone', path: '', filename: 'gone.txt' }
+				]
+			},
+			'posix'
+		);
+		expect(command).toContain("--form 'note=a b'");
+		expect(command).toContain("--form 'doc=@/tmp/a.pdf;filename=alias.pdf'");
+		expect(command).not.toContain('--data-raw');
+		expect(command).not.toContain('Content-Type');
+		expect(command).not.toContain('gone');
+		expect(command).not.toContain('{"ignored":1}');
+
+		const windows = buildCurl(
+			{
+				method: 'POST',
+				url: 'https://example.com/upload',
+				headers: [],
+				body: '',
+				body_type: 'multipart',
+				multipart: [],
+				files: [{ name: 'doc', path: 'C:/tmp/a.pdf', filename: 'a.pdf' }]
+			},
+			'windows'
+		);
+		expect(windows).toContain('--form "doc=@C:/tmp/a.pdf"');
+		// The alias equals the file name here, so it is not repeated.
+		expect(windows).not.toContain(';filename=');
+	});
+
+	it('imports --form, -F and --form-string and drops the foreign boundary', () => {
+		const parsed = parseCurl(
+			"curl -X POST https://example.com/upload -H 'content-type: multipart/form-data; boundary=abc' --form 'note=hi there' -F 'doc=@/tmp/a.pdf;filename=alias.pdf;type=application/pdf' --form-string 'lit=@not-a-path'"
+		);
+		expect(parsed?.bodyType).toBe('multipart');
+		expect(parsed?.body).toBe('');
+		expect(parsed?.multipart).toEqual([
+			{ name: 'note', value: 'hi there' },
+			{ name: 'lit', value: '@not-a-path' }
+		]);
+		expect(parsed?.files).toEqual([{ name: 'doc', path: '/tmp/a.pdf', filename: 'alias.pdf' }]);
+		// curl generates the boundary itself, so an imported one is noise in the table.
+		expect(parsed?.headers).toEqual([]);
+
+		// `-d` next to `-F` is another part of the same body.
+		expect(parseCurl("curl -F 'a=1' -d 'b=2' https://example.com/u")?.multipart).toEqual([
+			{ name: 'a', value: '1' },
+			{ name: 'b', value: '2' }
+		]);
+	});
+
+	it('round trips an exported multipart command back into the tables', () => {
+		const command = buildCurl(
+			{
+				method: 'POST',
+				url: 'https://example.com/upload',
+				headers: [{ name: 'X-Trace', value: 'one' }],
+				body: '',
+				body_type: 'multipart',
+				multipart: [{ name: 'note', value: "with ' quote" }],
+				files: [{ name: 'doc', path: '/tmp/a.pdf', filename: 'alias.pdf' }]
+			},
+			'posix'
+		);
+		const parsed = parseCurl(command);
+		expect(parsed?.multipart).toEqual([{ name: 'note', value: "with ' quote" }]);
+		expect(parsed?.files).toEqual([{ name: 'doc', path: '/tmp/a.pdf', filename: 'alias.pdf' }]);
+		expect(parsed?.headers).toEqual([{ name: 'X-Trace', value: 'one' }]);
+	});
+
+	it('builds a browser body from the picked files', () => {
+		const form = buildMultipartFormData(
+			[
+				{ name: 'note', value: 'hi' },
+				{ name: '   ', value: 'drop' }
+			],
+			[{ name: 'doc', path: '', filename: 'alias.txt', file: new File(['x'], 'live.txt') }]
+		);
+		expect(form?.get('note')).toBe('hi');
+		expect(form?.get('   ')).toBeNull();
+		expect((form?.get('doc') as File | undefined)?.name).toBe('alias.txt');
+		// Without the in-memory File there is nothing to append, so the caller reports it.
+		expect(buildMultipartFormData([], [{ name: 'doc', path: '/tmp/a.txt', filename: 'a.txt' }])).toBeNull();
 	});
 });

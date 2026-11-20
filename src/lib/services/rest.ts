@@ -1,15 +1,19 @@
 import { getSetting, invokeCommand, isTauriRuntime, setSetting } from './db';
 import {
+	buildMultipartFormData,
 	buildRawRequestPreview,
 	defaultContentType,
 	detectLanguageFromContentType,
 	detectLanguageFromHeaders,
+	multipartBoundary,
 	resolveRequestBody,
 	type BodyType,
+	type MultipartPreviewOptions,
+	type RestFileRow,
 	type RestProperty
 } from '$lib/utils/rest';
 
-export type { BodyType, RestProperty };
+export type { BodyType, RestFileRow, RestProperty };
 
 export interface RestProject {
 	id: string;
@@ -28,6 +32,8 @@ export interface RestRequest {
 	save_response: boolean;
 	headers: RestProperty[];
 	form: RestProperty[];
+	multipart: RestProperty[];
+	files: RestFileRow[];
 	response_body: string | null;
 	response_headers: RestProperty[];
 	raw_request: string | null;
@@ -45,6 +51,8 @@ export interface RestRequestDraft {
 	save_response: boolean;
 	headers: RestProperty[];
 	form: RestProperty[];
+	multipart: RestProperty[];
+	files: RestFileRow[];
 }
 
 export interface RestRequestUpdate extends RestRequestDraft {
@@ -64,6 +72,8 @@ export interface RestExecutionInput {
 	body: string;
 	body_type: BodyType;
 	form: RestProperty[];
+	multipart?: RestProperty[];
+	files?: RestFileRow[];
 }
 
 export interface RestResponse {
@@ -90,6 +100,26 @@ interface LocalState {
 	requests: RestRequest[];
 }
 
+/**
+ * Only the picked path and the display name are persisted. The browser `File` object
+ * lives in memory for the session and never reaches storage, where it would serialize
+ * as an empty object and then look like a loaded file.
+ */
+function storedFileRow(row: RestFileRow): RestFileRow {
+	return { name: row.name, path: row.path, filename: row.filename };
+}
+
+function storedRequest(request: RestRequest): RestRequest {
+	return {
+		...request,
+		headers: request.headers.map((row) => ({ ...row })),
+		form: request.form.map((row) => ({ ...row })),
+		multipart: (request.multipart ?? []).map((row) => ({ ...row })),
+		files: (request.files ?? []).map(storedFileRow),
+		response_headers: request.response_headers.map((row) => ({ ...row }))
+	};
+}
+
 function newId(): string {
 	if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
 		return crypto.randomUUID();
@@ -111,16 +141,26 @@ function loadLocal(): LocalState {
 		const raw = window.localStorage.getItem(STORAGE_KEY);
 		if (!raw) return { projects: [], requests: [] };
 		const parsed = JSON.parse(raw) as Partial<LocalState>;
+		const rows = (value: unknown): RestProperty[] =>
+			Array.isArray(value) ? (value as RestProperty[]) : [];
+		const fileRows = (value: unknown): RestFileRow[] =>
+			Array.isArray(value)
+				? (value as Partial<RestFileRow>[]).map((row) => ({
+						name: row?.name ?? '',
+						path: row?.path ?? '',
+						filename: row?.filename ?? ''
+					}))
+				: [];
 		return {
 			projects: Array.isArray(parsed.projects) ? parsed.projects : [],
 			requests: Array.isArray(parsed.requests)
 				? parsed.requests.map((request) => ({
 						...request,
-						headers: Array.isArray(request.headers) ? request.headers : [],
-						form: Array.isArray(request.form) ? request.form : [],
-						response_headers: Array.isArray(request.response_headers)
-							? request.response_headers
-							: []
+						headers: rows(request.headers),
+						form: rows(request.form),
+						multipart: rows(request.multipart),
+						files: fileRows(request.files),
+						response_headers: rows(request.response_headers)
 					}))
 				: []
 		};
@@ -132,7 +172,10 @@ function loadLocal(): LocalState {
 function saveLocal(state: LocalState): void {
 	if (typeof window === 'undefined') return;
 	try {
-		window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+		window.localStorage.setItem(
+			STORAGE_KEY,
+			JSON.stringify({ projects: state.projects, requests: state.requests.map(storedRequest) })
+		);
 	} catch {
 		/* storage can be unavailable */
 	}
@@ -148,7 +191,9 @@ function normalizeDraft(draft: Partial<RestRequestDraft>): RestRequestDraft {
 		body_type: draft.body_type ?? DEFAULT_BODY_TYPE,
 		save_response: draft.save_response ?? false,
 		headers: Array.isArray(draft.headers) ? draft.headers : [],
-		form: Array.isArray(draft.form) ? draft.form : []
+		form: Array.isArray(draft.form) ? draft.form : [],
+		multipart: Array.isArray(draft.multipart) ? draft.multipart : [],
+		files: Array.isArray(draft.files) ? draft.files : []
 	};
 }
 
@@ -269,6 +314,10 @@ export async function duplicateRestRequest(id: string): Promise<RestRequest> {
 		name: source.name.trim() ? `${source.name} copy` : source.url,
 		headers: source.headers.map((header) => ({ ...header })),
 		form: source.form.map((row) => ({ ...row })),
+		multipart: (source.multipart ?? []).map((row) => ({ ...row })),
+		// A copied row keeps the path only. The desktop backend re-reads it from disk,
+		// while the browser build never stores bytes, so the copy needs a re-pick.
+		files: (source.files ?? []).map((row) => ({ ...row })),
 		response_body: null,
 		response_headers: [],
 		raw_request: null,
@@ -408,15 +457,32 @@ function isTextContentType(contentType: string): boolean {
 }
 
 /**
- * Body that actually goes on the wire: the Form-encode table has priority over the
- * JSON/XML/Text buffer when that tab is active, mirroring the Rust backend.
+ * Text body that goes on the wire: the Form-encode table has priority over the
+ * JSON/XML/Text buffer when that tab is active, mirroring the Rust backend. A
+ * multipart body is binary and is assembled through `FormData` instead.
  */
 function wireBody(input: RestExecutionInput): string {
 	return resolveRequestBody({
 		body: input.body,
 		body_type: input.body_type,
-		form: input.form
+		form: input.form,
+		multipart: input.multipart,
+		files: input.files
 	});
+}
+
+/** The raw dump carries a boundary of its own; the browser picks one inside `FormData`. */
+function multipartPreview(input: RestExecutionInput): MultipartPreviewOptions {
+	return {
+		fields: input.multipart ?? [],
+		files: input.files ?? [],
+		boundary: multipartBoundary()
+	};
+}
+
+/** The desktop backend reads file parts from disk; the in-memory `File` stays client-side. */
+function wireFileRows(input: RestExecutionInput): RestFileRow[] {
+	return (input.files ?? []).map(storedFileRow);
 }
 
 async function browserFetch(
@@ -424,16 +490,27 @@ async function browserFetch(
 	signal: AbortSignal
 ): Promise<{ response: Response; duration: number }> {
 	const url = normalizeUrl(input.url);
-	const body = wireBody(input);
+	const multipart = input.body_type === 'multipart';
+	const body = multipart ? '' : wireBody(input);
+	const form = multipart
+		? buildMultipartFormData(input.multipart ?? [], input.files ?? [])
+		: null;
+	if (multipart && !form) {
+		throw new Error('Choose the file again: its content is not loaded in this browser session');
+	}
+
 	const requestHeaders = new Headers();
 	for (const header of input.headers) {
 		const name = header.name.trim();
 		if (!name) continue;
 		const lower = name.toLowerCase();
 		if (lower === 'host' || lower === 'content-length') continue;
+		// `FormData` sets `multipart/form-data` with the browser's own boundary, so a
+		// Content-Type from the table would contradict the body the fetch layer builds.
+		if (multipart && lower === 'content-type') continue;
 		requestHeaders.set(name, header.value);
 	}
-	if (body && !requestHeaders.has('content-type')) {
+	if (!multipart && body && !requestHeaders.has('content-type')) {
 		requestHeaders.set('content-type', defaultContentType(input.body_type));
 	}
 	const started = performance.now();
@@ -442,7 +519,7 @@ async function browserFetch(
 		response = await fetch(url.toString(), {
 			method: input.method.toUpperCase(),
 			headers: requestHeaders,
-			body: body || undefined,
+			body: multipart ? form : body || undefined,
 			signal,
 			redirect: 'follow'
 		});
@@ -509,7 +586,8 @@ async function browserExecute(input: RestExecutionInput): Promise<RestResponse> 
 				input.url,
 				input.headers,
 				wireBody(input),
-				input.body_type
+				input.body_type,
+				input.body_type === 'multipart' ? multipartPreview(input) : undefined
 			)
 		};
 	} finally {
@@ -525,7 +603,9 @@ export async function executeRestRequest(input: RestExecutionInput): Promise<Res
 			headers: input.headers,
 			body: input.body,
 			body_type: input.body_type,
-			form: input.form
+			form: input.form,
+			multipart: input.multipart ?? [],
+			files: wireFileRows(input)
 		});
 	}
 	return browserExecute(input);
@@ -552,6 +632,8 @@ export async function downloadRestResponse(
 			body: input.body,
 			body_type: input.body_type,
 			form: input.form,
+			multipart: input.multipart ?? [],
+			files: wireFileRows(input),
 			path
 		});
 		return;
