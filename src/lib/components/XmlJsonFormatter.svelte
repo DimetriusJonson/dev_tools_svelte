@@ -307,9 +307,13 @@
 					type="button"
 					onclick={formatSelectedFile}
 					disabled={busy}
-					class="flex h-8 shrink-0 items-center rounded-full bg-[var(--accent)] px-4 text-[13px] font-bold text-[var(--accent-text)] transition-all duration-150 hover:scale-105 hover:bg-[var(--accent-hover)] active:scale-95 disabled:cursor-not-allowed disabled:opacity-60"
+					class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-[var(--text-muted)] transition-all duration-150 hover:scale-110 hover:bg-white/5 hover:text-[var(--text)] active:scale-95 disabled:cursor-not-allowed disabled:opacity-60 {busy
+						? 'text-[var(--accent)]'
+						: ''}"
+					title={busy ? $t('common.formatting') : $t('common.format')}
+					aria-label={busy ? $t('common.formatting') : $t('common.format')}
 				>
-					{busy ? $t('common.formatting') : $t('common.format')}
+					<Icon name={mode === 'json' ? 'braces' : 'alignLeft'} size={18} strokeWidth={1.9} />
 				</button>
 			</div>
 			<div class="min-h-0 flex-1">

@@ -210,6 +210,7 @@ getEditorValue(): string;
 - Vertical resizer uses `.resizer-v`; horizontal resizer uses `.resizer-h`; active state adds `.active`.
 - XML/JSON layout columns: source, 10px vertical resizer, 232px controls, 14px spacer, result. The grid has a single row.
 - Both XML/JSON panels use an `h-11` header bar above the editor: the source panel holds the hidden file input, `Select file`, the current file name/status, and the `Format` file button; the output panel holds share/copy/download.
+- Quiet icon-only buttons (`h-8 w-8 rounded-md`, `--text-muted`, `hover:bg-white/5`, `hover:scale-110`, `active:scale-95`) are the shared look for header-bar actions: the XML/JSON `Format` file button and the REST request-body format button. `Format` uses `braces` in JSON mode and `alignLeft` in XML mode, and paints `--accent` while a large-file run is busy, because the button carries no text label to show progress. Keep the localized `common.format` / `common.formatting` strings in `title` and `aria-label`.
 - The XML/JSON controls column action buttons are `h-10` rounded accent pills (`Format` and `Escape`); keep both the same height so the column stays balanced.
 - URL layout: source textarea, 12px horizontal resizer, centered buttons, result textarea.
 - Compare layout: two equal panes and a fixed 160px center column; it must fill the available height.
