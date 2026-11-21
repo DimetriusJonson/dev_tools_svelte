@@ -1956,4 +1956,69 @@ mod tests {
         delete_rest_request(&connection, &created.id).expect("delete request");
         assert_eq!(list_rest_requests(&connection).expect("list").len(), 1);
     }
+
+    fn simple_draft(name: &str) -> RestRequestDraft {
+        RestRequestDraft {
+            project_id: None,
+            name: name.to_string(),
+            method: "GET".to_string(),
+            url: "https://example.com".to_string(),
+            body: String::new(),
+            body_type: "json".to_string(),
+            save_response: false,
+            headers: vec![],
+            form: vec![],
+            multipart: vec![],
+            files: vec![],
+        }
+    }
+
+    #[test]
+    fn keeps_projects_and_requests_in_creation_order() {
+        let connection = memory_db();
+        let first = create_rest_project(&connection, "First").expect("project");
+        let second = create_rest_project(&connection, "Second").expect("project");
+        assert_eq!(
+            list_rest_projects(&connection).expect("list"),
+            vec![first.clone(), second.clone()]
+        );
+
+        let a = create_rest_request(&connection, &simple_draft("Alpha")).expect("alpha");
+        let b = create_rest_request(&connection, &simple_draft("Beta")).expect("beta");
+        let c = create_rest_request(&connection, &simple_draft("Gamma")).expect("gamma");
+        let listed = list_rest_requests(&connection).expect("list");
+        assert_eq!(listed, vec![a.clone(), b.clone(), c.clone()]);
+
+        // Editing a request must not move it in the list.
+        rename_rest_request(&connection, &a.id, "Alpha v2").expect("rename");
+        let renamed = list_rest_requests(&connection).expect("list");
+        assert_eq!(renamed[0].name, "Alpha v2");
+
+        // Deleting the middle request keeps the other two in their relative order.
+        delete_rest_request(&connection, &b.id).expect("delete beta");
+        let after_delete = list_rest_requests(&connection).expect("list");
+        assert_eq!(after_delete.len(), 2);
+        assert_eq!(after_delete[0].id, a.id);
+        assert_eq!(after_delete[1].id, c.id);
+    }
+
+    #[tokio::test]
+    async fn cancel_state_signals_only_the_running_request() {
+        let cancel = RestCancelState::default();
+        assert!(
+            !cancel.cancel(),
+            "nothing runs, so there is nothing to abort"
+        );
+
+        let receiver = cancel.begin();
+        assert!(cancel.cancel(), "the running request is aborted");
+        receiver
+            .await
+            .expect("the abort signal reached the awaiting request");
+
+        // The first cancel took the slot, so a second one finds nothing.
+        assert!(!cancel.cancel(), "the slot was already taken");
+        cancel.clear();
+        assert!(!cancel.cancel(), "clearing leaves nothing behind");
+    }
 }

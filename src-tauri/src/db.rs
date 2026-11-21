@@ -298,6 +298,77 @@ mod tests {
         assert!(tables.contains(&"rest_requests".to_string()));
         assert!(tables.contains(&"rest_request_properties".to_string()));
         assert!(tables.contains(&"rest_request_form".to_string()));
+        assert!(tables.contains(&"rest_request_multipart".to_string()));
+        assert!(tables.contains(&"rest_request_files".to_string()));
+    }
+
+    #[test]
+    fn migrates_legacy_form_rows_out_of_the_properties_table() {
+        let connection = memory_db();
+        let mut seed = connection.prepare(
+            "INSERT INTO rest_request_properties (request_id, kind, name, value, sort_order) VALUES (?1, ?2, ?3, ?4, ?5)",
+        ).expect("prepare seed");
+        // An old build had stashed the Form-encode tab under kind = 'form'.
+        seed.execute(params!["legacy", "form", "user", "a b", 0])
+            .expect("seed form row");
+        seed.execute(params!["legacy", "form", "page", "2", 1])
+            .expect("seed form row");
+        seed.execute(params!["legacy", "header", "Accept", "text/plain", 0])
+            .expect("seed header row");
+        seed.execute(params!["moved", "form", "stale", "1", 0])
+            .expect("seed duplicate");
+
+        let mut fresh = connection.prepare(
+            "INSERT INTO rest_request_form (request_id, name, value, sort_order) VALUES (?1, ?2, ?3, ?4)",
+        ).expect("prepare fresh");
+        // A newer request already migrated, so its legacy twin must not be copied.
+        fresh
+            .execute(params!["moved", "kept", "1", 0])
+            .expect("fresh form row");
+
+        init_schema(&connection).expect("migrate");
+
+        // No ORDER BY on the SELECT, so match the migrated pair by content.
+        let migrated = form_row_values(&connection, "legacy");
+        assert_eq!(migrated.len(), 2);
+        assert!(migrated.contains(&("user".to_string(), "a b".to_string())));
+        assert!(migrated.contains(&("page".to_string(), "2".to_string())));
+        // The request that already had a row keeps it and drops the legacy copy.
+        assert_eq!(
+            form_row_values(&connection, "moved"),
+            vec![("kept".to_string(), "1".to_string())]
+        );
+        // No kind = 'form' survives in the properties table at all.
+        assert_eq!(count_property_rows(&connection, "legacy", "form"), 0);
+        assert_eq!(count_property_rows(&connection, "moved", "form"), 0);
+        // Headers are unrelated to the migration and stay put.
+        assert_eq!(count_property_rows(&connection, "legacy", "header"), 1);
+
+        // Migration runs on every startup, so a second pass must not change anything.
+        init_schema(&connection).expect("migrate again");
+        assert_eq!(form_row_values(&connection, "legacy").len(), 2);
+        assert_eq!(form_row_values(&connection, "moved").len(), 1);
+    }
+
+    fn form_row_values(connection: &Connection, request_id: &str) -> Vec<(String, String)> {
+        let mut statement = connection
+            .prepare("SELECT name, value FROM rest_request_form WHERE request_id = ?1")
+            .expect("prepare");
+        statement
+            .query_map(params![request_id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("query")
+            .map(|row| row.expect("row"))
+            .collect()
+    }
+
+    fn count_property_rows(connection: &Connection, request_id: &str, kind: &str) -> i64 {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM rest_request_properties WHERE request_id = ?1 AND kind = ?2",
+                params![request_id, kind],
+                |row| row.get(0),
+            )
+            .expect("count")
     }
 
     #[test]
