@@ -1,21 +1,43 @@
 import { isTauriRuntime } from './db';
+import { get } from 'svelte/store';
+import { t } from '$lib/stores/i18n';
 
 export type FileMode = 'xml' | 'json' | 'txt';
 
-const FILTERS: Record<FileMode, { name: string; extensions: string[] }[]> = {
+/** Filter labels are i18n keys: the dictionary must be read per call, not at import. */
+const FILTERS: Record<FileMode, { labelKey: string; extensions: string[] }[]> = {
 	xml: [
-		{ name: 'XML', extensions: ['xml'] },
-		{ name: 'All files', extensions: ['*'] }
+		{ labelKey: 'fileFilter.xml', extensions: ['xml'] },
+		{ labelKey: 'fileFilter.all', extensions: ['*'] }
 	],
 	json: [
-		{ name: 'JSON', extensions: ['json'] },
-		{ name: 'All files', extensions: ['*'] }
+		{ labelKey: 'fileFilter.json', extensions: ['json'] },
+		{ labelKey: 'fileFilter.all', extensions: ['*'] }
 	],
 	txt: [
-		{ name: 'Text', extensions: ['txt'] },
-		{ name: 'All files', extensions: ['*'] }
+		{ labelKey: 'fileFilter.text', extensions: ['txt'] },
+		{ labelKey: 'fileFilter.all', extensions: ['*'] }
 	]
 };
+
+function fileFilters(mode: FileMode): { name: string; extensions: string[] }[] {
+	return translateFilters(FILTERS[mode]);
+}
+
+const ALL_FILES_FILTERS: { labelKey: string; extensions: string[] }[] = [{ labelKey: 'fileFilter.all', extensions: ['*'] }];
+
+function allFileFilters(): { name: string; extensions: string[] }[] {
+	return translateFilters(ALL_FILES_FILTERS);
+}
+
+function translateFilters(entries: { labelKey: string; extensions: string[] }[]): { name: string; extensions: string[] }[] {
+	const translate = get(t);
+	return entries.map((filter) => ({ name: translate(filter.labelKey), extensions: filter.extensions }));
+}
+
+function dialogTitle(key: string): string {
+	return get(t)(key);
+}
 
 export async function pickInputFile(mode: 'xml' | 'json'): Promise<string | null> {
 	if (!isTauriRuntime()) return null;
@@ -23,8 +45,8 @@ export async function pickInputFile(mode: 'xml' | 'json'): Promise<string | null
 	const selection = await open({
 		multiple: false,
 		directory: false,
-		title: mode === 'xml' ? 'Select XML file' : 'Select JSON file',
-		filters: FILTERS[mode]
+		title: dialogTitle(mode === 'xml' ? 'dialog.selectXml' : 'dialog.selectJson'),
+		filters: fileFilters(mode)
 	});
 	return typeof selection === 'string' ? selection : null;
 }
@@ -35,8 +57,8 @@ export async function pickShareFile(): Promise<string | null> {
 	const selection = await open({
 		multiple: false,
 		directory: false,
-		title: 'Select file to share',
-		filters: [{ name: 'All files', extensions: ['*'] }]
+		title: dialogTitle('dialog.selectShare'),
+		filters: allFileFilters()
 	});
 	return typeof selection === 'string' ? selection : null;
 }
@@ -46,8 +68,8 @@ export async function pickSaveFile(defaultPath: string): Promise<string | null> 
 	const { save } = await import('@tauri-apps/plugin-dialog');
 	const selection = await save({
 		defaultPath,
-		title: 'Save shared file',
-		filters: [{ name: 'All files', extensions: ['*'] }]
+		title: dialogTitle('dialog.saveShared'),
+		filters: allFileFilters()
 	});
 	return typeof selection === 'string' ? selection : null;
 }
@@ -57,8 +79,8 @@ export async function pickOutputFile(defaultPath: string, mode: FileMode): Promi
 	const { save } = await import('@tauri-apps/plugin-dialog');
 	const selection = await save({
 		defaultPath,
-		title: 'Save formatted file',
-		filters: FILTERS[mode]
+		title: dialogTitle('dialog.saveFormatted'),
+		filters: fileFilters(mode)
 	});
 	return typeof selection === 'string' ? selection : null;
 }
@@ -88,7 +110,7 @@ export async function pickPartFile(title: string): Promise<PickedPartFile | null
 			multiple: false,
 			directory: false,
 			title,
-			filters: [{ name: 'All files', extensions: ['*'] }]
+			filters: allFileFilters()
 		});
 		if (typeof selection !== 'string') return null;
 		return { path: selection, filename: basename(selection) };

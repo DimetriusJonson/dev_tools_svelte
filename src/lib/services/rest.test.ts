@@ -4,6 +4,7 @@ import {
 	duplicateRestRequest,
 	listRestRequests,
 	loadRestSelection,
+	normalizeUrl,
 	resolveRestSelection,
 	saveRestSelection,
 	updateRestRequest,
@@ -202,3 +203,41 @@ describe('REST multipart storage in the browser build', () => {
 		expect(window.localStorage.getItem('devtools.rest')).not.toContain('"file"');
 	});
 });
+
+describe('selection with no stored request', () => {
+	const projects = [project('p1', 'Alpha'), project('p2', 'Beta')];
+	const requests = [request('r1', 'p1'), request('r2', 'p1'), request('r3', 'p2')];
+
+	it('opens the first visible row when the saved selection names no request', () => {
+		expect(resolveRestSelection(projects, requests, { project_id: 'p1', request_id: null })).toEqual({ project_id: 'p1', request_id: 'r1' });
+		expect(resolveRestSelection(projects, requests, { project_id: null, request_id: null })).toEqual({ project_id: null, request_id: 'r1' });
+		expect(resolveRestSelection(projects, requests, { project_id: 'p2', request_id: null })).toEqual({ project_id: 'p2', request_id: 'r3' });
+	});
+
+	it('reopens the same closed view after a restart', async () => {
+		await saveRestSelection({ project_id: null, request_id: null });
+		expect(await loadRestSelection()).toEqual({ project_id: null, request_id: null });
+		const restored = await loadRestSelection();
+		expect(resolveRestSelection(projects, requests, restored)).toEqual({ project_id: null, request_id: 'r1' });
+	});
+});
+
+describe('request url shape', () => {
+	it('adds the protocol only to a URL that has none', () => {
+		expect(normalizeUrl('https://api.example/x').protocol).toBe('https:');
+		expect(normalizeUrl(' api.example/x ').protocol).toBe('http:');
+	});
+
+	it('keeps a protocol-looking query when the URL itself has no scheme', () => {
+		const url = normalizeUrl('x?next=http://other.example');
+		expect(url.protocol).toBe('http:');
+		expect(url.search).toBe('?next=http://other.example');
+	});
+
+	it('rejects a URL that the client cannot send', () => {
+		expect(() => normalizeUrl('ftp://api.example/x')).toThrow();
+		expect(() => normalizeUrl('   ')).toThrow();
+		expect(() => normalizeUrl('?next=http://other.example')).toThrow();
+	});
+});
+

@@ -144,7 +144,7 @@
 		style="height: 12px;"
 		role="separator"
 		aria-orientation="horizontal"
-		aria-label="Resize panes"
+		aria-label={$t('common.resizePanes')}
 		onpointerdown={startResize}
 	></div>
 

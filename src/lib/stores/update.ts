@@ -41,11 +41,13 @@ async function forgetAnnouncement(): Promise<void> {
 	if (pending) await closeUpdate(pending.handle);
 }
 
-function handleFailure(error: unknown, manual: boolean): void {
+async function handleFailure(error: unknown, manual: boolean): Promise<void> {
 	const message = updateFailureMessage(error, translate('common.error'));
+	// Any failure replaces the announcement, so the old handle must be released here:
+	// the banner leaves "available" and the pending download would otherwise leak.
+	await forgetAnnouncement();
 	if (!manual) {
 		console.warn('Automatic update check failed', message);
-		void forgetAnnouncement();
 		updateState.set(IDLE_UPDATE_STATE);
 		return;
 	}
@@ -81,6 +83,9 @@ export async function checkForUpdates({ manual }: { manual: boolean }): Promise<
 			if (manual) notify(translate('update.upToDate', { version }), 'success');
 			return;
 		}
+		// A manual check may run while the previous banner is still "available", so a
+		// replaced announcement must close its handle before the new one is stored.
+		await forgetAnnouncement();
 		announced = update;
 		if (!manual && isDismissedVersion(await getSetting(DISMISSED_VERSION_KEY), update.version)) {
 			await forgetAnnouncement();
@@ -89,7 +94,7 @@ export async function checkForUpdates({ manual }: { manual: boolean }): Promise<
 		}
 		patch({ phase: 'available', version: update.version, notes: update.notes, percent: 0, message: null });
 	} catch (error) {
-		handleFailure(error, manual);
+		await handleFailure(error, manual);
 	}
 }
 

@@ -1,4 +1,5 @@
-import { writable } from 'svelte/store';
+import { get, writable } from 'svelte/store';
+import { t } from './i18n';
 
 export type ToastKind = 'success' | 'error' | 'info';
 
@@ -37,12 +38,13 @@ export function notify(
 	return id;
 }
 
-export function notifyError(error: unknown, fallback = 'Something went wrong'): number {
+/** Textless failures fall back to the localized `common.error`, not an English literal. */
+export function notifyError(error: unknown, fallback = ''): number {
 	const message =
 		typeof error === 'string'
 			? error
 			: error instanceof Error
 				? error.message
 				: fallback;
-	return notify(message || fallback, 'error');
+	return notify(message || fallback || get(t)('common.error'), 'error');
 }

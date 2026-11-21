@@ -27,7 +27,16 @@ import {
 	validateProperties,
 	validatePropertyField,
 	validateQueryUrl,
-	validateRequest
+	validateRequest,
+	validateRowName,
+	validateFileRows,
+	basenameOf,
+	contentTypeForFilename,
+	MULTIPART_BOUNDARY_PLACEHOLDER,
+	defaultContentType,
+	getHeader,
+	bodyTypeFromContentType,
+	multipartBoundary
 } from './rest';
 
 describe('query parameters', () => {
@@ -720,5 +729,128 @@ describe('multipart form data', () => {
 		expect((form?.get('doc') as File | undefined)?.name).toBe('alias.txt');
 		// Without the in-memory File there is nothing to append, so the caller reports it.
 		expect(buildMultipartFormData([], [{ name: 'doc', path: '/tmp/a.txt', filename: 'a.txt' }])).toBeNull();
+	});
+});
+
+describe('curl flag aliases', () => {
+	it('expands cookie, user-agent, referer, credentials and --url flags', () => {
+		const parsed = parseCurl(
+			`curl -b 'sid=1&lang=ru' -A 'Mozilla/9' -e 'https://ref/' -u 'al:ice' --url 'https://api.example/x'`
+		);
+		expect(parsed?.headers).toEqual([
+			{ name: 'Cookie', value: 'sid=1&lang=ru' },
+			{ name: 'User-Agent', value: 'Mozilla/9' },
+			{ name: 'Referer', value: 'https://ref/' },
+			{ name: 'Authorization', value: `Basic ${btoa('al:ice')}` }
+		]);
+		expect(parsed?.url).toBe('https://api.example/x');
+		expect(parsed?.method).toBe('GET');
+		expect(parsed?.bodyType).toBe('text');
+		expect(parsed?.body).toBe('');
+	});
+
+	it('keeps a bare cookie flag and skips credentials that btoa cannot encode', () => {
+		const parsed = parseCurl(`curl -b debug -u 'ключ:1' https://x/`);
+		expect(parsed?.headers).toEqual([]);
+		expect(parsed?.url).toBe('https://x/');
+	});
+
+	it('percent-encodes --data-urlencode arguments into one body', () => {
+		const parsed = parseCurl(`curl --data-urlencode 'q=hello world' --data-urlencode 'plain value' https://x/`);
+		expect(parsed?.body).toBe('q=hello%20world&plain%20value');
+		expect(parsed?.bodyType).toBe('text');
+		expect(parsed?.method).toBe('POST');
+		expect(parsed?.form).toEqual([]);
+	});
+
+	it('decodes short ANSI-C hex and octal escapes typed by hand', () => {
+		// Bash takes one to N digits, so `\u49` is `I` and `\114` is `L`.
+		const parsed = parseCurl(`curl -H $'\\x48:1' -H $'\\u49:2' -H $'\\114:3' https://x/`);
+		expect(parsed?.headers).toEqual([
+			{ name: 'H', value: '1' },
+			{ name: 'I', value: '2' },
+			{ name: 'L', value: '3' }
+		]);
+		expect(parsed?.method).toBe('GET');
+	});
+});
+
+describe('content type and header lookup', () => {
+	it('reads a header by its trimmed, case-insensitive name', () => {
+		expect(getHeader([{ name: ' Content-Type ', value: 'application/json' }], 'CONTENT-TYPE')).toBe('application/json');
+	});
+
+	it('falls back to text for an unknown content type', () => {
+		expect(bodyTypeFromContentType('')).toBeNull();
+		expect(bodyTypeFromContentType('application/pdf')).toBe('text');
+		expect(bodyTypeFromContentType('TEXT/HTML; charset=ascii')).toBe('text');
+		expect(bodyTypeFromContentType('multipart/form-data; boundary=x')).toBe('multipart');
+	});
+
+	it('names the default content type of every body kind', () => {
+		expect(defaultContentType('json')).toBe('application/json');
+		expect(defaultContentType('xml')).toBe('application/xml');
+		expect(defaultContentType('form')).toBe('application/x-www-form-urlencoded');
+		expect(defaultContentType('text')).toBe('text/plain');
+		expect(defaultContentType('multipart')).toBe(`multipart/form-data; boundary=${MULTIPART_BOUNDARY_PLACEHOLDER}`);
+		expect(defaultContentType('multipart', 'abc')).toBe('multipart/form-data; boundary=abc');
+	});
+
+	it('produces a version-4 UUID so a dump never loses the boundary shape', () => {
+		expect(multipartBoundary()).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+	});
+});
+
+describe('multipart file rows', () => {
+	it('sniffs the part type from the path, the way the desktop encoder does', () => {
+		const preview = buildMultipartPreview({
+			boundary: 'B',
+			fields: [],
+			files: [{ name: 'doc', path: '/tmp/a.pdf', filename: 'report.txt' }]
+		});
+		expect(preview).toContain('filename="report.txt"');
+		expect(preview).toContain('content-type: application/pdf');
+		expect(preview).toContain('<bytes of /tmp/a.pdf>');
+	});
+
+	it('leaves an alias-less row with no path without a display name', () => {
+		const preview = buildMultipartPreview({ boundary: 'B', fields: [], files: [{ name: 'doc', path: '', filename: '' }] });
+		expect(preview).toContain('filename=""');
+		expect(preview).toContain('content-type: application/octet-stream');
+		expect(preview).toContain('<bytes of , not loaded>');
+	});
+
+	it('derives a display name and a type from a Windows path without an alias', () => {
+		expect(basenameOf('C:\\temp\\report.pdf')).toBe('report.pdf');
+		expect(basenameOf('/tmp/dir/')).toBe('dir');
+		expect(contentTypeForFilename('C:\\temp\\report.PDF')).toBe('application/pdf');
+		expect(contentTypeForFilename('notes')).toBe('application/octet-stream');
+		const preview = buildMultipartPreview({
+			boundary: 'B',
+			fields: [],
+			files: [{ name: 'doc', path: 'C:\\temp\\report.pdf', filename: '' }]
+		});
+		expect(preview).toContain('filename="report.pdf"');
+		expect(preview).toContain('content-type: application/pdf');
+	});
+});
+
+describe('multipart validation entry points', () => {
+	it('reports a value without a name as a missing name, and never an empty row', () => {
+		expect(validateRowName({ name: '', value: 'x' })).toEqual({
+			kind: 'name-required',
+			field: 'name',
+			name: '',
+			char: ''
+		});
+		expect(validateRowName({ name: '', value: '' })).toBeNull();
+		expect(validateRowName({ name: 'ok', value: '' })).toBeNull();
+	});
+
+	it('marks a persisted file row whose bytes were never stored', () => {
+		expect(validateFileRows([{ name: 'doc', path: '', filename: 'a.txt' }])).toEqual([
+			{ kind: 'file-missing', field: 'value', name: 'doc', char: '', row: 0 }
+		]);
+		expect(validateFileRows([])).toEqual([]);
 	});
 });

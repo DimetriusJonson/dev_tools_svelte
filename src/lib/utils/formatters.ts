@@ -26,15 +26,21 @@ const UNESCAPE_MAP: Record<string, string> = {
 	t: '\t'
 };
 
+/** Numeric XML entities must name a Unicode scalar: `String.fromCodePoint` throws for
+ * out-of-range values and lone surrogates, which must stay literal entity text instead. */
+function isValidCodePoint(code: number): boolean {
+	return Number.isFinite(code) && code >= 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff);
+}
+
 export function decodeXmlEntities(input: string): string {
 	return input.replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);/g, (match, body: string) => {
 		if (body.startsWith('#x') || body.startsWith('#X')) {
 			const code = Number.parseInt(body.slice(2), 16);
-			return Number.isFinite(code) ? String.fromCodePoint(code) : match;
+			return isValidCodePoint(code) ? String.fromCodePoint(code) : match;
 		}
 		if (body.startsWith('#')) {
 			const code = Number.parseInt(body.slice(1), 10);
-			return Number.isFinite(code) ? String.fromCodePoint(code) : match;
+			return isValidCodePoint(code) ? String.fromCodePoint(code) : match;
 		}
 		const value = NAMED_ENTITIES[body];
 		return value ?? match;
@@ -68,7 +74,7 @@ export function unescapeJson(input: string): string {
 	return input.replace(/\\(u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|["\\/bfnrt])/g, (match, body: string) => {
 		if (body.startsWith('u') || body.startsWith('x')) {
 			const code = Number.parseInt(body.slice(1), 16);
-			return Number.isFinite(code) ? String.fromCodePoint(code) : match;
+			return isValidCodePoint(code) ? String.fromCodePoint(code) : match;
 		}
 		return UNESCAPE_MAP[body] ?? match;
 	});

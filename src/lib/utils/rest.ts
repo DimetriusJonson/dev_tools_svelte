@@ -342,7 +342,7 @@ export function buildMultipartPreview(options: MultipartPreviewOptions): string 
 	}
 	for (const file of options.files) {
 		if (!file.name.trim()) continue;
-		const filename = file.filename || (file.path ? basenameOf(file.path) : file.name.trim());
+		const filename = file.filename || (file.path ? basenameOf(file.path) : '');
 		const parameters = [
 			`name="${quoteParameter(file.name.trim())}"`,
 			`filename="${quoteParameter(filename)}"`
@@ -351,7 +351,7 @@ export function buildMultipartPreview(options: MultipartPreviewOptions): string 
 		lines.push(
 			`--${boundary}`,
 			`content-disposition: form-data; ${parameters.join('; ')}`,
-			`content-type: ${contentTypeForFilename(filename)}`,
+			`content-type: ${contentTypeForFilename(file.path || filename)}`,
 			'',
 			file.path ? `<bytes of ${file.path}>` : `<bytes of ${filename}, not loaded>`
 		);
@@ -773,11 +773,14 @@ function decodeAnsiCEscape(input: string, start: number): EscapeDecoding {
 
 	const hexLength = char === 'x' ? 2 : char === 'u' ? 4 : char === 'U' ? 8 : 0;
 	if (hexLength > 0) {
-		const digits = input.slice(start + 1, start + 1 + hexLength);
-		if (digits.length === hexLength && /^[0-9a-fA-F]+$/.test(digits)) {
-			const code = Number.parseInt(digits, 16);
-			if (code <= 0x10ffff) {
-				return { text: String.fromCodePoint(code), next: start + 1 + hexLength };
+		// Bash takes one to N hex digits, so `\u41` and `\x4A` name a character, and no
+		// digits at all leaves the escape literal.
+		const digits = new RegExp(`^[0-9a-fA-F]{1,${hexLength}}`).exec(input.slice(start + 1))?.[0] ?? '';
+		const code = Number.parseInt(digits, 16);
+		if (digits && Number.isFinite(code) && code <= 0x10ffff) {
+			// A lone surrogate names no character: `String.fromCodePoint` throws for it.
+			if (code < 0xd800 || code > 0xdfff) {
+				return { text: String.fromCodePoint(code), next: start + 1 + digits.length };
 			}
 		}
 		return { text: `\\${char}`, next: start + 1 };

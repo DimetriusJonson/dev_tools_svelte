@@ -333,7 +333,7 @@
 			style="grid-column: 2; grid-row: 1;"
 			role="separator"
 			aria-orientation="vertical"
-			aria-label="Resize panes"
+			aria-label={$t('common.resizePanes')}
 			onpointerdown={startResize}
 		></div>
 

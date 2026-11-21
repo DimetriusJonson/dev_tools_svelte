@@ -205,3 +205,19 @@ describe('URL encoding', () => {
 		expect(decodeUrl('%E0%A4%A')).toBe('%E0%A4%A');
 	});
 });
+
+describe('code points that must stay literal', () => {
+	it('leaves an out-of-range or surrogate entity as its own text', () => {
+		expect(decodeXmlEntities('&#xD800; &#x110000; &#xD800;&#xDC00; &#x41;')).toBe('&#xD800; &#x110000; &#xD800;&#xDC00; A');
+	});
+
+	it('decodes valid escapes but keeps a lone surrogate', () => {
+		expect(unescapeJson('a\\uD800b \\x41 \\u041B \\uD83D')).toBe('a\\uD800b A Л \\uD83D');
+	});
+
+	it('formats markup and JSON whose only oddity is a broken code point', () => {
+		expect(formatXmlText('<r>&#xD800;</r>', 2, true)).toBe('<r>&#xD800;</r>');
+		// The strict pass wins for a lone surrogate and re-escapes it as its own text.
+		expect(formatJsonText('{"a":"\\uD800"}', 2)).toBe('{\n  "a": "\\ud800"\n}');
+	});
+});

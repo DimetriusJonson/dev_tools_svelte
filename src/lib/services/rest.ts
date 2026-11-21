@@ -425,10 +425,21 @@ export async function saveRestSelection(selection: RestSelection): Promise<void>
 	]);
 }
 
-function normalizeUrl(raw: string): URL {
+/**
+ * The scheme test is anchored: a query may hold `://` (`?next=http://x`) while the
+ * URL itself carries no protocol, and handing that to the constructor throws a raw
+ * TypeError instead of the localized-shape error the page reports.
+ */
+export function normalizeUrl(raw: string): URL {
 	const trimmed = raw.trim();
 	if (!trimmed) throw new Error('Enter a request URL');
-	const url = new URL(trimmed.includes('://') ? trimmed : `http://${trimmed}`);
+	const candidate = /^[a-z][a-z\d+.-]*:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+	let url: URL;
+	try {
+		url = new URL(candidate);
+	} catch {
+		throw new Error('Only http and https URLs are supported');
+	}
 	if (url.protocol !== 'http:' && url.protocol !== 'https:') {
 		throw new Error('Only http and https URLs are supported');
 	}
@@ -640,15 +651,20 @@ export async function downloadRestResponse(
 	}
 
 	const controller = new AbortController();
-	const { response } = await browserFetch(input, controller.signal);
-	if (!response.ok) {
-		throw new Error(`Server returned ${response.status} ${response.statusText}`);
+	browserAbortController = controller;
+	try {
+		const { response } = await browserFetch(input, controller.signal);
+		if (!response.ok) {
+			throw new Error(`Server returned ${response.status} ${response.statusText}`);
+		}
+		const blob = await response.blob();
+		const fileUrl = URL.createObjectURL(blob);
+		const anchor = document.createElement('a');
+		anchor.href = fileUrl;
+		anchor.download = filename || 'response.bin';
+		anchor.click();
+		URL.revokeObjectURL(fileUrl);
+	} finally {
+		if (browserAbortController === controller) browserAbortController = null;
 	}
-	const blob = await response.blob();
-	const url = URL.createObjectURL(blob);
-	const anchor = document.createElement('a');
-	anchor.href = url;
-	anchor.download = filename || 'response.bin';
-	anchor.click();
-	URL.revokeObjectURL(url);
 }

@@ -4,13 +4,14 @@ export type Locale = 'en' | 'ru';
 
 type Dictionary = Record<string, string>;
 
-const en: Dictionary = {
+export const en: Dictionary = {
 	'nav.xml': 'XML',
 	'nav.json': 'JSON',
 	'nav.url': 'URL',
 	'nav.compare': 'Compare',
 	'nav.share': 'Share',
 	'nav.rest': 'Rest client',
+	'nav.main': 'Main navigation',
 	'common.copy': 'Copy to clipboard',
 	'common.copied': 'Copied!',
 	'common.copyFailed': 'Could not copy to the clipboard',
@@ -22,6 +23,16 @@ const en: Dictionary = {
 	'common.escape': 'Escape',
 	'common.error': 'Something went wrong',
 	'common.close': 'Close notification',
+	'dialog.selectXml': 'Select XML file',
+	'dialog.selectJson': 'Select JSON file',
+	'dialog.selectShare': 'Select file to share',
+	'dialog.saveShared': 'Save shared file',
+	'dialog.saveFormatted': 'Save formatted file',
+	'fileFilter.xml': 'XML',
+	'fileFilter.json': 'JSON',
+	'fileFilter.text': 'Text',
+	'fileFilter.all': 'All files',
+	'common.resizePanes': 'Resize panes',
 	'formatter.source': 'Source content',
 	'formatter.output': 'Result',
 	'formatter.format': 'Format',
@@ -233,13 +244,14 @@ const en: Dictionary = {
 	'app.title': 'WebDev Useful Tools'
 };
 
-const ru: Dictionary = {
+export const ru: Dictionary = {
 	'nav.xml': 'XML',
 	'nav.json': 'JSON',
 	'nav.url': 'URL',
 	'nav.compare': 'Сравнить',
 	'nav.share': 'Поделиться',
 	'nav.rest': 'Rest client',
+	'nav.main': 'Основная навигация',
 	'common.copy': 'Копировать в буфер обмена',
 	'common.copied': 'Скопировано!',
 	'common.copyFailed': 'Не удалось скопировать в буфер обмена',
@@ -251,6 +263,16 @@ const ru: Dictionary = {
 	'common.escape': 'Экранировать',
 	'common.error': 'Что-то пошло не так',
 	'common.close': 'Закрыть уведомление',
+	'dialog.selectXml': 'Выбор XML файл',
+	'dialog.selectJson': 'Выбор JSON файл',
+	'dialog.selectShare': 'Выбор файл для поделить',
+	'dialog.saveShared': 'Сохранение поделит файл',
+	'dialog.saveFormatted': 'Сохранение форматат файл',
+	'fileFilter.xml': 'XML',
+	'fileFilter.json': 'JSON',
+	'fileFilter.text': 'Text',
+	'fileFilter.all': 'Все файли',
+	'common.resizePanes': 'Resize паны',
 	'formatter.source': 'Исходные данные',
 	'formatter.output': 'Результат',
 	'formatter.format': 'Форматировать',
