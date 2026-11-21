@@ -48,7 +48,14 @@ export function splitLines(text: string): string[] {
 export function lineOffsets(text: string): number[] {
 	const offsets = [0];
 	for (let i = 0; i < text.length; i += 1) {
-		if (text[i] === '\n') offsets.push(i + 1);
+		const character = text[i];
+		if (character === '\n') {
+			offsets.push(i + 1);
+		} else if (character === '\r') {
+			// Mirrors splitLines: CRLF is one break, a lone CR is its own break.
+			offsets.push(text[i + 1] === '\n' ? i + 2 : i + 1);
+			if (text[i + 1] === '\n') i += 1;
+		}
 	}
 	return offsets;
 }
@@ -118,11 +125,12 @@ function lcsOps(a: string[], b: string[]): Op[] {
 	return ops;
 }
 
-function tokenizeLine(line: string): Token[] {
-	const looksLikeXml = line.includes('<') || line.includes('>');
-	const regex = looksLikeXml
-		? /<[^>]*>|[^<]+/g
-		: /"(?:[^"\\]|\\.)*"|\s+|[{}[\],:]+|[^\s{}[\],"]+/g;
+function looksLikeMarkup(line: string): boolean {
+	return /<[^>]*>/.test(line);
+}
+
+function tokenizeLine(line: string, xml: boolean): Token[] {
+	const regex = xml ? /<[^>]*>|[^<]+/g : /"(?:[^"\\]|\\.)*"|\s+|[{}[\],:]+|[^\s{}[\],"]+/g;
 	const tokens: Token[] = [];
 	let match: RegExpExecArray | null;
 	while ((match = regex.exec(line)) !== null) {
@@ -132,9 +140,9 @@ function tokenizeLine(line: string): Token[] {
 }
 
 function mergeRanges(ranges: InlineRange[]): InlineRange[] {
-	if (ranges.length === 0) return ranges;
+	if (ranges.length === 0) return [];
 	const sorted = [...ranges].sort((a, b) => a.start - b.start);
-	const merged: InlineRange[] = [sorted[0]];
+	const merged: InlineRange[] = [{ start: sorted[0].start, end: sorted[0].end }];
 	for (let i = 1; i < sorted.length; i += 1) {
 		const current = sorted[i];
 		const last = merged[merged.length - 1];
@@ -148,8 +156,11 @@ function mergeRanges(ranges: InlineRange[]): InlineRange[] {
 }
 
 function tokenDiff(leftLine: string, rightLine: string): { left: InlineRange[]; right: InlineRange[] } {
-	const leftTokens = tokenizeLine(leftLine);
-	const rightTokens = tokenizeLine(rightLine);
+	// One tokenizer for the whole pair: mixed tokenizers make the two sides of a
+	// changed line highlight differently (asymmetry the UI cannot explain).
+	const xml = looksLikeMarkup(leftLine) || looksLikeMarkup(rightLine);
+	const leftTokens = tokenizeLine(leftLine, xml);
+	const rightTokens = tokenizeLine(rightLine, xml);
 	const n = leftTokens.length;
 	const m = rightTokens.length;
 
@@ -209,8 +220,8 @@ function tokenDiff(leftLine: string, rightLine: string): { left: InlineRange[]; 
 	return { left, right };
 }
 
-function wholeLine(line: string, column: number): InlineRange[] {
-	return line.length ? [{ start: 0, end: line.length }] : [{ start: column, end: column }];
+function wholeLine(line: string): InlineRange[] {
+	return line.length ? [{ start: 0, end: line.length }] : [];
 }
 
 export function diffTexts(leftText: string, rightText: string): DiffResult {
@@ -251,14 +262,14 @@ export function diffTexts(leftText: string, rightText: string): DiffResult {
 		for (let k = pairs; k < deletes.length; k += 1) {
 			const leftIndex = deletes[k];
 			const text = leftLines[leftIndex] ?? '';
-			left.push({ line: leftIndex + 1, kind: 'removed', inline: wholeLine(text, 0) });
+			left.push({ line: leftIndex + 1, kind: 'removed', inline: wholeLine(text) });
 			stats.removed += 1;
 		}
 
 		for (let k = pairs; k < inserts.length; k += 1) {
 			const rightIndex = inserts[k];
 			const text = rightLines[rightIndex] ?? '';
-			right.push({ line: rightIndex + 1, kind: 'added', inline: wholeLine(text, 0) });
+			right.push({ line: rightIndex + 1, kind: 'added', inline: wholeLine(text) });
 			stats.added += 1;
 		}
 	}
