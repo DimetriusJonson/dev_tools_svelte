@@ -505,7 +505,7 @@
 			</button>
 			<button
 				type="button"
-				onclick={() => { confirmingFileId = menu.id; }}
+				onclick={() => { withFileMenu(onDeleteFile) }}
 				class="block w-full px-3 py-2 text-left text-sm font-semibold text-red-500 transition-colors hover:bg-red-500 hover:text-white"
 				role="menuitem"
 			>
