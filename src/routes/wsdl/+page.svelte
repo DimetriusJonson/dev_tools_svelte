@@ -881,14 +881,14 @@
 				</div>
 			{:else}
 				<div class="flex h-12 shrink-0 items-center gap-2">
-					<div class="flex min-w-0 flex-1 flex-col justify-center">
+					<div class="flex min-w-[96px] max-w-[220px] shrink flex-col justify-center">
 						<p class="truncate text-sm font-bold text-[var(--text)]">{detail.name}</p>
 						<p class="truncate text-[11px] font-semibold text-[var(--text-muted)]">
 							{detail.service_name} · SOAP {soapVersion === 'soap12' ? '1.2' : '1.1'}
 						</p>
 					</div>
 
-					<div class="relative w-[280px] shrink-0">
+					<div class="relative min-w-0 flex-1">
 						<select
 							value={endpointId}
 							onchange={onEndpointChange}

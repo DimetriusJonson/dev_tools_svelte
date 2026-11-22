@@ -17,8 +17,8 @@
 | 8 | готово | Вкладка `Headers`: `PropertyEditor` с `locked`/`lockedTitle` для `Content-Type` и `SOAPAction` (строки первыми, только чтение, без кнопки удаления), проверка только строк пользователя через общий `utils/validation.ts`, красная точка на вкладке и блокировка запуска/скачивания; отправка по-прежнему собирает locked-заголовки и вызывает `executeRestRequest` |
 | 9 | готово | Вкладки запроса `XML`/`Headers`/`Raw`: `rawRequestText` — `buildSoapRawRequest` до первого вызова и дамп бэкенда после него, кнопка копирования; cURL из страницы не экспортится |
 | 10 | готово | Вкладки ответа `XML`/`Headers`/`Raw`, статус/размер/время, чекбокс `Save` (`save_wsdl_response`/`clear_wsdl_response`), `Format`/`Unescape`/`Copy`, карточка вложения и бинарного ответа со скачиванием через `downloadRestResponse` и именем из `Content-Disposition` (`filenameFromDisposition` + `sharedFileName`) |
-| 11 | частично | Темы через CSS-переменные, aria-метки строк, меню и вкладок; пустые состояния, индикаторы загрузки и подсказки ячеек есть; сверка с макетом не сделана |
-| 12 | готово | `cargo test` 91 юнит-тестов + 1 интеграционный (в том числе `response_and_request_do_not_overwrite_each_other` и тесты комментариев шаблона в `xsd.rs`), Vitest 222 теста: `utils/wsdl.test.ts` (16), `services/wsdl.test.ts` (16), `utils/validation.test.ts` (7), `utils/rest.test.ts` (66) |
+| 11 | частично | Темы через CSS-переменные, aria-метки строк, меню и вкладок; пустые состояния, индикаторы загрузки и подсказки ячеек есть; список `soap:address` растянут на всю ширину строки запроса; сверка с макетом не сделана |
+| 12 | готово | `cargo test` 91 юнит-тестов + 1 интеграционный (в том числе `response_and_request_do_not_overwrite_each_other` и тесты комментариев шаблона в `xsd.rs`), Vitest 225 тестов: `utils/wsdl.test.ts` (16), `services/wsdl.test.ts` (16), `utils/validation.test.ts` (7), `utils/rest.test.ts` (66), `components/WsdlExplorer.test.ts` (3) |
 | 13 | не начат | Ручной smoke на публичном WSDL в `npm run tauri dev` |
 
 

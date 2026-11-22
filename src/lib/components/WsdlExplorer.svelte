@@ -139,6 +139,18 @@
 		confirmingFileId = null;
 	}
 
+	/**
+	 * A click outside closes every floating panel. A click inside one of them
+	 * belongs to its own buttons: closing here on the bubbled event used to wipe
+	 * `confirmingFileId` in the same tick the delete item set it, so the
+	 * confirmation never appeared and the file stayed.
+	 */
+	function onWindowClick(event: MouseEvent): void {
+		const target = event.target;
+		if (target instanceof Element && target.closest('[role="menu"], [role="dialog"]')) return;
+		closeMenus();
+	}
+
 	function onWindowKeydown(event: KeyboardEvent): void {
 		if (event.key === 'Escape') {
 			closeMenus();
@@ -204,7 +216,7 @@
 		'flex h-8 min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 text-left transition-colors duration-150';
 </script>
 
-<svelte:window onclick={closeMenus} onkeydown={onWindowKeydown} />
+<svelte:window onclick={onWindowClick} onkeydown={onWindowKeydown} />
 
 <aside
 	class="flex h-full min-h-0 w-full flex-col gap-3 rounded-lg border border-[var(--border)] bg-[var(--panel-bg)] p-3 shadow-[var(--shadow)]"
