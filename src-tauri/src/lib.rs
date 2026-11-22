@@ -9,9 +9,7 @@ mod wsdl;
 use std::sync::{Arc, Mutex};
 
 use tauri::{
-    menu::{Menu, MenuItem},
-    tray::TrayIconBuilder,
-    Manager, RunEvent, WindowEvent,
+    Manager, RunEvent, WindowEvent, menu::{Menu, MenuItem}, tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
 };
 
 use db::AppDb;
@@ -99,6 +97,14 @@ pub fn run() {
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .tooltip("WebDev Useful Tools")
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } = event {
+                        let app_handle = tray.app_handle();
+                        if let Some(_window) = app_handle.get_webview_window("main") {
+                            show_main_window(app_handle)
+                        }
+                    }
+                })
                 .build(app)?;
 
             Ok(())
