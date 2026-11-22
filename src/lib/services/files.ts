@@ -91,6 +91,17 @@ export function basename(path: string): string {
 	return index >= 0 ? normalized.slice(index + 1) : normalized;
 }
 
+/**
+ * A name for a file the app saves or uploads: the base name across both path
+ * separators, with control characters and quotes replaced — a server-supplied
+ * name must not smuggle a path or an invalid character into the save dialog.
+ */
+export function sharedFileName(name: string): string {
+	return basename(name)
+		.replace(/[\u0000-\u001f\u007f"]/g, '_')
+		.trim();
+}
+
 /** A file chosen for a `multipart/form-data` part. */
 export interface PickedPartFile {
 	path: string;

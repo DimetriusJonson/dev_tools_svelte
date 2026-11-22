@@ -9,6 +9,7 @@ import {
 	byteLength,
 	describeCharacter,
 	detectLanguageFromHeaders,
+	filenameFromDisposition,
 	encodeForm,
 	formatRestSize,
 	formatRestTime,
@@ -852,5 +853,25 @@ describe('multipart validation entry points', () => {
 			{ kind: 'file-missing', field: 'value', name: 'doc', char: '', row: 0 }
 		]);
 		expect(validateFileRows([])).toEqual([]);
+	});
+});
+
+describe('content-disposition file name', () => {
+	it('prefers the RFC 5987 form and percent-decodes it', () => {
+		expect(
+			filenameFromDisposition(`attachment; filename="a.txt"; filename*=UTF-8''%D0%BE%D1%82%D0%B2%D0%B5%D1%82.txt`)
+		).toBe('ответ.txt');
+		expect(filenameFromDisposition('attachment; filename=a.txt')).toBe('a.txt');
+		expect(filenameFromDisposition('inline')).toBeNull();
+	});
+
+	it('keeps a broken escape as its own text rather than dropping the name', () => {
+		expect(filenameFromDisposition("attachment; filename*=UTF-8''%zz.txt")).toBe('%zz.txt');
+	});
+
+	it('answers null for an empty parameter so the caller picks its own name', () => {
+		expect(filenameFromDisposition('attachment; filename=""')).toBeNull();
+		expect(filenameFromDisposition('attachment; filename*=UTF-8\'\'')).toBeNull();
+		expect(filenameFromDisposition('')).toBeNull();
 	});
 });

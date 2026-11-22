@@ -1,10 +1,12 @@
 import { getSetting, invokeCommand, isTauriRuntime, setSetting } from './db';
+import { sharedFileName } from './files';
 import {
 	buildMultipartFormData,
 	buildRawRequestPreview,
 	defaultContentType,
 	detectLanguageFromContentType,
 	detectLanguageFromHeaders,
+	filenameFromDisposition,
 	multipartBoundary,
 	resolveRequestBody,
 	type BodyType,
@@ -448,21 +450,6 @@ export function normalizeUrl(raw: string): URL {
 
 let browserAbortController: AbortController | null = null;
 
-function filenameFromDisposition(value: string): string | null {
-	const star = value.match(/filename\*=([^;]+)/i);
-	if (star) {
-		const raw = star[1].trim().replace(/^UTF-8''/i, '').replace(/^"|"$/g, '');
-		try {
-			return decodeURIComponent(raw);
-		} catch {
-			return raw;
-		}
-	}
-	const plain = value.match(/filename=([^;]+)/i);
-	if (plain) return plain[1].trim().replace(/^"|"$/g, '') || null;
-	return null;
-}
-
 function isTextContentType(contentType: string): boolean {
 	return contentType.trim() === '' || detectLanguageFromContentType(contentType) !== null;
 }
@@ -661,7 +648,9 @@ export async function downloadRestResponse(
 		const fileUrl = URL.createObjectURL(blob);
 		const anchor = document.createElement('a');
 		anchor.href = fileUrl;
-		anchor.download = filename || 'response.bin';
+		// The name arrives from a server-supplied disposition, so it goes through the
+		// same sanitizer as the native dialog: a path or a quote must not reach `download`.
+		anchor.download = sharedFileName(filename || 'response.bin');
 		anchor.click();
 		URL.revokeObjectURL(fileUrl);
 	} finally {

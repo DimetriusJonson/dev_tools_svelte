@@ -89,6 +89,28 @@ export function getHeader(headers: RestProperty[], name: string): string {
 	return found?.value ?? '';
 }
 
+/**
+ * Reads a file name out of a `Content-Disposition` value: the RFC 5987 extended
+ * form wins over the plain one, quotes are stripped, and a broken percent
+ * escape is kept as its own text rather than dropped. An empty parameter answers
+ * `null`, like the Rust backend, so a caller can fall back to its own name.
+ */
+export function filenameFromDisposition(value: string): string | null {
+	if (!value) return null;
+	const star = value.match(/filename\*=([^;]+)/i);
+	if (star) {
+		const raw = star[1].trim().replace(/^UTF-8''/i, '').replace(/^"|"$/g, '');
+		try {
+			return decodeURIComponent(raw) || null;
+		} catch {
+			return raw || null;
+		}
+	}
+	const plain = value.match(/filename=([^;]+)/i);
+	if (plain) return plain[1].trim().replace(/^"|"$/g, '') || null;
+	return null;
+}
+
 export function parseCookies(headers: RestProperty[]): RestProperty[] {
 	const value = getHeader(headers, 'cookie');
 	if (!value.trim()) return [];

@@ -10,7 +10,7 @@
 	import { notify, notifyError } from '$lib/stores/toast';
 	import { copyText, readClipboardText } from '$lib/utils/clipboard';
 	import { formatContent } from '$lib/utils/formatters';
-	import { pickSaveFile } from '$lib/services/files';
+	import { pickSaveFile, sharedFileName } from '$lib/services/files';
 	import { isTauriRuntime } from '$lib/services/db';
 	import {
 		clearRestResponse,
@@ -41,6 +41,7 @@
 		buildRawRequestPreview,
 		byteLength,
 		detectLanguageFromHeaders,
+		filenameFromDisposition,
 		formatRestSize,
 		formatRestTime,
 		getHeader,
@@ -54,7 +55,6 @@
 		validateFileRow,
 		validateFileRows,
 		validateProperties,
-		validatePropertyField,
 		validateQueryUrl,
 		validateRequest,
 		validateRowName,
@@ -63,9 +63,13 @@
 		type RequestValidationSource,
 		type RestFileRow,
 		type RestProperty,
-		type ValidationIssue,
-		type ValidationKind
+		type ValidationIssue
 	} from '$lib/utils/rest';
+	import {
+		blockedMessage,
+		propertyFieldHint,
+		validationMessage
+	} from '$lib/utils/validation';
 
 	type RequestTab = 'headers' | 'query' | 'cookies';
 	type ResponseTab = 'response' | 'headers' | 'raw';
@@ -157,22 +161,6 @@
 		response ? response.size : savedResponseBody ? byteLength(savedResponseBody) : 0
 	);
 	const requestTime = $derived(response?.duration_ms ?? null);
-
-	function filenameFromDisposition(value: string): string | null {
-		if (!value) return null;
-		const star = value.match(/filename\*=([^;]+)/i);
-		if (star) {
-			const raw = star[1].trim().replace(/^UTF-8''/i, '').replace(/^"|"$/g, '');
-			try {
-				return decodeURIComponent(raw);
-			} catch {
-				return raw;
-			}
-		}
-		const plain = value.match(/filename=([^;]+)/i);
-		if (plain) return plain[1].trim().replace(/^"|"$/g, '') || null;
-		return null;
-	}
 
 	function cloneRequest(request: RestRequest): RestRequest {
 		return {
@@ -326,44 +314,20 @@
 		patchActive({ files: rows });
 	}
 
-	const VALIDATION_KEYS: Record<ValidationKind, string> = {
-		'header-name': 'rest.validation.headerName',
-		'header-value': 'rest.validation.headerValue',
-		'cookie-name': 'rest.validation.cookieName',
-		'cookie-value': 'rest.validation.cookieValue',
-		'query-param': 'rest.validation.queryParam',
-		'form-param': 'rest.validation.formParam',
-		'multipart-field-name': 'rest.validation.multipartFieldName',
-		'multipart-field-value': 'rest.validation.multipartFieldValue',
-		'multipart-file-name': 'rest.validation.multipartFileFieldName',
-		'file-missing': 'rest.validation.fileMissing',
-		'name-required': 'rest.validation.nameRequired'
-	};
-
-	function validationMessage(issue: ValidationIssue): string {
-		return $t(VALIDATION_KEYS[issue.kind], { name: issue.name || '—', char: issue.char });
-	}
-
 	/** Cell-level hints for PropertyEditor: a localized reason, or `null` when valid. */
 	function hintFor(kind: PropertyKind) {
 		return (field: 'name' | 'value', row: RestProperty, index: number): string | null => {
-			// A name is mandatory: the row is dropped on persistence and on the wire,
-			// so a value with a blank name would silently never be sent. This also
-			// covers the add-row draft (`index === -1`).
-			if (field === 'name') {
-				const missing = validateRowName(row);
-				if (missing) return validationMessage({ ...missing, row: index });
-			}
 			// Query rows are decoded, so the raw URL decides which row is at fault.
 			if (kind === 'query') {
 				const issue = validateQueryUrl(active?.url ?? '').find(
 					(item) => item.row === index && item.field === field
 				);
-				return issue ? validationMessage(issue) : null;
+				return issue ? validationMessage(issue, $t) : null;
 			}
-			const issue = validatePropertyField(kind, field, row[field]);
-			if (!issue) return null;
-			return validationMessage({ ...issue, name: row.name.trim() || row[field], row: index });
+			// A name is mandatory: the row is dropped on persistence and on the wire, so a
+			// value with a blank name would silently never be sent. `propertyFieldHint`
+			// checks that first, and it also covers the add-row draft (`index === -1`).
+			return propertyFieldHint(kind, field, row, index, $t);
 		};
 	}
 
@@ -373,14 +337,12 @@
 	 */
 	function fileHint(field: 'name' | 'value', row: RestFileRow, index: number): string | null {
 		const issue = validateFileRow(row, index).find((item) => item.field === field);
-		return issue ? validationMessage(issue) : null;
+		return issue ? validationMessage(issue, $t) : null;
 	}
 
 	/** Message that explains why a request cannot be sent, or `null` when it is valid. */
 	function validationFailure(request: RequestValidationSource): string | null {
-		const issues = validateRequest(request);
-		if (!issues.length) return null;
-		return $t('rest.validation.blocked', { detail: validationMessage(issues[0]) });
+		return blockedMessage(validateRequest(request), $t);
 	}
 
 	const headerIssues = $derived(active ? validateProperties('header', active.headers) : []);
@@ -758,7 +720,9 @@
 			notify(failure, 'error');
 			return;
 		}
-		const name = attachmentName || 'response.bin';
+		// The name can come from the server's `content-disposition`, so it is reduced
+		// to a base name before it reaches the save dialog or the browser download.
+		const name = sharedFileName(attachmentName || 'response.bin');
 		const input = {
 			method: active.method,
 			url: active.url,
@@ -970,7 +934,7 @@
 				class={urlClass}
 				aria-label={$t('rest.url')}
 				aria-invalid={queryIssues.length > 0}
-				title={queryIssues.length ? validationMessage(queryIssues[0]) : undefined}
+				title={queryIssues.length ? validationMessage(queryIssues[0], $t) : undefined}
 			/>
 
 			<button
@@ -1038,7 +1002,7 @@
 								{#if headerIssues.length}
 									<span
 										class="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--danger)]"
-										title={validationMessage(headerIssues[0])}
+										title={validationMessage(headerIssues[0], $t)}
 									></span>
 								{/if}
 							</button>
@@ -1054,7 +1018,7 @@
 								{#if queryIssues.length}
 									<span
 										class="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--danger)]"
-										title={validationMessage(queryIssues[0])}
+										title={validationMessage(queryIssues[0], $t)}
 									></span>
 								{/if}
 							</button>
@@ -1070,7 +1034,7 @@
 								{#if cookieIssues.length}
 									<span
 										class="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--danger)]"
-										title={validationMessage(cookieIssues[0])}
+										title={validationMessage(cookieIssues[0], $t)}
 									></span>
 								{/if}
 							</button>
@@ -1143,7 +1107,7 @@
 									{#if bodyIssues[bodyType].length}
 										<span
 											class="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--danger)]"
-											title={validationMessage(bodyIssues[bodyType][0])}
+											title={validationMessage(bodyIssues[bodyType][0], $t)}
 										></span>
 									{/if}
 								</button>
@@ -1195,12 +1159,12 @@
 												{#if tab === 'fields' && multipartFieldIssues.length}
 													<span
 														class="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--danger)]"
-														title={validationMessage(multipartFieldIssues[0])}
+														title={validationMessage(multipartFieldIssues[0], $t)}
 													></span>
 												{:else if tab === 'files' && multipartFileIssues.length}
 													<span
 														class="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--danger)]"
-														title={validationMessage(multipartFileIssues[0])}
+														title={validationMessage(multipartFileIssues[0], $t)}
 													></span>
 												{/if}
 											</button>

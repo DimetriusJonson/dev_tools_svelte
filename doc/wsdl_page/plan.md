@@ -1,7 +1,7 @@
 # План реализации: страница «WSDL-клиент»
 
 Источник требований: `doc/wsdl_page/readme.txt`, макет: `doc/wsdl_page/wsdl_ui.png`.
-Статус: в работе — шаги 1–7 выполнены, выполняется частичная версия шага 8 (отправка без таблицы `Headers`). Дата статуса: 2026-11-22.
+Статус: в работе — шаги 1–10 и 12 выполнены; остаются шаг 11 (полировка тем/aria/пустых состояний под макет) и шаг 13 (ручной smoke в `npm run tauri dev`). Дата статуса: 2026-11-22.
 
 ## 0. Ход работ
 
@@ -14,11 +14,11 @@
 | 5 | готово | 12 команд в `wsdl/mod.rs` + регистрация в `lib.rs`, `services/wsdl.ts` (`isWsdlSupported()`), `services/wsdl.test.ts` |
 | 6 | готово | `routes/wsdl/+page.svelte`, пункт навбара, блок `wsdl.*` в en/ru, ресайзеры |
 | 7 | готово | `WsdlExplorer.svelte`: селект проектов с меню, импорт из буфера + help, дерево, `...` файла с подтверждением, раскрытие ветки, восстановление выбора |
-| 8 | частично | Отправка собирает locked-заголовки и вызывает `executeRestRequest`; таблица `Headers` с `locked`-строками (`PropertyEditor` проп уже добавлен) не выведена в панель |
-| 9 | не начат | Вкладки `XML` (редактируемый body уже есть) и read-only `Raw` |
-| 10 | не начат | Вкладки ответа, `Save`/`Copy`/`Format`/скачивание (`save_wsdl_response`/`clear_wsdl_response` уже есть в бэкенде) |
-| 11 | частично | Темы через CSS-переменные, aria-метки строк и меню; пустые состояния и индикаторы загрузки есть |
-| 12 | готово | `cargo test` 83 теста, Vitest: `utils/wsdl.test.ts` (16), `services/wsdl.test.ts` (16) |
+| 8 | готово | Вкладка `Headers`: `PropertyEditor` с `locked`/`lockedTitle` для `Content-Type` и `SOAPAction` (строки первыми, только чтение, без кнопки удаления), проверка только строк пользователя через общий `utils/validation.ts`, красная точка на вкладке и блокировка запуска/скачивания; отправка по-прежнему собирает locked-заголовки и вызывает `executeRestRequest` |
+| 9 | готово | Вкладки запроса `XML`/`Headers`/`Raw`: `rawRequestText` — `buildSoapRawRequest` до первого вызова и дамп бэкенда после него, кнопка копирования; cURL из страницы не экспортится |
+| 10 | готово | Вкладки ответа `XML`/`Headers`/`Raw`, статус/размер/время, чекбокс `Save` (`save_wsdl_response`/`clear_wsdl_response`), `Format`/`Unescape`/`Copy`, карточка вложения и бинарного ответа со скачиванием через `downloadRestResponse` и именем из `Content-Disposition` (`filenameFromDisposition` + `sharedFileName`) |
+| 11 | частично | Темы через CSS-переменные, aria-метки строк, меню и вкладок; пустые состояния, индикаторы загрузки и подсказки ячеек есть; сверка с макетом не сделана |
+| 12 | готово | `cargo test` 83 юнит-теста + 1 интеграционный (в том числе `response_and_request_do_not_overwrite_each_other`), Vitest 222 теста: `utils/wsdl.test.ts` (16), `services/wsdl.test.ts` (16), `utils/validation.test.ts` (7), `utils/rest.test.ts` (66) |
 | 13 | не начат | Ручной smoke на публичном WSDL в `npm run tauri dev` |
 
 
@@ -275,5 +275,5 @@ npm run tauri dev
 
 - **M1. Бэкенд импорта** (шаги 2–5): схема, парсер, XSD-шаблон, команды. Демо: импорт WSDL и чтение дерева через invoke.
 - **M2. Читающий UI** (шаги 6–7): навигация, explorer, выбор операции, шаблон и endpoint без выполнения.
-- **M3. Выполнение SOAP** (шаги 8–10): headers с locked, envelope, запуск/отмена, ответ, сохранение.
+- **M3. Выполнение SOAP** (шаги 8–10): headers с locked, envelope, запуск/отмена, ответ, сохранение. **Готово.**
 - **M4. Полировка и приёмка** (шаги 11–13): темы, a11y, тесты, smoke, документация.
