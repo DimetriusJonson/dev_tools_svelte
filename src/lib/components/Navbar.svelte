@@ -13,7 +13,8 @@
 		{ path: '/url', label: 'nav.url' },
 		{ path: '/compare', label: 'nav.compare' },
 		{ path: '/share', label: 'nav.share' },
-		{ path: '/rest', label: 'nav.rest' }
+		{ path: '/rest', label: 'nav.rest' },
+		{ path: '/wsdl', label: 'nav.wsdl' }
 	];
 
 	function isActive(path: string): boolean {

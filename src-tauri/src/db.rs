@@ -117,6 +117,70 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 		CREATE INDEX IF NOT EXISTS idx_rest_form_request ON rest_request_form(request_id);
 		CREATE INDEX IF NOT EXISTS idx_rest_multipart_request ON rest_request_multipart(request_id);
 		CREATE INDEX IF NOT EXISTS idx_rest_files_request ON rest_request_files(request_id);
+		-- WSDL client: projects, imported files, the parsed tree and per-operation state.
+		CREATE TABLE IF NOT EXISTS wsdl_projects (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			sort_order INTEGER NOT NULL DEFAULT 0,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS wsdl_files (
+			id TEXT PRIMARY KEY,
+			project_id TEXT,
+			name TEXT NOT NULL,
+			source_url TEXT NOT NULL,
+			raw_xml TEXT NOT NULL DEFAULT '',
+			parse_warnings TEXT NOT NULL DEFAULT '[]',
+			sort_order INTEGER NOT NULL DEFAULT 0,
+			imported_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(project_id, source_url)
+		);
+
+		CREATE TABLE IF NOT EXISTS wsdl_services (
+			id TEXT PRIMARY KEY,
+			file_id TEXT NOT NULL,
+			name TEXT NOT NULL,
+			sort_order INTEGER NOT NULL DEFAULT 0
+		);
+
+		CREATE TABLE IF NOT EXISTS wsdl_operations (
+			id TEXT PRIMARY KEY,
+			service_id TEXT NOT NULL,
+			name TEXT NOT NULL,
+			soap_action TEXT NOT NULL DEFAULT '',
+			input_element TEXT NOT NULL DEFAULT '',
+			output_element TEXT NOT NULL DEFAULT '',
+			input_template TEXT NOT NULL DEFAULT '',
+			sort_order INTEGER NOT NULL DEFAULT 0
+		);
+
+		CREATE TABLE IF NOT EXISTS wsdl_endpoints (
+			id TEXT PRIMARY KEY,
+			operation_id TEXT NOT NULL,
+			url TEXT NOT NULL,
+			soap_version TEXT NOT NULL DEFAULT '1.1',
+			binding TEXT NOT NULL DEFAULT '',
+			port_name TEXT NOT NULL DEFAULT '',
+			sort_order INTEGER NOT NULL DEFAULT 0
+		);
+
+		CREATE TABLE IF NOT EXISTS wsdl_operation_state (
+			operation_id TEXT PRIMARY KEY,
+			endpoint_id TEXT,
+			request_body TEXT NOT NULL DEFAULT '',
+			headers TEXT NOT NULL DEFAULT '[]',
+			save_response INTEGER NOT NULL DEFAULT 0,
+			response_body TEXT,
+			response_headers TEXT NOT NULL DEFAULT '[]',
+			raw_request TEXT,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_wsdl_files_project ON wsdl_files(project_id);
+		CREATE INDEX IF NOT EXISTS idx_wsdl_services_file ON wsdl_services(file_id);
+		CREATE INDEX IF NOT EXISTS idx_wsdl_operations_service ON wsdl_operations(service_id);
+		CREATE INDEX IF NOT EXISTS idx_wsdl_endpoints_operation ON wsdl_endpoints(operation_id);
 
 		INSERT INTO rest_request_form (request_id, name, value, sort_order)
 		SELECT p.request_id, p.name, p.value, p.sort_order
@@ -300,6 +364,32 @@ mod tests {
         assert!(tables.contains(&"rest_request_form".to_string()));
         assert!(tables.contains(&"rest_request_multipart".to_string()));
         assert!(tables.contains(&"rest_request_files".to_string()));
+        assert!(tables.contains(&"wsdl_projects".to_string()));
+        assert!(tables.contains(&"wsdl_files".to_string()));
+        assert!(tables.contains(&"wsdl_services".to_string()));
+        assert!(tables.contains(&"wsdl_operations".to_string()));
+        assert!(tables.contains(&"wsdl_endpoints".to_string()));
+        assert!(tables.contains(&"wsdl_operation_state".to_string()));
+    }
+
+    #[test]
+    fn schema_is_idempotent_for_the_wsdl_tables() {
+        let connection = memory_db();
+        // A second startup must not re-create (and therefore must not clear) anything.
+        init_schema(&connection).expect("schema again");
+        let mut statement = connection
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+            .expect("prepare");
+        let after: Vec<String> = statement
+            .query_map([], |row| row.get(0))
+            .expect("query")
+            .map(|row| row.expect("row"))
+            .collect();
+        let wsdl_tables = after
+            .iter()
+            .filter(|name| name.starts_with("wsdl_"))
+            .count();
+        assert_eq!(wsdl_tables, 6);
     }
 
     #[test]

@@ -12,7 +12,9 @@
 		addLabel = 'Add property',
 		removeLabel = 'Remove property',
 		headerAutocomplete = false,
-		fieldHint
+		lockedTitle = '',
+		fieldHint,
+		locked
 	}: {
 		rows?: RestProperty[];
 		onchange: (rows: RestProperty[]) => void;
@@ -23,11 +25,15 @@
 		addLabel?: string;
 		removeLabel?: string;
 		headerAutocomplete?: boolean;
+		/** Why a read-only row is on screen: the tool writes it, not the user. */
+		lockedTitle?: string;
 		/**
 		 * Localized reason a cell is invalid, or `null` when it follows the standard.
 		 * `index` is the row index, or `-1` for the add-row draft.
 		 */
 		fieldHint?: (field: 'name' | 'value', row: RestProperty, index: number) => string | null;
+		/** A row the component shows without letting the user edit or remove it. */
+		locked?: (row: RestProperty, index: number) => boolean;
 	} = $props();
 
 	const listId = `property-${Math.random().toString(36).slice(2)}`;
@@ -87,12 +93,20 @@
 		return fieldHint?.(field, row, index) ?? null;
 	}
 
-	function cellClass(field: 'name' | 'value', problem: string | null, draft = false): string {
-		const padding = field === 'name' ? 'px-3' : draft ? 'pl-3 pr-3' : 'pl-3 pr-10';
+	function cellClass(
+		field: 'name' | 'value',
+		problem: string | null,
+		draft = false,
+		lockedRow = false
+	): string {
+		// A locked row has no remove button, so its value cell keeps the draft padding.
+		const padding = field === 'name' || draft || lockedRow ? 'px-3' : 'pl-3 pr-10';
 		const side = field === 'name' ? 'border-r border-[var(--border)] font-semibold' : '';
 		const palette = problem
 			? 'bg-[var(--danger-bg)] text-[var(--danger-text)]'
-			: 'bg-transparent text-[var(--text)] focus-visible:bg-[var(--panel-bg-alt)]';
+			: lockedRow
+				? 'bg-[var(--panel-bg-alt)] text-[var(--text-muted)]'
+				: 'bg-transparent text-[var(--text)] focus-visible:bg-[var(--panel-bg-alt)]';
 		return `h-10 min-w-0 ${padding} text-sm outline-none placeholder:text-[var(--text-muted)] ${side} ${palette}`;
 	}
 
@@ -165,36 +179,43 @@
 		{#each rows as row, index (index)}
 			{@const nameHint = hint('name', row, index)}
 			{@const valueHint = hint('value', row, index)}
-			<div class="group relative grid grid-cols-2 border-b border-[var(--border)]">
+			{@const lockedRow = locked?.(row, index) ?? false}
+			<div class="grid grid-cols-2 border-b border-[var(--border)] {lockedRow ? '' : 'group relative'}">
 				<input
 					value={row.name}
 					oninput={(event) => update(index, 'name', (event.currentTarget as HTMLInputElement).value)}
 					placeholder={namePlaceholder}
 					list={headerAutocomplete ? `${listId}-names` : undefined}
-					class={cellClass('name', nameHint)}
+					readonly={lockedRow}
+					tabindex={lockedRow ? -1 : undefined}
+					class={cellClass('name', nameHint, false, lockedRow)}
 					aria-label={`${nameLabel} ${index + 1}`}
 					aria-invalid={Boolean(nameHint)}
-					title={nameHint ?? undefined}
+					title={lockedRow ? lockedTitle || undefined : nameHint ?? undefined}
 				/>
 				<input
 					value={row.value}
 					oninput={(event) => update(index, 'value', (event.currentTarget as HTMLInputElement).value)}
 					placeholder={valuePlaceholder}
 					list={headerAutocomplete ? `${listId}-values` : undefined}
-					class={cellClass('value', valueHint)}
+					readonly={lockedRow}
+					tabindex={lockedRow ? -1 : undefined}
+					class={cellClass('value', valueHint, false, lockedRow)}
 					aria-label={`${valueLabel} ${index + 1}`}
 					aria-invalid={Boolean(valueHint)}
-					title={valueHint ?? undefined}
+					title={lockedRow ? lockedTitle || undefined : valueHint ?? undefined}
 				/>
-				<button
-					type="button"
-					onclick={() => remove(index)}
-					class="absolute right-1.5 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md bg-[var(--panel-bg)] text-[var(--text-muted)] opacity-0 transition-all duration-150 hover:scale-110 hover:text-[var(--danger)] focus-visible:opacity-100 group-hover:opacity-100"
-					title={removeLabel}
-					aria-label={removeLabel}
-				>
-					<Icon name="trash" size={15} />
-				</button>
+				{#if !lockedRow}
+					<button
+						type="button"
+						onclick={() => remove(index)}
+						class="absolute right-1.5 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md bg-[var(--panel-bg)] text-[var(--text-muted)] opacity-0 transition-all duration-150 hover:scale-110 hover:text-[var(--danger)] focus-visible:opacity-100 group-hover:opacity-100"
+						title={removeLabel}
+						aria-label={removeLabel}
+					>
+						<Icon name="trash" size={15} />
+					</button>
+				{/if}
 			</div>
 		{/each}
 	</div>

@@ -4,6 +4,7 @@ mod processor;
 mod rest;
 mod share;
 mod update;
+mod wsdl;
 
 use std::sync::{Arc, Mutex};
 
@@ -72,6 +73,7 @@ pub fn run() {
             let share_database = database.clone();
             app.manage(database);
             app.manage(rest::RestCancelState::default());
+            app.manage(wsdl::WsdlFetchState::default());
             app.manage(share::PendingDeepLink::default());
             share::install_deep_link_handler(app.handle());
             app.manage(http_server::start(share_database));
@@ -132,7 +134,19 @@ pub fn run() {
             rest::cmd_execute_rest_request,
             rest::cmd_cancel_rest_request,
             rest::cmd_download_rest_response,
-            update::restart_app
+            update::restart_app,
+            wsdl::cmd_list_wsdl_projects,
+            wsdl::cmd_create_wsdl_project,
+            wsdl::cmd_rename_wsdl_project,
+            wsdl::cmd_delete_wsdl_project,
+            wsdl::cmd_list_wsdl_files,
+            wsdl::cmd_import_wsdl,
+            wsdl::cmd_delete_wsdl_file,
+            wsdl::cmd_get_wsdl_operation,
+            wsdl::cmd_save_wsdl_operation_state,
+            wsdl::cmd_save_wsdl_response,
+            wsdl::cmd_clear_wsdl_response,
+            wsdl::cmd_cancel_wsdl_fetch
         ])
         .build(tauri::generate_context!())
         .expect("error while building the Tauri application")

@@ -15,10 +15,10 @@
 - **UI:** Svelte 5 runes, TypeScript, Tailwind CSS, CSS variables.
 - **Editors:** CodeMirror 6 (`basicSetup`, JSON/XML language packages, one-dark highlight style).
 - **Database:** SQLite via `rusqlite` with `bundled` feature. Not `tauri-plugin-sql`.
-- **File processing:** `quick-xml 0.42`, `serde_json` with `preserve_order`.
+- **File processing:** `quick-xml 0.42`, `serde_json` with `preserve_order`. WSDL 1.1 and XSD parsing are `quick-xml`-only too, in `src-tauri/src/wsdl/`; no additional crate was added for them.
 - **Tauri plugins:** `dialog`, `single-instance`, `deep-link`, `clipboard-manager`, `updater`.
 - **Testing:** Vitest + jsdom for frontend; Rust unit tests for DB, processing, and tray mapping.
-- **Current status:** XML, JSON, URL, Compare, Share (desktop only), Rest client (including `multipart/form-data` bodies with fields and file parts), themes, i18n, persistence, notifications, tray, single-instance, deep links, updates (desktop only: startup + navbar check, banner with install), and large-file processing are implemented. The updater's install path is unverified until a signed release with a `latest.json` asset is published.
+- **Current status:** XML, JSON, URL, Compare, Share (desktop only), Rest client (including `multipart/form-data` bodies with fields and file parts), WSDL client (desktop only: WSDL 1.1 import, XSD request template, tree explorer, SOAP 1.1/1.2 send), themes, i18n, persistence, notifications, tray, single-instance, deep links, updates (desktop only: startup + navbar check, banner with install), and large-file processing are implemented. The WSDL page still lacks the `Headers` and `Raw` tabs and the response `Save`/`Copy`/`Format`/download actions (plan steps 8–10 in `doc/wsdl_page/plan.md`). The updater's install path is unverified until a signed release with a `latest.json` asset is published.
 
 ## 2. Commands & Definition of Done
 
@@ -49,7 +49,7 @@ TAURI_SIGNING_PRIVATE_KEY=~/.tauri/webdev-useful-tools.key npm run tauri build
 - `npm run check` runs `svelte-kit sync && svelte-check`.
 - `npm run build` writes the static frontend to `build/`.
 - `npm run tauri build` also produces updater artifacts because `bundle.createUpdaterArtifacts` is `true`; that requires `TAURI_SIGNING_PRIVATE_KEY` (and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` if the key has a password). Ship `latest.json` plus the installer and its `.sig` as release assets, or every check answers "not found".
-- Rust tests live in `src-tauri/src/*.rs` under `#[cfg(test)]`.
+- Rust tests live in `src-tauri/src/*.rs` and `src-tauri/src/wsdl/*.rs` under `#[cfg(test)]`.
 
 Definition of Done for a code change:
 
@@ -71,9 +71,10 @@ src/
 │   │   ├── CodeMirrorEditor.svelte       # reusable CodeMirror wrapper + highlight API
 │   │   ├── Icon.svelte                   # inline SVG path dictionary
 │   │   ├── Navbar.svelte                 # nav pills, language, theme controls, desktop update check
-│   │   ├── PropertyEditor.svelte         # shared name/value table for REST properties + invalid-cell hints
+│   │   ├── PropertyEditor.svelte         # shared name/value table for REST/WSDL properties + invalid-cell hints + locked rows
 │   │   ├── PropertyFilesEditor.svelte    # Form tab's Files table: name cell + native file picker cell
 │   │   ├── RestExplorer.svelte           # REST projects and request list UI
+│   │   ├── WsdlExplorer.svelte           # WSDL projects, clipboard import + help popover, file→service→operation tree
 │   │   ├── Toaster.svelte                # global notification stack
 │   │   ├── UpdateBanner.svelte           # update banner: version, notes, progress, install/restart
 │   │   └── XmlJsonFormatter.svelte       # shared XML/JSON tool UI
@@ -85,7 +86,9 @@ src/
 │   │   ├── rest.test.ts                  # selection restore rules and browser-storage round trip
 │   │   ├── share.ts                      # share IPC wrappers + viewer URL helpers
 │   │   ├── share.test.ts
-│   │   └── updater.ts                    # plugin check/downloadAndInstall/close wrappers + restart_app
+│   │   ├── updater.ts                    # plugin check/downloadAndInstall/close wrappers + restart_app
+│   │   ├── wsdl.ts                       # WSDL IPC wrappers, desktop-only guard, explorer selection persistence
+│   │   └── wsdl.test.ts                  # desktop-only rejection and selection restore rules
 │   ├── stores/
 │   │   ├── i18n.ts                       # en/ru dictionaries, locale detection
 │   │   ├── i18n.test.ts                  # key + placeholder parity, dialog and nav keys in both
@@ -105,7 +108,9 @@ src/
 │       ├── splash.ts                     # loading splash labels, version, dismissal
 │       ├── splash.test.ts
 │       ├── update.ts                     # update phases, percent, dismiss check, error grouping
-│       └── update.test.ts
+│       ├── update.test.ts
+│       ├── wsdl.ts                       # SOAP envelope + locked-header mirrors, endpoint choice, import error/warning codes → i18n keys
+│       └── wsdl.test.ts
 └── routes/
     ├── +layout.svelte                    # navbar, banner, full-height shell, splash dismissal, deep-link navigation, startup update check
     ├── +layout.ts                        # ssr = false; prerender = false
@@ -116,7 +121,8 @@ src/
     ├── compare/+page.svelte              # diff UI
     ├── share/+page.svelte                # desktop share UI: interfaces, file/content upload
     ├── view/+page.svelte                 # read-only viewer opened by deep link
-    └── rest/+page.svelte                 # REST client: explorer, request editor, response
+    ├── rest/+page.svelte                 # REST client: explorer, request editor, response
+    └── wsdl/+page.svelte                 # WSDL client: explorer, request template panel, SOAP response
 
 src-tauri/
 ├── Cargo.toml
@@ -126,12 +132,17 @@ src-tauri/
 ├── icons/                                # generated bundle + app-icon.svg
 └── src/
     ├── main.rs
-    ├── lib.rs                            # tray, single-instance, DB init, commands, deep link
-    ├── db.rs                             # schema, editor/settings CRUD, shared_uploads CRUD
+    ├── lib.rs                            # tray, single-instance, DB init, commands, deep link, WSDL fetch state
+    ├── db.rs                             # schema, editor/settings CRUD, shared_uploads CRUD, WSDL schema
     ├── processor.rs                      # large-file XML/JSON processing
     ├── rest.rs                           # REST projects/requests persistence, multipart encoding, execution, cancellation
     ├── share.rs                          # interfaces, deep link, upload/viewer commands, server state
     ├── update.rs                         # restart_app command used outside Windows after an update installs
+    ├── wsdl/
+    │   ├── mod.rs                        # WSDL models/constants + the 12 `cmd_*` Tauri command wrappers
+    │   ├── parser.rs                     # WSDL 1.1 `XmlDom` arena, `parse_wsdl`, `fetch_wsdl`
+    │   ├── xsd.rs                        # XSD index and SOAP request-template generator
+    │   └── store.rs                      # WSDL projects/files/services/operations/endpoints/state CRUD
     └── http_server.rs                    # read-only axum share server on port 3030
 
 src-tauri/tests/http_client.rs            # reqwest/axum plain-HTTP round trip
@@ -184,7 +195,7 @@ getEditorValue(): string;
 - **No external icon libraries.** All icons live in `ICON_PATHS` in `src/lib/components/Icon.svelte`.
 - Store one or more SVG `d` strings per icon. Render only `<path d={...} />`.
 - **Never** use empty fragments `<>...</>` inside `<svg>`.
-- Every name in `ICON_PATHS` is rendered by at least one component. Current names: `copy`, `download`, `share`, `chevronDown`, `sun`, `moon`, `monitor`, `arrowRight`, `check`, `swap`, `file`, `server`, `sparkles`, `globe`, `more`, `plus`, `trash`, `clipboard`, `braces`, `alignLeft`, `eraser`, `eye`, `close`, `refresh`, `update`. Do not park unused icons in the dictionary — remove the entry when the last usage goes away.
+- Every name in `ICON_PATHS` is rendered by at least one component. Current names: `copy`, `download`, `share`, `chevronDown`, `sun`, `moon`, `monitor`, `arrowRight`, `check`, `swap`, `file`, `server`, `sparkles`, `globe`, `more`, `plus`, `trash`, `clipboard`, `braces`, `alignLeft`, `eraser`, `eye`, `close`, `refresh`, `update`, `help`, `warning`. Do not park unused icons in the dictionary — remove the entry when the last usage goes away.
 
 ### Styling and themes
 
@@ -239,7 +250,23 @@ getEditorValue(): string;
 - Copy feedback lasts 1.5 s. Formatter errors clear after 4.5 s.
 - `PropertyEditor.svelte` renders no column-title header row; `nameLabel`/`valueLabel` props are used only in `aria-label`, and placeholders convey the column meaning. Keep the add-row input directly under the container border.
 - `PropertyEditor.svelte` takes an optional `fieldHint(field, row, index) => string | null`. A non-null hint paints the cell with `--danger-bg`/`--danger-text`, sets `aria-invalid` and puts the localized reason in `title`. `index` is the row index, or `-1` for the add-row draft; the draft is validated like a row, so the name cell is checked even while it is empty. `commitDraft()` refuses an invalid draft and refuses to create a row when only the value is filled, so a broken name or value never becomes a row; the text stays on screen highlighted for correction.
+- `PropertyEditor.svelte` also takes `locked?: (row, index) => boolean` and `lockedTitle?: string`. A locked row renders both cells `readonly` with `tabindex={-1}`, no remove button (its value cell keeps the draft padding so the two columns stay aligned), and `title` reads `lockedTitle` instead of a validation hint. This is the hook the WSDL `Headers` table will use for the mandatory `Content-Type`/`SOAPAction` rows (plan step 8); no page passes it yet, and locked rows must never be validated or persisted — `utils/wsdl.ts::editableForSave` drops them on the way to SQLite.
 - `PropertyFilesEditor.svelte` is the Form tab's Files table and mirrors `PropertyEditor.svelte` — same `h-10` two-column grid, add-row draft under the container border, hover-revealed `trash` button, `fieldHint` cells. The difference is the value cell: it is a `<button>` that opens `pickPartFile`, shows `file` + the file name, and puts the full path (or the localized reason) in `title`. Buttons have no `aria-invalid`, so invalid picker cells are marked by the danger palette and `title` only. `commitDraft()` refuses to create a row when only a name is typed (`draftNeedsFile` makes the file cell explain itself) and refuses when the name is empty but a file was picked, so the pick is never thrown away silently. `picking` holds the row index while the dialog is open and renders a `…` marker.
+
+### WSDL page and explorer
+
+- `/wsdl` mirrors the REST shell: `flex h-full min-h-0 px-3 pb-3 pt-3`, explorer column (`shrink-0`, `explorerWidth` starts at 280 px) → `.resizer-v` → right column split by `.resizer-h` into request panel (`topHeight`, default 320 px, `grid-template-rows: {topHeight}px 10px minmax(180px, 1fr)`) and response panel. Both resizer `aria-label`s read `wsdl.resizeExplorer` / `wsdl.resizeBody`.
+- The browser build renders only the desktop stub (`wsdl.desktopOnly` card with `server` icon) and must not import any Tauri module.
+- `WsdlExplorer.svelte` props: `projects`, `files`, `activeProjectId` (`null` renders the `wsdl.noProject` option, which lists every file), `activeOperationId`, `loading`, `importing`, and callbacks `onSelectProject`, `onCreateProject`, `onRenameProject`, `onDeleteProject`, `onImport`, `onCancelImport`, `onSelectOperation`, `onExecuteFile`, `onDeleteFile`.
+- Row states read `--row-hover`/`--row-active`; the selected operation row is marked by the inset accent stripe (`shadow-[inset_3px_0_0_var(--accent)]`), not by a tinted background, same as REST list rows.
+- `expanded: Record<string, boolean>` holds manual toggles; `isOpen` falls back to the auto-open of the branch containing `activeOperationId`, so a manual collapse of that branch still wins. The chevron rows use the otherwise unused `wsdl.expand`/`wsdl.collapse`/`wsdl.expandOperations`/`wsdl.collapseOperations` keys as `aria-label`.
+- The file `...` button renders only for the file that owns the selected operation (`{#if active}`), never on hover; right-click opens the same menu on any row. Deletion confirms in place: `confirmingFileId` turns the menu into the `wsdl.deleteConfirm` line plus `common.cancel` and the delete item — do not use `window.confirm`. Destructive menu items keep the `text-red-500` look already used by `RestExplorer.svelte`.
+- Project create/rename replace the select with an input (`Enter` commits, `Escape` cancels, `onblur` commits); rename and delete menu items are `disabled={!activeProject}`.
+- The import button swaps to "Cancel" while `importing`, and the `help` button next to it opens an in-app popover (`helpOpen`) holding the localized import explanation. `{@const menu/target}` must be the immediate child of the `{#if …}` that guards it, or Svelte refuses to compile the fixed-position menu.
+- Warnings: a file row shows the `warning` icon with the list in `title`, and the page paints a banner over the request panel. Both build their text with `describeWarningText` → `$t(key, { detail })`.
+- Request panel header shows operation name, service name, SOAP version, the endpoint `<select>` (`endpoint.url`), and the `globe` execute button, which turns into the abort control while a call runs. Body edits are saved through a 450 ms debounce that re-arms when `dirty` flips, and only `editableForSave(rows)` reaches `saveWsdlOperationState`.
+- Response panel reuses the `rest.status`/`rest.size`/`rest.time` labels and `formatRestSize`/`formatRestTime`; do not invent `wsdl.status*` keys. The body renders only for non-attachment, non-binary responses; otherwise the panel shows `response.content_type`.
+- `wsdl.tabHeaders`, `wsdl.tabRaw`, `wsdl.body` and the `PropertyEditor` `locked` prop are reserved for plan steps 8–10 and are currently unreferenced by any page.
 
 ## 5. Persistence, IPC, and Backend
 
@@ -331,6 +358,65 @@ CREATE TABLE IF NOT EXISTS rest_request_files (
   filename TEXT NOT NULL DEFAULT '',
   sort_order INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS wsdl_projects (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS wsdl_files (
+  id TEXT PRIMARY KEY,
+  project_id TEXT,
+  name TEXT NOT NULL,
+  source_url TEXT NOT NULL,
+  raw_xml TEXT NOT NULL DEFAULT '',
+  parse_warnings TEXT NOT NULL DEFAULT '[]',
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  imported_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(project_id, source_url)
+);
+
+CREATE TABLE IF NOT EXISTS wsdl_services (
+  id TEXT PRIMARY KEY,
+  file_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS wsdl_operations (
+  id TEXT PRIMARY KEY,
+  service_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  soap_action TEXT NOT NULL DEFAULT '',
+  input_element TEXT NOT NULL DEFAULT '',
+  output_element TEXT NOT NULL DEFAULT '',
+  input_template TEXT NOT NULL DEFAULT '',
+  sort_order INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS wsdl_endpoints (
+  id TEXT PRIMARY KEY,
+  operation_id TEXT NOT NULL,
+  url TEXT NOT NULL,
+  soap_version TEXT NOT NULL DEFAULT '1.1',
+  binding TEXT NOT NULL DEFAULT '',
+  port_name TEXT NOT NULL DEFAULT '',
+  sort_order INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS wsdl_operation_state (
+  operation_id TEXT PRIMARY KEY,
+  endpoint_id TEXT,
+  request_body TEXT NOT NULL DEFAULT '',
+  headers TEXT NOT NULL DEFAULT '[]',
+  save_response INTEGER NOT NULL DEFAULT 0,
+  response_body TEXT,
+  response_headers TEXT NOT NULL DEFAULT '[]',
+  raw_request TEXT,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
 ```
 
 Rest storage:
@@ -392,7 +478,7 @@ Persistence behavior:
 - Formatter/URL autosave debounce is 450 ms; Compare uses 500 ms.
 - localStorage prefixes: `devtools.editor.`, `devtools.setting.`.
 - Theme and locale are stored in `localStorage` only.
-- Settings in `app_settings` go through `get_setting`/`set_setting` (`services/db.ts` mirrors them to `localStorage`). Keys in use: `rest.activeProject` and `rest.activeRequest` — the explorer selection restored at startup; an empty string means "no project / no request selected"; `update.dismissedVersion` — the release version hidden with "Not now" (empty/absent means nothing was dismissed).
+- Settings in `app_settings` go through `get_setting`/`set_setting` (`services/db.ts` mirrors them to `localStorage`). Keys in use: `rest.activeProject` and `rest.activeRequest` — the explorer selection restored at startup; `wsdl.activeProject` and `wsdl.activeOperation` — the WSDL explorer selection; an empty string means "no project / no request / no operation selected"; `update.dismissedVersion` — the release version hidden with "Not now" (empty/absent means nothing was dismissed).
 
 ### Tauri commands
 
@@ -431,10 +517,38 @@ All commands use `#[tauri::command(rename_all = "snake_case")]`. Frontend invoke
 | `cancel_rest_request` | — | `boolean` |
 | `download_rest_response` | `method`, `url`, `headers`, `body`, `body_type`, `form`, `multipart`, `files`, `path` | `u64` |
 | `restart_app` | — | `void` |
+| `list_wsdl_projects` | — | `WsdlProject[]` |
+| `create_wsdl_project` | `name` | `WsdlProject` |
+| `rename_wsdl_project` | `id`, `name` | `void` |
+| `delete_wsdl_project` | `id` | `void` |
+| `list_wsdl_files` | — | `WsdlFileSummary[]` |
+| `import_wsdl` | `project_id`, `url` | `WsdlImportResult` |
+| `delete_wsdl_file` | `id` | `void` |
+| `cancel_wsdl_fetch` | — | `boolean` |
+| `get_wsdl_operation` | `operation_id` | `WsdlOperationDetail` |
+| `save_wsdl_operation_state` | `operation_id`, `endpoint_id`, `request_body`, `headers`, `save_response` | `void` |
+| `save_wsdl_response` | `operation_id`, `body`, `headers`, `raw_request` | `void` |
+| `clear_wsdl_response` | `operation_id` | `void` |
 
 `ProcessResult` contains `output_path`, `bytes_in`, `bytes_out`.
 `ShareServerStatus` contains `running`, `port`, `error`. `ShareUploadResult` contains `id`, `link`, `server`, `filename`, `size`.
 `RestRequest`, `RestRequestDraft` and `RestRequestUpdate` carry `multipart: Vec<RestProperty>` and `files: Vec<RestFileRow>`; both fields are `#[serde(default)]` so requests and localStorage records saved before the Form tab still deserialize. `execute_rest_request` and `download_rest_response` take `multipart`/`files` as `Option<…>` and treat `None` as empty, so callers that only send JSON/XML/Text/Form-encode bodies keep working unchanged.
+`WsdlFileSummary` carries `id`, `project_id` (`''` = the "no project" bucket), `name`, `source_url`, `warnings`, `services[]` and `imported_at`; `WsdlService` carries `operations[]`, and `WsdlOperation` carries `soap_version`, `soap_action` and `endpoint_count` — no template and no URLs, so the tree stays cheap. `WsdlOperationDetail` adds `input_template`, `input_element`, `output_element`, `endpoints[]` and `state`; `WsdlImportResult` adds `reimported` and `warnings`.
+
+### WSDL import and storage
+
+- Parsing lives only in Rust (`src-tauri/src/wsdl/`), on `quick-xml` with no extra crate. `parser.rs` builds one `XmlDom` arena of elements with resolved namespaces and never matches on prefixes; `xsd.rs` indexes the schema and renders the request template; `store.rs` owns all SQL.
+- Limits in `wsdl/mod.rs`: `MAX_WSDL_BYTES = 5 MiB`, `FETCH_TIMEOUT_SECONDS = 30`, `MAX_TEMPLATE_DEPTH = 32`, `MAX_TEMPLATE_ELEMENTS = 2000`, `MAX_WSDL_ELEMENTS = 20 000`, `MAX_NESTING_LEVEL = 512` (`parser.rs`). Only WSDL 1.1 with SOAP 1.1/1.2 bindings is parsed; a WSDL 2.0 root namespace answers `wsdl2:`.
+- `fetch_wsdl` shares `rest.rs::normalize_rest_url`, so only `http`/`https` are fetched, and answers prefixed reasons that the frontend maps to i18n keys by prefix (`utils/wsdl.ts::describeErrorText`): `not-url:`, `malformed:`, `not-wsdl:`, `wsdl2:`, `no-operations:`, `cancelled`, `timeout:`, `connect:`, `network:`, `http:`, `too-large:`, `encoding:`. The texts stay English on the wire like the other service messages; an unmapped prefix (e.g. `client:`) is shown verbatim through `wsdl.import.failed`. Fetch failures never write a row.
+- `WsdlFetchState` (Tauri state, `wsdl/mod.rs`) cancels an import two ways: `cancel()` fires the `oneshot` of the running fetch, and when nothing runs `cancel_wsdl_fetch` still queues a flag that the *next* `import_wsdl` consumes before touching the network. `cancel.clear()` runs on every exit path, so a stale flag cannot poison a later import. This is a separate channel from `cancel_rest_request`.
+- Warnings are part of a successful import, not an error: `import-external`, `no-binding:<svc>::<port>`, `no-address:…`, `no-port-type:…`, `no-input:<svc>::<port>::<op>`, `unknown-type:<local>`, `cycle:<local>`, `depth-limit`, `element-limit`. They are stored as a JSON array in `wsdl_files.parse_warnings` and mapped to keys by `utils/wsdl.ts::describeWarningText`.
+- Ids are deterministic: `service_id = <file>::<service name>`, `operation_id = <service>::<operation name>`. Re-importing the same URL in the same project keeps the file id and therefore all operation ids and their stored state, and `kept_endpoint_ids` reuses an endpoint id whenever the operation still points at the same URL with the same SOAP version. It reports `reimported: true`; the template column is rewritten, while `request_body`, `headers` and `endpoint_id` are not touched.
+- `''` project id is stored as NULL and compared with `project_id IS ?1`, because plain `=` never matches NULL. `UNIQUE(project_id, source_url)` therefore cannot dedupe the no-project bucket — `find_file` is what prevents a duplicate row there.
+- `wsdl_operation_state` is created lazily on the first `get_wsdl_operation` of an operation, and `select_operation_detail` re-applies the locked headers on every read, so the stored `headers` array only ever holds user rows plus the recomputed mandatory ones. Locked rows are never persisted as such — `editable_for_save` drops a user row whose name case-insensitively clashes with `Content-Type`/`SOAPAction`, and `merge_locked_headers` writes mandatory rows first.
+- `store.rs::locked_headers`, `soap_action_for_call`, `editable_for_save`, `merge_locked_headers` and `locked_header_names` mirror `utils/wsdl.ts` (`lockedHeadersFor`, `soapActionForCall`, `editableForSave`, `mergeLockedHeaders`, `lockedHeaderNames`); change both sides together, as `utils/wsdl.test.ts` and the `store.rs` tests pin the same values.
+- Deletes cascade inside one transaction: `remove_project` deletes the project's files and each file's tree and states, `remove_file`/`remove_tree` delete endpoints → operations → services → states. SQLite has no foreign keys here.
+- SOAP execution is **not** a WSDL command: `/wsdl/+page.svelte` builds the envelope with `buildEnvelope`, merges the locked headers with `mergeLockedHeaders` and calls `executeRestRequest({ method: 'POST', body_type: 'xml', form: [] })`; abort uses `cancelRestRequest`. A non-2xx answer (a `soap:Fault` with HTTP 500) is returned by `rest.rs` as a response, not an error.
+- `services/wsdl.ts` is desktop-only: every call throws `WSDL support is available in the desktop app only` when `isWsdlSupported()` (`isTauriRuntime()`) is false, so the browser bundle never invokes these commands and `/wsdl` renders the desktop stub. Selection is persisted with `get_setting`/`set_setting` under `wsdl.activeProject` and `wsdl.activeOperation`; the pure `resolveWsdlSelection` looks the stored operation up across all visible files, so an operation that moved to another project reopens the project that owns it.
 
 ### Tolerant XML/JSON formatting
 
@@ -516,6 +630,7 @@ json_tolerant_candidate(candidates: &[String]) -> Option<&String>; // mirrors js
 - **Compare:** `src/routes/compare/+page.svelte` → `diffTexts`/`lineOffsets`/`splitLines` in `diff.ts`; highlights are applied through `CodeMirrorEditor`. Highlight `line` numbers are 1-based in `splitLines`' normalized space and reach the editor through `lineOffsets` (see the pitfall below).
 - **Share (desktop):** `src/routes/share/+page.svelte` → `services/share.ts` → `share.rs` + `http_server.rs`; uploads go to `shared_uploads` in `db.rs`. Draft content arrives from `XmlJsonFormatter.svelte` through the `draftShare` store (`readOnly: true`). Viewer: `src/routes/view/+page.svelte` opened via deep link or `/view?server=...&id=...`.
 - **Rest client:** `src/routes/rest/+page.svelte` → `RestExplorer.svelte` + `PropertyEditor.svelte` + `PropertyFilesEditor.svelte` → `services/rest.ts` → `utils/rest.ts` → `rest.rs`. Projects/requests persist in `rest_projects`, `rest_requests`, `rest_request_properties` (headers), `rest_request_form` (Form-encode rows), `rest_request_multipart` (Form tab fields) and `rest_request_files` (Form tab file rows, path + display name only). Execution goes through the Rust backend in Tauri; browser mode falls back to `fetch` + `FormData` and `localStorage`. cURL shell quoting (`tokenizeCurl`), imported-body de-escaping (`unescapeImportedBody`), form-part parsing (`splitFormParameters`) and export quoting (`buildCurl`, `multipartCurlParts`, `quotePosix`, `quoteWindows`) live in `utils/rest.ts` and are covered by `utils/rest.test.ts`. Multipart is assembled client-side by `resolveRequestBody`/`buildMultipartPreview`/`buildMultipartFormData` and server-side by `rest.rs::encode_multipart` + `multipart_dump`, both from `multipart_boundary()`; file picking goes through `services/files.ts::pickPartFile`. RFC validation lives in `utils/rest.ts` (`validateRequest`, `validateProperties`, `validateRowName`, `validateFileRows`, `validateQueryUrl`); the page maps `ValidationKind` to the `rest.validation.*` keys, passes `fieldHint` to every table (`hintFor`/`fileHint`), and blocks send/cURL/download when issues exist. Explorer selection persistence lives in `services/rest.ts` (`loadRestSelection`, `saveRestSelection`, pure `resolveRestSelection`, covered by `services/rest.test.ts`): `+page.svelte` restores it in `onMount` and writes it from an `$effect` that is gated on `hydrated` and on a non-reactive `savedSelection` key, so the restore does not rewrite identical values.
+- **WSDL client (desktop):** `src/routes/wsdl/+page.svelte` → `WsdlExplorer.svelte` → `services/wsdl.ts` → `utils/wsdl.ts` → `src-tauri/src/wsdl/{mod,parser,xsd,store}.rs`. Import reads the URL from the clipboard (`utils/clipboard.ts`) and runs `import_wsdl`; parsing, the XSD index and the request template are Rust-only, execution reuses `execute_rest_request` (`body_type: 'xml'`, `POST`) and `cancel_rest_request`, and abort/failure toasts reuse `rest.aborted` / `rest.requestFailed`. Projects, files, services, operations, endpoints and per-operation state persist in `wsdl_projects`, `wsdl_files`, `wsdl_services`, `wsdl_operations`, `wsdl_endpoints` and `wsdl_operation_state`; explorer selection goes through `app_settings.wsdl.activeProject`/`wsdl.activeOperation` with the pure `resolveWsdlSelection` (`services/wsdl.test.ts`). The SOAP envelope, the locked headers, the endpoint choice and the import error/warning code tables live in `utils/wsdl.ts` (`buildEnvelope`, `lockedHeadersFor`, `mergeLockedHeaders`, `editableForSave`, `selectEndpoint`, `describeErrorText`, `describeWarningText`) and are mirrored in `store.rs`/`mod.rs`. Behavior and acceptance criteria: README section «WSDL-клиент». Out of scope until plan steps 8–10 (`doc/wsdl_page/plan.md`): the `Headers` tab with locked rows, the `Raw` preview, and response `Save`/`Copy`/`Format`/download — `save_wsdl_response`/`clear_wsdl_response` already exist in the backend.
 - **Updates (desktop):** `src/routes/+layout.svelte` (startup check + banner slot) + `Navbar.svelte` (manual check) → `UpdateBanner.svelte` → `stores/update.ts` → `services/updater.ts` → `utils/update.ts` → `tauri-plugin-updater` + `src-tauri/src/update.rs`. Dismissal persists through `set_setting`/`get_setting` (`app_settings.update.dismissedVersion`). Pure helpers (percent, dismissal match, failure classification, Windows UA) are covered by `utils/update.test.ts`. Behavior and acceptance criteria: README section «Обновления».
 - **Notifications:** `stores/toast.ts` → `Toaster.svelte` in `+layout.svelte`. `utils/clipboard.ts` emits success/failure notifications; pages report errors through `notify`/`notifyError`. A failure whose message is empty falls back to the localized `common.error`, so `notifyError` never shows a blank toast; the stack keeps only the newest `MAX_VISIBLE` items (`stores/toast.test.ts` pins the cap, the message precedence and that fallback per locale). Toast text is centered: the message span is `flex-1` with symmetric `px-7`, and the close button is absolutely positioned at `right-2 top-1/2`, so long messages wrap without colliding with it.
 - **Theme/i18n:** `theme.ts`, `i18n.ts`, `Navbar.svelte`, `app.html`.
@@ -575,6 +690,18 @@ json_tolerant_candidate(candidates: &[String]) -> Option<&String>; // mirrors js
 - Automatic checks must not raise toasts or banners on failure — a user with no network or no published release would get a red error on every start. Only manual checks answer, and `notFound` stays an info toast rather than a red banner; widening `classifyUpdateFailure` matchers requires the plugin's actual `error.rs` strings, so re-read them when the plugin version changes.
 - Release the announced `Update` handle (`closeUpdate`) whenever the banner leaves `available`; keeping it alive leaks the download the plugin already reserved, and the store forgets it in `dismissUpdate`/`clearUpdate`/`handleFailure`.
 - `update.*` i18n keys must exist in both the `en` and `ru` dictionaries; the banner interpolates `{version}` and `{percent}`, and `update.failed` interpolates `{message}` with the raw plugin text (deliberately untranslated — `classifyUpdateFailure` only groups it).
+
+- WSDL parsing matches resolved namespace URIs, never prefixes, and it never validates: a document that is not WSDL 1.1 answers `not-wsdl:` or `wsdl2:`, and a document with no SOAP operation answers `no-operations:` — all before anything is written to SQLite. Do not widen the parser to WSDL 2.0's `service/endpoint/interface` model; the plan keeps it out of scope.
+- Import warnings must not become errors. A missing `soap:address`, a binding without a `portType`, an unresolvable or recursive XSD type and a template that hits `MAX_TEMPLATE_DEPTH`/`MAX_TEMPLATE_ELEMENTS` all produce a successful import plus a warning code. Adding a new code means adding it to `WARNING_KEYS` in `utils/wsdl.ts` **and** to both `en` and `ru` dictionaries, or `describeWarningText` falls through to `wsdl.warning.unknownType` with the raw code as the detail.
+- Keep the locked-header rules identical in `utils/wsdl.ts` and `wsdl/store.rs` (`soapActionForCall`/`soap_action_for_call` quote once, `editableForSave`/`editable_for_save` drop a user row whose name matches a mandatory one case-insensitively, mandatory rows come first in the merged list). Because the rows are recomputed on every read and write, a stored `Content-Type`/`SOAPAction` must never reach the wire twice; do not persist locked rows and do not let the UI edit them.
+- `wsdl_operation_state` is lazy: nothing exists for an operation until `get_wsdl_operation` opens it, so a page must not assume a state row when listing files, and `save_wsdl_operation_state` must be given the operation id the detail was loaded for — `operation_keys` answers `not-found:` for an operation removed by a re-import or a delete.
+- Re-import semantics are the reason ids are name-derived: do not switch `service_id`/`operation_id` to `Uuid::new_v4()`, or every re-import of the same URL would orphan the saved bodies, chosen endpoints and headers. `kept_endpoint_ids` likewise must keep matching on (operation, URL, SOAP version) or a stored `endpoint_id` silently falls back to `''` and the endpoint select resets.
+- `''` project id is NULL in `wsdl_files` and only `project_id IS ?1` compares it; `UNIQUE(project_id, source_url)` does not dedupe that bucket, so the duplicate check must stay in `find_file` rather than relying on the constraint.
+- `cancel_wsdl_fetch` and `cancel_rest_request` are different channels: cancelling an import does not stop a running SOAP call and vice versa. `cancel_wsdl_fetch` queues a cancellation when no import runs, which the next import consumes and answers `cancelled` without touching the network — clear it on every exit path, or a later import fails for a stale reason.
+- The browser build must not import `@tauri-apps/*` through `services/wsdl.ts`: `/wsdl` checks `isWsdlSupported()` and renders the stub. A service call from the browser throws `WSDL support is available in the desktop app only`, which `notifyError` shows verbatim (English, like all `services/` throw texts).
+- SOAP faults are responses: `execute_rest_request` returns a non-2xx answer as a `RestResponse`, so `/wsdl` must keep showing status 500 with the `soap:Fault` body rather than routing it to `notifyError`. Only transport errors reach the toast.
+- Do not save the response yet (`save_wsdl_response`/`clear_wsdl_response` exist but no page calls them): plan step 10 owns the buttons, and persisting a body the UI cannot show would make the stored state invisible.
+- The WSDL request-template generator is a starting point, not a validator: it never rejects the user's body, and it never invents closing tags. Keep `depth-limit`/`element-limit` as warnings rather than raising, and keep the truncation comment legible.
 
 ## 8. Adding a Feature
 
