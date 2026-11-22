@@ -871,16 +871,45 @@ fn assign_prefixes(dom: &XmlDom, scope: usize, uris: &[String]) -> Vec<(String, 
 
     bound
 }
+
 /// Makes a line safe to put inside a comment: XML comments cannot contain `--`.
 fn soften(text: &str) -> String {
     text.replace("--", "- -")
 }
 
-/// Wraps markup so the user sees it as a block they can uncomment.
+/// One comment line of a template. Every note goes through here so a name or a
+/// built-in sample that holds a double hyphen (`--01` of `xsd:gMonth`) can never
+/// break the comment it is printed in.
+fn note(pad: &str, text: &str) -> String {
+    format!("{pad}<!-- {} -->", soften(text))
+}
+
+/// Comment body of one generated line. A note that is already a comment — the
+/// nillable and cardinality notes of a child reached through an optional parent —
+/// contributes only its text: a comment cannot hold another one, and wrapping it
+/// twice is what produced the `<!-- <!-- x --> -->` and the softened
+/// `<!- - … - ->` garbage.
+fn comment_body(line: &str) -> String {
+    let mut text = line.trim();
+    // Peel whole-line comment wrappers as many times as they are nested.
+    while text.len() > "<!---->".len() && text.starts_with("<!--") && text.ends_with("-->") {
+        text = text["<!--".len()..text.len() - "-->".len()].trim();
+    }
+    soften(text.replace("<!--", "").replace("-->", "").trim())
+}
+
+/// Wraps markup so the user sees it as a block they can uncomment. Each line
+/// keeps its own indentation, so an uncommented block nests the way the schema
+/// does. A line with nothing to say produces no comment: an empty comment is
+/// noise, and `<!---->` is not markup.
 fn comment_block(lines: &[String]) -> Vec<String> {
     lines
         .iter()
-        .map(|line| format!("<!-- {} -->", soften(line.trim())))
+        .filter_map(|line| {
+            let body = comment_body(line);
+            let pad = line.len() - line.trim_start().len();
+            (!body.is_empty()).then(|| format!("{}<!-- {body} -->", &line[..pad]))
+        })
         .collect()
 }
 
@@ -932,10 +961,13 @@ impl Printer {
                     Kind::Leaf { sample } => format!("=\"{sample}\""),
                     _ => String::new(),
                 };
-                format!(
-                    "{pad}<!-- optional attribute {}{} -->",
-                    self.qualified(&child.uri, &child.local),
-                    value
+                note(
+                    &pad,
+                    &format!(
+                        "optional attribute {}{}",
+                        self.qualified(&child.uri, &child.local),
+                        value
+                    ),
                 )
             })
             .collect()
@@ -957,8 +989,9 @@ impl Printer {
         let tag = self.qualified(&field.uri, &field.local);
         let mut lines = self.attribute_notes(field, indent);
         if field.nillable {
-            lines.push(format!(
-                "{pad}<!-- {tag} is nillable: write xsi:nil=\"true\" to send no value -->"
+            lines.push(note(
+                &pad,
+                &format!("{tag} is nillable: write xsi:nil=\"true\" to send no value"),
             ));
         }
 
@@ -976,8 +1009,9 @@ impl Printer {
                     (name, "") => name.to_string(),
                     (name, type_name) => format!("{name} ({type_name})"),
                 };
-                lines.push(format!(
-                    "{pad}<!-- {label}: content could not be generated -->"
+                lines.push(note(
+                    &pad,
+                    &format!("{label}: content could not be generated"),
                 ));
             }
             Kind::Leaf { sample } => {
@@ -998,9 +1032,9 @@ impl Printer {
                 }
             }
             Kind::Choice { branches } => {
-                lines.push(format!(
-                    "{pad}<!-- choose one of {} alternatives -->",
-                    branches.len()
+                lines.push(note(
+                    &pad,
+                    &format!("choose one of {} alternatives", branches.len()),
                 ));
                 for branch in branches {
                     lines.extend(comment_block(&self.entry(branch, indent)));
@@ -1017,9 +1051,9 @@ impl Printer {
         let pad = "  ".repeat(indent);
 
         if field.occurs.min == 0 {
-            let mut lines = vec![format!(
-                "{pad}<!-- optional: {} -->",
-                self.qualified(&field.uri, &field.local)
+            let mut lines = vec![note(
+                &pad,
+                &format!("optional: {}", self.qualified(&field.uri, &field.local)),
             )];
             lines.extend(comment_block(&self.markup(field, indent)));
             return lines;
@@ -1030,7 +1064,7 @@ impl Printer {
             for _ in 0..REPETITIONS {
                 lines.extend(self.markup(field, indent));
             }
-            lines.push(format!("{pad}<!-- repeat as needed -->"));
+            lines.push(note(&pad, "repeat as needed"));
             return lines;
         }
 
@@ -1111,5 +1145,227 @@ pub fn body_template(
     TemplateFragment {
         xml: lines.join("\n"),
         warnings: walk.warnings,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wsdl::parser::{build_dom, parse_wsdl};
+
+    /// A chain of optional, nillable elements across two schemas — the shape that
+    /// makes a note line of a child reach a comment of its parent.
+    const SAMPLE: &str = r#"<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+      xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+      xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+      xmlns:tns="http://nemo-ibe.com/Avia"
+      xmlns:ns1="http://nemo-ibe.com/STL"
+      targetNamespace="http://nemo-ibe.com/Avia">
+  <wsdl:types>
+    <xsd:schema targetNamespace="http://nemo-ibe.com/Avia" elementFormDefault="qualified">
+      <xsd:element name="CloseSession" type="tns:CloseSessionRequest"/>
+      <xsd:complexType name="CloseSessionRequest">
+        <xsd:sequence>
+          <xsd:element name="Request" type="ns1:Request" minOccurs="0" nillable="true"/>
+        </xsd:sequence>
+      </xsd:complexType>
+    </xsd:schema>
+    <xsd:schema targetNamespace="http://nemo-ibe.com/STL" elementFormDefault="qualified">
+      <xsd:complexType name="Request">
+        <xsd:sequence>
+          <xsd:element name="Requisites" type="ns1:Requisites" minOccurs="0" nillable="true"/>
+          <xsd:choice>
+            <xsd:element name="TicketRef" type="xsd:string" minOccurs="0" nillable="true"/>
+            <xsd:element name="OrderRef" type="xsd:string" minOccurs="0"/>
+          </xsd:choice>
+          <xsd:element name="RequestType" type="xsd:string" minOccurs="0"/>
+        </xsd:sequence>
+      </xsd:complexType>
+      <xsd:complexType name="Requisites">
+        <xsd:sequence>
+          <xsd:element name="Login" type="ns1:Login" minOccurs="0" nillable="true"/>
+        </xsd:sequence>
+      </xsd:complexType>
+      <xsd:complexType name="Login">
+        <xsd:sequence>
+          <xsd:element name="Password" type="xsd:string" minOccurs="0" nillable="true"/>
+          <xsd:element name="SessionId" type="xsd:string" minOccurs="0"/>
+        </xsd:sequence>
+      </xsd:complexType>
+    </xsd:schema>
+  </wsdl:types>
+  <wsdl:message name="CloseSessionInput">
+    <wsdl:part name="body" element="tns:CloseSession"/>
+  </wsdl:message>
+  <wsdl:portType name="AviaPortType">
+    <wsdl:operation name="CloseSession">
+      <wsdl:input message="tns:CloseSessionInput"/>
+    </wsdl:operation>
+  </wsdl:portType>
+  <wsdl:binding name="AviaBinding" type="tns:AviaPortType">
+    <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <wsdl:operation name="CloseSession">
+      <soap:operation soapAction="urn:CloseSession" style="document"/>
+      <wsdl:input><soap:body use="literal"/></wsdl:input>
+    </wsdl:operation>
+  </wsdl:binding>
+  <wsdl:service name="AviaService">
+    <wsdl:port name="AviaPort" binding="tns:AviaBinding">
+      <soap:address location="http://127.0.0.1:9000/soap"/>
+    </wsdl:port>
+  </wsdl:service>
+</wsdl:definitions>"#;
+
+    fn template_of(source: &str) -> String {
+        let parsed = parse_wsdl(source).expect("wsdl");
+        let index = XsdIndex::build(&parsed.dom);
+        body_template(
+            &parsed.dom,
+            &index,
+            parsed.dom.root(),
+            "http://nemo-ibe.com/Avia",
+            "CloseSession",
+        )
+        .xml
+    }
+
+    #[test]
+    fn comment_body_drops_the_markers_of_an_already_commented_line() {
+        assert_eq!(
+            comment_body("<!-- optional: ns1:Login -->"),
+            "optional: ns1:Login"
+        );
+        assert_eq!(
+            comment_body("<!-- <!-- ns1:Login is nillable --> -->"),
+            "ns1:Login is nillable"
+        );
+        assert_eq!(
+            comment_body("  <ns1>Login>text</ns1>Login>  "),
+            "<ns1>Login>text</ns1>Login>"
+        );
+        // An unclosed opener is text rather than a comment; the markers still go.
+        assert_eq!(comment_body("<!-- a -- b"), "a - - b");
+    }
+
+    #[test]
+    fn comment_block_never_emits_an_empty_or_nested_comment() {
+        let lines = vec![
+            "   ".to_string(),
+            "<!-- <!-- optional: ns1:Login --> -->".to_string(),
+            "<a>x</a>".to_string(),
+        ];
+        assert_eq!(
+            comment_block(&lines),
+            vec![
+                "<!-- optional: ns1:Login -->".to_string(),
+                "<!-- <a>x</a> -->".to_string()
+            ]
+        );
+        assert_eq!(
+            comment_block(&["<a>--</a>".to_string()]),
+            vec!["<!-- <a>- -</a> -->".to_string()]
+        );
+        assert_eq!(
+            comment_block(&["    <a>x</a>".to_string()]),
+            vec!["    <!-- <a>x</a> -->".to_string()]
+        );
+        assert!(comment_block(&["<!---->".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn a_note_survives_a_name_or_sample_with_double_hyphens() {
+        assert_eq!(note("  ", "gMonth is --01"), "  <!-- gMonth is - -01 -->");
+        assert_eq!(note("", "optional: ns:a--b"), "<!-- optional: ns:a- -b -->");
+    }
+
+    #[test]
+    fn prints_one_comment_per_generated_line() {
+        let xml = template_of(SAMPLE);
+        for line in xml.lines() {
+            assert!(
+                line.matches("<!--").count() <= 1,
+                "nested comment markers: {line}"
+            );
+            assert!(
+                line.matches("-->").count() <= 1,
+                "nested comment markers: {line}"
+            );
+            assert!(!line.contains("<!- -"), "softened opener: {line}");
+            assert!(!line.contains("- ->"), "softened closer: {line}");
+            assert!(!line.contains("<!---->"), "empty comment: {line}");
+        }
+    }
+
+    #[test]
+    fn prints_markup_that_reads_as_xml() {
+        build_dom(&template_of(SAMPLE)).expect("template is well-formed markup");
+    }
+
+    #[test]
+    fn keeps_the_indentation_of_a_commented_block() {
+        let xml = template_of(SAMPLE);
+        assert!(xml.contains("  <!-- <tns:Request> -->"), "{xml}");
+        assert!(xml.contains("      <!-- <ns1:Login> -->"), "{xml}");
+        assert!(xml.contains("      <!-- </ns1:Login> -->"), "{xml}");
+        assert!(xml.contains("  <!-- </tns:Request> -->"), "{xml}");
+    }
+
+    #[test]
+    fn keeps_the_notes_of_a_nested_optional_element_readable() {
+        let xml = template_of(SAMPLE);
+        assert!(xml.contains("<tns:CloseSession xmlns:tns="), "{xml}");
+        assert!(xml.contains("<!-- optional: tns:Request -->"), "{xml}");
+        assert!(
+            xml.contains(
+                "<!-- tns:Request is nillable: write xsi:nil=\"true\" to send no value -->"
+            ),
+            "{xml}"
+        );
+        assert!(xml.contains("<!-- <ns1:Login> -->"), "{xml}");
+        assert!(xml.contains("<!-- </ns1:Login> -->"), "{xml}");
+        assert!(
+            xml.contains(
+                "<!-- ns1:Password is nillable: write xsi:nil=\"true\" to send no value -->"
+            ),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<!-- <ns1:SessionId>text</ns1:SessionId> -->"),
+            "{xml}"
+        );
+        // Every commented block says each thing once.
+        assert_eq!(
+            xml.matches("<!-- optional: ns1:Login -->").count(),
+            1,
+            "{xml}"
+        );
+    }
+
+    #[test]
+    fn flattens_the_notes_of_a_choice_branch_inside_an_optional_element() {
+        let xml = template_of(SAMPLE);
+        assert!(
+            xml.contains("<!-- choose one of 2 alternatives -->"),
+            "{xml}"
+        );
+        assert_eq!(
+            xml.matches("<!-- optional: ns1:TicketRef -->").count(),
+            1,
+            "{xml}"
+        );
+        assert_eq!(
+            xml.matches(
+                "<!-- ns1:TicketRef is nillable: write xsi:nil=\"true\" to send no value -->"
+            )
+            .count(),
+            1,
+            "{xml}"
+        );
+        assert_eq!(
+            xml.matches("<!-- <ns1:OrderRef>text</ns1:OrderRef> -->")
+                .count(),
+            1,
+            "{xml}"
+        );
     }
 }

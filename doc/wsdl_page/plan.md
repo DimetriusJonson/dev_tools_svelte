@@ -10,7 +10,7 @@
 | 1 | готово | README «WSDL-клиент», AGENTS §5 «WSDL storage», §6 «WSDL client», §7 WSDL-инварианты |
 | 2 | готово | `db.rs::init_schema` (6 таблиц + 4 индекса), `wsdl/store.rs` + 12 тестов |
 | 3 | готово | `wsdl/parser.rs`: `XmlDom`, `parse_wsdl`, `fetch_wsdl` (таймаут 30 с, лимит 5 МиБ, 20 000 элементов, глубина 512), 18 тестов |
-| 4 | готово | `wsdl/xsd.rs`: индекс XSD и генератор шаблона (глубина 32, 2000 элементов, циклы и неразрешённые типы — комментарий + warning) |
+| 4 | готово | `wsdl/xsd.rs`: индекс XSD и генератор шаблона (глубина 32, 2000 элементов, циклы и неразрешённые типы — комментарий + warning); комментарии печатает `note`/`comment_block` — одна пара маркеров на строку, вложенные `<!-- <!-- … --> -->` и `<!- - … - ->` не создаются, а закомментированный блок сохраняет отступы, 8 тестов |
 | 5 | готово | 12 команд в `wsdl/mod.rs` + регистрация в `lib.rs`, `services/wsdl.ts` (`isWsdlSupported()`), `services/wsdl.test.ts` |
 | 6 | готово | `routes/wsdl/+page.svelte`, пункт навбара, блок `wsdl.*` в en/ru, ресайзеры |
 | 7 | готово | `WsdlExplorer.svelte`: селект проектов с меню, импорт из буфера + help, дерево, `...` файла с подтверждением, раскрытие ветки, восстановление выбора |
@@ -18,7 +18,7 @@
 | 9 | готово | Вкладки запроса `XML`/`Headers`/`Raw`: `rawRequestText` — `buildSoapRawRequest` до первого вызова и дамп бэкенда после него, кнопка копирования; cURL из страницы не экспортится |
 | 10 | готово | Вкладки ответа `XML`/`Headers`/`Raw`, статус/размер/время, чекбокс `Save` (`save_wsdl_response`/`clear_wsdl_response`), `Format`/`Unescape`/`Copy`, карточка вложения и бинарного ответа со скачиванием через `downloadRestResponse` и именем из `Content-Disposition` (`filenameFromDisposition` + `sharedFileName`) |
 | 11 | частично | Темы через CSS-переменные, aria-метки строк, меню и вкладок; пустые состояния, индикаторы загрузки и подсказки ячеек есть; сверка с макетом не сделана |
-| 12 | готово | `cargo test` 83 юнит-теста + 1 интеграционный (в том числе `response_and_request_do_not_overwrite_each_other`), Vitest 222 теста: `utils/wsdl.test.ts` (16), `services/wsdl.test.ts` (16), `utils/validation.test.ts` (7), `utils/rest.test.ts` (66) |
+| 12 | готово | `cargo test` 91 юнит-тестов + 1 интеграционный (в том числе `response_and_request_do_not_overwrite_each_other` и тесты комментариев шаблона в `xsd.rs`), Vitest 222 теста: `utils/wsdl.test.ts` (16), `services/wsdl.test.ts` (16), `utils/validation.test.ts` (7), `utils/rest.test.ts` (66) |
 | 13 | не начат | Ручной smoke на публичном WSDL в `npm run tauri dev` |
 
 

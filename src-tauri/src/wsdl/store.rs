@@ -1273,6 +1273,12 @@ mod tests {
         assert!(detail.input_template.contains("<id>"));
         // `minOccurs="0"` is a comment, not a forced element.
         assert!(detail.input_template.contains("comment"));
+        // A note wrapped by its optional parent must stay one comment.
+        assert!(
+            !detail.input_template.contains("<!- -"),
+            "{}",
+            detail.input_template
+        );
         assert_eq!(detail.endpoints[0].url, "http://127.0.0.1:9000/soap");
         assert_eq!(detail.endpoints[0].port_name, "PeoplePort");
         assert_eq!(detail.endpoints[0].soap_action, "urn:GetPerson");
