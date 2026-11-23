@@ -41,6 +41,7 @@ npm run test:watch
 npm run tauri build -- --no-bundle
 npx tauri signer generate -w ~/.tauri/webdev-useful-tools.key --ci
 TAURI_SIGNING_PRIVATE_KEY=~/.tauri/webdev-useful-tools.key npm run tauri build
+git tag v0.1.0 && git push origin v0.1.0   # cuts the GitHub Release via .github/workflows/release.yml
 ```
 
 - `npm run dev` runs Vite on `http://localhost:1420` with `strictPort: true`.
@@ -49,6 +50,8 @@ TAURI_SIGNING_PRIVATE_KEY=~/.tauri/webdev-useful-tools.key npm run tauri build
 - `npm run check` runs `svelte-kit sync && svelte-check`.
 - `npm run build` writes the static frontend to `build/`.
 - `npm run tauri build` also produces updater artifacts because `bundle.createUpdaterArtifacts` is `true`; that requires `TAURI_SIGNING_PRIVATE_KEY` (and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` if the key has a password). Ship `latest.json` plus the installer and its `.sig` as release assets, or every check answers "not found".
+- `cargo fmt --check` is not part of the release gate: the tree is not rustfmt-clean yet (`src-tauri/src/lib.rs` keeps the tray imports and the `TrayIconEvent::DoubleClick` pattern on one line), so `release.yml` runs `cargo test` only. Run `cargo fmt` and re-enable the check in `preflight` once the tree is formatted.
+- `.github/workflows/release.yml` does that shipping: a `v<version>` tag push runs the checks (frontend tests, `svelte-check`, `cargo test`, one version across `package.json`/`tauri.conf.json`/`Cargo.toml`, tag equals the app version, `TAURI_SIGNING_PRIVATE_KEY` present) and then four `tauri-apps/tauri-action@v1` builds — Linux `deb`+`appimage`, Windows `msi`, macOS `app`+`dmg` for both Apple targets with ad-hoc `signingIdentity: "-"`. `workflow_dispatch` builds the same bundles but uploads them only as workflow artifacts (`tagName` is empty, so the action skips release uploads entirely). See the updater section for why the matrix is serialized and how the draft gets published.
 - Rust tests live in `src-tauri/src/*.rs` and `src-tauri/src/wsdl/*.rs` under `#[cfg(test)]`.
 
 Definition of Done for a code change:
@@ -151,6 +154,7 @@ src-tauri/
 src-tauri/tests/http_client.rs            # reqwest/axum plain-HTTP round trip
 screenshots/                              # design references, not automated tests
 static/favicon.svg
+.github/workflows/release.yml             # tag-triggered builds, signed updater manifest, release publish
 ```
 
 ## 4. Frontend Architecture & UI Rules
@@ -620,6 +624,10 @@ json_tolerant_candidate(candidates: &[String]) -> Option<&String>; // mirrors js
 - Startup checks are silent (`STARTUP_UPDATE_DELAY_MS = 1200` after hydration): they only raise the banner and log to the console. Manual checks always answer with a toast. `classifyUpdateFailure` groups plugin text into `unavailable` (no endpoints, non-HTTPS endpoint, unsupported OS/arch) → error toast, `notFound` (release JSON unfetchable, or no entry for this platform/fallback platform) → info toast with no banner, and `failed` → red banner with the reason. Match the plugin's own wording from `plugins/updater/src/error.rs`: `Could not fetch a valid release JSON from the remote`, `the platform \`…\` was not found in the response \`platforms\` object`, `None of the fallback platforms … were found in the response \`platforms\` object`.
 - `installUpdate()` never calls `restartApplication()`: the installer owns relaunch. On Windows `downloadAndInstall` exits the process before launching `msiexec /passive`, so the promise never resolves and the banner stays on "installing" with the Windows hint. Outside Windows the bundle is replaced in place and the banner's `ready` phase offers a manual Restart button that calls `restart_app`.
 - "Not now" persists exactly the announced version in `app_settings.update.dismissedVersion`; `isDismissedVersion` is exact-match only, so a newer release is reported again. A manual check ignores the dismissal.
+- `.github/workflows/release.yml` is what puts `latest.json` behind that endpoint. A `v<version>` tag push runs `preflight` (frontend tests, `svelte-check`, `cargo test`, the three manifests declaring one version, tag == app version, `TAURI_SIGNING_PRIVATE_KEY` non-empty) and then four `tauri-apps/tauri-action@v1` jobs into one draft release with `tagName: v__VERSION__`. `strategy.max-parallel: 1` is load-bearing: the action reads the `latest.json` already attached to the release and merges its own platform entry, so two jobs uploading it concurrently overwrite each other and clients on the lost OS answer "not found". Do not parallelize this matrix or switch it to a plain `os` matrix.
+- Bundle targets are pinned per job instead of inheriting `targets: "all"`: `deb`+`appimage` on Linux (GitHub's Ubuntu runner has no `rpmbuild`, so the rpm target would fail the build), `msi` only on Windows (so the manifest points at the MSI that `plugins.updater.windows.installMode: "passive"` hands to `msiexec`, and `updaterJsonPreferNsis: false` cannot pick a nonexistent NSIS), `app`+`dmg` with `macOS.signingIdentity: "-"` on both Apple targets (there is no Apple certificate; arm64 refuses to run an unsigned bundle at all). `args` carries `--config` as single-quoted JSON because the action shell-tokenizes `args` (`string-argv`) and would drop bare double quotes; the token reaches `tauri build` through `execa` as one argv item.
+- The action only writes `latest.json` when a `.sig` exists — otherwise it logs "Signature not found for the updater JSON. Skipping upload...", i.e. a missing secret yields a release that looks fine and updates nothing. That is why the key is asserted in `preflight` rather than discovered at upload time. `releaseBody` doubles as `notes` in the manifest, so it is the text `UpdateBanner` shows and must stay written for humans, not as an i18n key.
+- Builds upload to a **draft** so a release never becomes "latest" while only some platforms are on it. `manifest` then asserts the version equals the tag, all four entries (`windows-x86_64`, `linux-x86_64`, `darwin-x86_64`, `darwin-aarch64`) have a signature and an `api.github.com` asset URL, and the assets themselves exist (`.msi`, `.AppImage`, `.deb`, two `.app.tar.gz`, two `.dmg`, at least four `.sig`). `publish` runs `gh release edit <tag> --draft=false --latest=true` and re-reads `releases/latest/download/latest.json` without credentials to prove the endpoint answers. Dropping either job leaves the app permanently on "no update found"; re-running an already published tag fails on purpose because `releaseDraft: true` refuses a published release with the same tag.
 
 ### Desktop integration
 

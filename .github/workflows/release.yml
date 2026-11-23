@@ -1,0 +1,309 @@
+name: Release
+
+# A release is cut by pushing a tag that equals the app version:
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# `workflow_dispatch` runs the same builds but uploads them only as workflow
+# artifacts, so the pipeline can be checked without publishing anything.
+#
+# The updater endpoint in `src-tauri/tauri.conf.json` is
+# `releases/latest/download/latest.json`, which only resolves for a published,
+# non-prerelease release of a PUBLIC repository — the same URL an installed
+# client reads without credentials. A release the app can actually update from
+# needs, per platform, the bundle, its `.sig` and a `latest.json` that lists all
+# four platforms; anything less answers "Обновлений не найдено".
+#
+# Required repository secret: `TAURI_SIGNING_PRIVATE_KEY` (the minisign key that
+# matches `plugins.updater.pubkey`; it has no password, so
+# `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` stays unset).
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Creating a release, uploading assets and publishing the draft all need the job
+# token to write contents. Settings → Actions → General → "Workflow permissions"
+# must therefore be "Read and write permissions" (an organization can also force
+# read-only tokens, in which case this block cannot escalate them and every
+# release step fails with "Resource not accessible by integration").
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+# `tauri-action` regenerates `latest.json` from the copy already attached to the
+# release, so two jobs uploading it at the same time can drop a platform entry
+# and clients on that OS would answer "Обновлений не найдено". That is why
+# `max-parallel` in the build matrix is 1: the four builds run one after
+# another and each one merges what the previous job already wrote.
+jobs:
+  preflight:
+    name: Checks
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Frontend tests and type check
+        run: |
+          npm run test
+          npm run check
+
+      - name: Rust tests
+        # `cargo fmt --check` is deliberately not a release gate: the tree is not
+        # rustfmt-clean yet, and a style diff must not block a signed release.
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: One version everywhere
+        run: |
+          set -euo pipefail
+          node_version="$(node -p "require('./package.json').version")"
+          tauri_version="$(jq -r '.version' src-tauri/tauri.conf.json)"
+          cargo_version="$(sed -nE 's/^version = "([^"]+)"/\1/p' src-tauri/Cargo.toml | head -n1)"
+          if [ "$node_version" != "$tauri_version" ] || [ "$node_version" != "$cargo_version" ]; then
+            echo "::error::package.json ($node_version), tauri.conf.json ($tauri_version) and Cargo.toml ($cargo_version) must declare the same version"
+            exit 1
+          fi
+
+      - name: Tag matches the app version
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          expected="v$(jq -r '.version' src-tauri/tauri.conf.json)"
+          if [ "$GITHUB_REF_NAME" != "$expected" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match $expected"
+            exit 1
+          fi
+
+      - name: Updater signing key is present
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set. bundle.createUpdaterArtifacts is on, so tauri build cannot sign the artifacts. Generate one with: npx tauri signer generate -w ~/.tauri/webdev-useful-tools.key --ci"
+            exit 1
+          fi
+
+  build:
+    name: Build (${{ matrix.name }})
+    needs: preflight
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          # Explicit bundle targets instead of `targets: "all"`: the Ubuntu
+          # runner has no `rpmbuild`, so the rpm target would fail the whole
+          # build, and NSIS is skipped on Windows because `installMode` is
+          # `passive`, i.e. the updater must hand over the .msi to msiexec.
+          # The JSON is single-quoted because the action shell-tokenizes `args`
+          # and would drop the double quotes, leaving an invalid --config value.
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            rustTargets: ''
+            args: "--config '{\"bundle\":{\"targets\":[\"deb\",\"appimage\"]}}'"
+          - name: windows-x86_64
+            os: windows-latest
+            rustTargets: ''
+            args: "--config '{\"bundle\":{\"targets\":[\"msi\"]}}'"
+          # Ad-hoc signing: there is no Apple certificate in this repository, and
+          # an unsigned Apple Silicon bundle is reported as damaged when it is
+          # downloaded from a release. `app` is what produces the .app bundle the
+          # updater ships as .app.tar.gz, `dmg` is the package for a manual install.
+          - name: macos-x86_64
+            os: macos-latest
+            rustTargets: x86_64-apple-darwin
+            args: "--target x86_64-apple-darwin --config '{\"bundle\":{\"targets\":[\"app\",\"dmg\"],\"macOS\":{\"signingIdentity\":\"-\"}}}'"
+          - name: macos-aarch64
+            os: macos-latest
+            rustTargets: aarch64-apple-darwin
+            args: "--target aarch64-apple-darwin --config '{\"bundle\":{\"targets\":[\"app\",\"dmg\"],\"macOS\":{\"signingIdentity\":\"-\"}}}'"
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rustTargets }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build and attach the bundles
+        uses: tauri-apps/tauri-action@v1
+        with:
+          # Empty on `workflow_dispatch`: then nothing is created or uploaded to
+          # a release and the bundles stay workflow artifacts.
+          tagName: ${{ github.event_name == 'push' && 'v__VERSION__' || '' }}
+          releaseName: ${{ github.event_name == 'push' && 'WebDev Useful Tools v__VERSION__' || '' }}
+          # This text becomes `notes` in latest.json, so it is what the update
+          # banner shows in the app.
+          releaseBody: |
+            Install the package for your platform:
+
+            - Windows: `*_x64_en-US.msi`
+            - macOS: `*.dmg` (the updater uses the matching `*.app.tar.gz`)
+            - Linux: `*.AppImage` or `*.deb`
+
+            Every bundle has a `.sig` next to it, and `latest.json` is the manifest
+            installed builds read: they check this release and offer to install the
+            new version.
+
+            Приложение само проверяет этот релиз и предлагает установить новую
+            версию. Установленные сборки читают `latest.json` этого релиза.
+          releaseDraft: true
+          prerelease: false
+          # `windows.installMode` is `passive`, which hands the .msi to `msiexec /passive`,
+          # so the updater manifest must point at the MSI bundle, not the NSIS one.
+          updaterJsonPreferNsis: false
+          retryAttempts: 3
+          uploadWorkflowArtifacts: ${{ github.event_name != 'push' }}
+          args: ${{ matrix.args }}
+
+  manifest:
+    name: Updater manifest
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Read the draft release
+        id: release
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          # A draft release is not resolvable by tag through
+          # `releases/tags/{tag}`, so the release is looked up in the list.
+          release_id="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+            --jq ".[] | select(.tag_name == \"$tag\") | .id" | head -n1)"
+          if [ -z "$release_id" ]; then
+            echo "::error::no release was created for $tag — every build job failed or uploaded nothing"
+            exit 1
+          fi
+          asset_id="$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id/assets" \
+            --jq '.[] | select(.name == "latest.json") | .id' | head -n1)"
+          if [ -z "$asset_id" ]; then
+            echo "::error::release $release_id has no latest.json; the updater would answer \"Обновлений не найдено\""
+            exit 1
+          fi
+          echo "id=$release_id" >> "$GITHUB_OUTPUT"
+          echo "asset=$asset_id" >> "$GITHUB_OUTPUT"
+
+      - name: Download the asset list
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases/${{ steps.release.outputs.id }}/assets" --jq '.[].name' | sort | tee assets.txt
+
+      - name: Download latest.json
+        run: |
+          set -euo pipefail
+          gh api \
+            -H 'Accept: application/octet-stream' \
+            "repos/$GITHUB_REPOSITORY/releases/assets/${{ steps.release.outputs.asset }}" > latest.json
+          cat latest.json
+
+      - name: Every platform is signed and reachable
+        run: |
+          set -euo pipefail
+          version="$(jq -r '.version' latest.json)"
+          expected="${GITHUB_REF_NAME#v}"
+          if [ "$version" != "$expected" ]; then
+            echo "::error::latest.json declares $version but the tag is $GITHUB_REF_NAME"
+            exit 1
+          fi
+          jq -e '.pub_date | length > 0' latest.json > /dev/null
+          for platform in windows-x86_64 linux-x86_64 darwin-x86_64 darwin-aarch64; do
+            jq -e --arg platform "$platform" '.platforms[$platform].signature | length > 20' latest.json > /dev/null
+            jq -e --arg platform "$platform" '.platforms[$platform].url | startswith("https://api.github.com")' latest.json > /dev/null
+            echo "$platform ok"
+          done
+          # The bundles the manifest points at must actually be on the release.
+          grep -qE '_x64_en-US\.msi$' assets.txt
+          grep -qE '\.AppImage$' assets.txt
+          grep -qE '\.deb$' assets.txt
+          if [ "$(grep -cE '\.app\.tar\.gz$' assets.txt)" -lt 2 ]; then
+            echo "::error::both macOS .app.tar.gz bundles are expected (x86_64 and aarch64)"
+            exit 1
+          fi
+          if [ "$(grep -cE '\.dmg$' assets.txt)" -lt 2 ]; then
+            echo "::error::both macOS .dmg bundles are expected (x86_64 and aarch64)"
+            exit 1
+          fi
+          # The updater verifies the downloaded bundle against the manifest
+          # signature, so every bundle needs its .sig sibling on the release.
+          if [ "$(grep -cE '\.sig$' assets.txt)" -lt 4 ]; then
+            echo "::error::expected at least 4 .sig assets (msi, AppImage, two .app.tar.gz)"
+            exit 1
+          fi
+
+  publish:
+    name: Publish release
+    needs: manifest
+    if: github.event_name == 'push'
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      # The builds upload to a draft on purpose: published too early, a release
+      # would be "latest" while the other platforms' bundles are still missing,
+      # and a client on that OS would download nothing. `releases/latest` moves
+      # only when this step runs.
+      #
+      # Re-running this workflow for a tag that is already published fails on
+      # purpose — `releaseDraft: true` makes tauri-action refuse to attach to a
+      # published release. Cut a new version instead.
+      - name: Publish and mark as latest
+        run: |
+          set -euo pipefail
+          gh release edit "$GITHUB_REF_NAME" --draft=false --latest=true
+
+      - name: The updater endpoint resolves
+        run: |
+          set -euo pipefail
+          url="https://github.com/$GITHUB_REPOSITORY/releases/latest/download/latest.json"
+          curl -fsSL "$url" -o latest.json
+          jq -e --arg version "${GITHUB_REF_NAME#v}" '.version == $version' latest.json > /dev/null
+          echo "$url answers version $(jq -r '.version' latest.json)"
