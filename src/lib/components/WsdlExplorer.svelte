@@ -164,13 +164,18 @@
 
 	/**
 	 * A click outside closes every floating panel. A click inside one of them
-	 * belongs to its own buttons: closing here on the bubbled event used to wipe
-	 * `confirmingFileId` in the same tick the delete item set it, so the
-	 * confirmation never appeared and the file stayed.
+	 * belongs to its own buttons, and every item stops propagation, so this
+	 * handler only ever sees clicks that did not start in a panel. The
+	 * `isConnected` test is the second half of that guarantee: an item that
+	 * changes the menu's own markup (the delete confirmation replaces the two
+	 * items) is removed from the DOM before the click finishes propagating in a
+	 * browser, and `closest()` on a detached node finds no menu, which used to
+	 * wipe `confirmingFileId` in the same tick it was set.
 	 */
 	function onWindowClick(event: MouseEvent): void {
 		const target = event.target;
-		if (target instanceof Element && target.closest('[role="menu"], [role="dialog"]')) return;
+		if (!(target instanceof Element) || !target.isConnected) return;
+		if (target.closest('[role="menu"], [role="dialog"]')) return;
 		closeMenus();
 	}
 
@@ -181,16 +186,29 @@
 		}
 	}
 
-	function runMenuAction(action: () => void): void {
+	/**
+	 * A menu item owns its click: stopping propagation keeps the window dismiss
+	 * handler out of the same event, because in a browser the item is already
+	 * detached from the panel by the time the click reaches the window.
+	 */
+	function runMenuAction(event: MouseEvent, action: () => void): void {
+		event.stopPropagation();
 		closeMenus();
 		action();
 	}
 
-	function withFileMenu(action: (id: string) => void): void {
+	function withFileMenu(event: MouseEvent, action: (id: string) => void): void {
 		const id = fileMenu?.id;
 		if (!id) return;
+		event.stopPropagation();
 		closeMenus();
 		action(id);
+	}
+
+	/** Swaps the file menu for the delete confirmation; the panel itself stays open. */
+	function confirmDeleteFile(event: MouseEvent): void {
+		event.stopPropagation();
+		confirmingFileId = fileMenu?.id ?? null;
 	}
 
 	function startCreateProject(): void {
@@ -466,7 +484,7 @@
 	>
 		<button
 			type="button"
-			onclick={() => runMenuAction(startCreateProject)}
+			onclick={(event) => runMenuAction(event, startCreateProject)}
 			class="block w-full px-3 py-2 text-left text-sm font-semibold text-[var(--text)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--accent-text)]"
 			role="menuitem"
 		>
@@ -475,7 +493,7 @@
 		<button
 			type="button"
 			disabled={!activeProject}
-			onclick={() => runMenuAction(startRenameProject)}
+			onclick={(event) => runMenuAction(event, startRenameProject)}
 			class="block w-full px-3 py-2 text-left text-sm font-semibold text-[var(--text)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--accent-text)] disabled:opacity-40"
 			role="menuitem"
 		>
@@ -484,7 +502,9 @@
 		<button
 			type="button"
 			disabled={!activeProject}
-			onclick={() => activeProject && runMenuAction(() => onDeleteProject(activeProject.id))}
+			onclick={(event) =>
+				activeProject && runMenuAction(event, () => onDeleteProject(activeProject.id))
+			}
 			class="block w-full px-3 py-2 text-left text-sm font-semibold text-red-500 transition-colors hover:bg-red-500 hover:text-white disabled:opacity-40"
 			role="menuitem"
 		>
@@ -507,7 +527,7 @@
 			</p>
 			<button
 				type="button"
-				onclick={closeMenus}
+				onclick={(event) => runMenuAction(event, closeMenus)}
 				class="block w-full px-3 py-2 text-left text-sm font-semibold text-[var(--text)] transition-colors hover:bg-[var(--row-hover)]"
 				role="menuitem"
 			>
@@ -515,7 +535,7 @@
 			</button>
 			<button
 				type="button"
-				onclick={() => withFileMenu(onDeleteFile)}
+				onclick={(event) => withFileMenu(event, onDeleteFile)}
 				class="block w-full px-3 py-2 text-left text-sm font-semibold text-red-500 transition-colors hover:bg-red-500 hover:text-white"
 				role="menuitem"
 			>
@@ -524,7 +544,7 @@
 		{:else}
 			<button
 				type="button"
-				onclick={() => withFileMenu(onExecuteFile)}
+				onclick={(event) => withFileMenu(event, onExecuteFile)}
 				class="block w-full px-3 py-2 text-left text-sm font-semibold text-[var(--text)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--accent-text)]"
 				role="menuitem"
 			>
@@ -532,7 +552,7 @@
 			</button>
 			<button
 				type="button"
-				onclick={() => { confirmingFileId = menu.id; }}
+				onclick={confirmDeleteFile}
 				class="block w-full px-3 py-2 text-left text-sm font-semibold text-red-500 transition-colors hover:bg-red-500 hover:text-white"
 				role="menuitem"
 			>

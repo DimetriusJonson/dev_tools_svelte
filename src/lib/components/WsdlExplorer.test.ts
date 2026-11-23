@@ -291,6 +291,50 @@ describe('WsdlExplorer file menu', () => {
 		expect(menuItems()).toHaveLength(0);
 	});
 
+	it('never lets a menu click reach the window dismiss handler', () => {
+		const spies = render();
+
+		const reached: string[] = [];
+		const watch = (event: Event) => {
+			reached.push((event.target as HTMLElement).textContent?.trim() ?? '');
+		};
+		window.addEventListener('click', watch);
+
+		click(fileActions());
+		click(item('Delete'));
+		click(item('Cancel'));
+		click(projectActions());
+		click(item('Delete project'));
+
+		window.removeEventListener('click', watch);
+
+		expect(reached).toEqual([]);
+		expect(spies.onDeleteFile).not.toHaveBeenCalled();
+		expect(spies.onDeleteProject).toHaveBeenCalledWith(project.id);
+	});
+
+	it('keeps the confirmation when the browser detaches the item mid-propagation', () => {
+		render();
+
+		click(fileActions());
+		click(item('Delete'));
+		expect(menuItems().map((menuItem) => menuItem.textContent?.trim())).toEqual(['Cancel', 'Delete']);
+
+		// A browser applies the state change inside the item handler, so by the time
+		// the click bubbles up the button is gone from the document and
+		// `closest('[role="menu"]')` finds nothing. The window handler must not read
+		// that as a click outside and wipe the confirmation.
+		const detached = document.createElement('button');
+		detached.setAttribute('role', 'menuitem');
+		detached.textContent = 'Delete';
+		const event = new MouseEvent('click', { bubbles: true });
+		Object.defineProperty(event, 'target', { value: detached });
+		document.body.dispatchEvent(event);
+		flushSync();
+
+		expect(menuItems().map((menuItem) => menuItem.textContent?.trim())).toEqual(['Cancel', 'Delete']);
+	});
+
 	it('renders the localized confirmation in Russian', () => {
 		setLocale('ru');
 		const spies = render();
