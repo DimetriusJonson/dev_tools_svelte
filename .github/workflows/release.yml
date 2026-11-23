@@ -339,9 +339,12 @@ jobs:
         run: |
           set -euo pipefail
           # `make_latest` rejects a draft or a prerelease, so it goes in only
-          # after the release is published.
+          # after the release is published. It is sent as a raw string because
+          # the API declares it a string enum (`true`|`false`|`legacy`); `gh`
+          # itself formats it with `%v` for the same reason, and `-F` would
+          # post a JSON boolean instead.
           gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
-            -F make_latest=true --jq '{tag: .tag_name, draft: .draft, prerelease: .prerelease}'
+            -f make_latest=true --jq '{tag: .tag_name, draft: .draft, prerelease: .prerelease}'
 
       - name: The updater endpoint resolves
         run: |
