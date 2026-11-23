@@ -96,6 +96,15 @@
 		}).join('\n');
 	}
 
+	/**
+	 * Chevron rows announce "name · localized action". Building the text in the script
+	 * keeps the attribute a single expression: `${name} · $t(key)}` inside a template
+	 * literal renders `$t(key)}` as literal text instead of the translation.
+	 */
+	function rowLabel(name: string, actionKey: string): string {
+		return `${name} · ${$t(actionKey)}`;
+	}
+
 	function selectProject(event: Event): void {
 		const value = (event.currentTarget as HTMLSelectElement).value;
 		onSelectProject(value || null);
@@ -103,6 +112,11 @@
 
 	function openProjectMenu(event: MouseEvent): void {
 		event.stopPropagation();
+		if (projectMenu) {
+			projectMenu = null;
+			return;
+		}
+		closeMenus();
 		const target = event.currentTarget as HTMLElement;
 		const rect = target.getBoundingClientRect();
 		projectMenu = {
@@ -114,16 +128,25 @@
 	function openFileMenu(event: MouseEvent, id: string): void {
 		event.preventDefault();
 		event.stopPropagation();
+		if (fileMenu?.id === id) {
+			closeMenus();
+			return;
+		}
+		closeMenus();
 		fileMenu = {
 			id,
 			x: Math.max(8, Math.min(event.clientX, window.innerWidth - 220)),
 			y: Math.max(8, Math.min(event.clientY, window.innerHeight - 150))
 		};
-		confirmingFileId = null;
 	}
 
 	function openHelp(event: MouseEvent): void {
 		event.stopPropagation();
+		if (helpOpen) {
+			helpOpen = null;
+			return;
+		}
+		closeMenus();
 		const target = event.currentTarget as HTMLElement;
 		const rect = target.getBoundingClientRect();
 		helpOpen = {
@@ -137,7 +160,6 @@
 		fileMenu = null;
 		helpOpen = null;
 		confirmingFileId = null;
-		console.log("closeMenu inside");
 	}
 
 	/**
@@ -148,8 +170,6 @@
 	 */
 	function onWindowClick(event: MouseEvent): void {
 		const target = event.target;
-		if (target instanceof HTMLElement && target.id == "menuItemDeleteFile")
-			return;
 		if (target instanceof Element && target.closest('[role="menu"], [role="dialog"]')) return;
 		closeMenus();
 	}
@@ -337,7 +357,10 @@
 									? 'bg-[var(--row-active)] shadow-[inset_2px_0_0_var(--accent)]'
 									: 'hover:bg-[var(--row-hover)]'}"
 								aria-expanded={open}
-								aria-label={`${file.name} · $t(open ? 'wsdl.collapse' : 'wsdl.expand')}`}
+								aria-label={rowLabel(
+									file.name,
+									open ? 'wsdl.collapse' : 'wsdl.expand'
+								)}
 								title={file.source_url}
 							>
 								<Icon
@@ -378,9 +401,10 @@
 											onclick={() => toggle(service.id)}
 											class="{rowButton} hover:bg-[var(--row-hover)]"
 											aria-expanded={serviceOpen}
-											aria-label={`${service.name} · $t(
+											aria-label={rowLabel(
+												service.name,
 												serviceOpen ? 'wsdl.collapseOperations' : 'wsdl.expandOperations'
-											)`}
+											)}
 											title={service.name}
 										>
 											<Icon
@@ -483,7 +507,7 @@
 			</p>
 			<button
 				type="button"
-				onclick={() => { console.log("closeMenus"); closeMenus();}}
+				onclick={closeMenus}
 				class="block w-full px-3 py-2 text-left text-sm font-semibold text-[var(--text)] transition-colors hover:bg-[var(--row-hover)]"
 				role="menuitem"
 			>
@@ -508,10 +532,9 @@
 			</button>
 			<button
 				type="button"
-				onclick={() => { console.log("confirmingFileId = menu.id;");confirmingFileId = menu.id; }}
+				onclick={() => { confirmingFileId = menu.id; }}
 				class="block w-full px-3 py-2 text-left text-sm font-semibold text-red-500 transition-colors hover:bg-red-500 hover:text-white"
 				role="menuitem"
-				id="menuItemDeleteFile"
 			>
 				{$t('wsdl.deleteFile')}
 			</button>
