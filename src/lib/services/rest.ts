@@ -39,6 +39,8 @@ export interface RestRequest {
 	response_body: string | null;
 	response_headers: RestProperty[];
 	raw_request: string | null;
+	/** Kept so the Raw response tab can rebuild the dump after a restart. */
+	response_status_line: string | null;
 	created_at: string;
 	updated_at: string;
 }
@@ -81,6 +83,8 @@ export interface RestExecutionInput {
 export interface RestResponse {
 	status: number;
 	status_text: string;
+	/** `HTTP/1.1 200 OK` — the status line of the answer, first line of the raw dump. */
+	status_line: string;
 	headers: RestProperty[];
 	body: string;
 	size: number;
@@ -162,7 +166,9 @@ function loadLocal(): LocalState {
 						form: rows(request.form),
 						multipart: rows(request.multipart),
 						files: fileRows(request.files),
-						response_headers: rows(request.response_headers)
+						response_headers: rows(request.response_headers),
+						// Records saved before the Raw response tab have no stored status line.
+						response_status_line: request.response_status_line ?? null
 					}))
 				: []
 		};
@@ -209,6 +215,7 @@ function localCreateRequest(draft: RestRequestDraft): RestRequest {
 		response_body: null,
 		response_headers: [],
 		raw_request: null,
+		response_status_line: null,
 		created_at: now,
 		updated_at: now
 	};
@@ -323,6 +330,7 @@ export async function duplicateRestRequest(id: string): Promise<RestRequest> {
 		response_body: null,
 		response_headers: [],
 		raw_request: null,
+		response_status_line: null,
 		created_at: now,
 		updated_at: now
 	};
@@ -335,14 +343,16 @@ export async function saveRestResponse(
 	id: string,
 	body: string,
 	headers: RestProperty[],
-	rawRequest: string
+	rawRequest: string,
+	statusLine: string
 ): Promise<void> {
 	if (isTauriRuntime()) {
 		await invokeCommand('save_rest_response', {
 			id,
 			body,
 			headers,
-			raw_request: rawRequest
+			raw_request: rawRequest,
+			status_line: statusLine
 		});
 		return;
 	}
@@ -354,6 +364,7 @@ export async function saveRestResponse(
 					response_body: body,
 					response_headers: headers,
 					raw_request: rawRequest,
+					response_status_line: statusLine,
 					updated_at: timestamp()
 				}
 			: request
@@ -369,7 +380,13 @@ export async function clearRestResponse(id: string): Promise<void> {
 	const state = loadLocal();
 	state.requests = state.requests.map((request) =>
 		request.id === id
-			? { ...request, response_body: null, response_headers: [], raw_request: null }
+			? {
+					...request,
+					response_body: null,
+					response_headers: [],
+					raw_request: null,
+					response_status_line: null
+				}
 			: request
 	);
 	saveLocal(state);
@@ -570,6 +587,9 @@ async function browserExecute(input: RestExecutionInput): Promise<RestResponse> 
 		return {
 			status: response.status,
 			status_text: response.statusText,
+			// `fetch` never reports the negotiated protocol version, so the dump states
+			// the version the browser actually spoke; `.trim()` drops an empty reason.
+			status_line: `HTTP/1.1 ${response.status} ${response.statusText}`.trim(),
 			headers,
 			body,
 			size,

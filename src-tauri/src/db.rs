@@ -79,6 +79,7 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 			response_body TEXT,
 			response_headers TEXT NOT NULL DEFAULT '[]',
 			raw_request TEXT,
+			response_status_line TEXT,
 			sort_order INTEGER NOT NULL DEFAULT 0,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -200,7 +201,10 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 		"#,
     )?;
     // Databases created before the retention selector have no expiry column.
-    ensure_column(conn, "shared_uploads", "expires_at", "DATETIME")
+    ensure_column(conn, "shared_uploads", "expires_at", "DATETIME")?;
+    // Databases created before the Raw response tab have no stored status line, so a
+    // saved answer from an older app would rebuild a dump without its first line.
+    ensure_column(conn, "rest_requests", "response_status_line", "TEXT")
 }
 
 /// Adds a column to an existing table. `CREATE TABLE IF NOT EXISTS` never alters a
@@ -573,6 +577,30 @@ mod tests {
         assert_eq!(upload.data, b"x", "the payload survived the migration");
         assert!(upload.stored);
         assert!(delete_shared_upload(&connection, "old").expect("delete the legacy row"));
+    }
+
+    #[test]
+    fn adds_the_status_line_column_to_an_older_database() {
+        let connection = Connection::open_in_memory().expect("database");
+        // A database written before the Raw response tab has no status line; the saved
+        // answer survives the migration and simply rebuilds its dump without one.
+        connection
+            .execute_batch(
+                "CREATE TABLE rest_requests (id TEXT PRIMARY KEY, project_id TEXT, name TEXT NOT NULL DEFAULT '', method TEXT NOT NULL DEFAULT 'GET', url TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '', body_type TEXT NOT NULL DEFAULT 'json', save_response INTEGER NOT NULL DEFAULT 0, response_body TEXT, response_headers TEXT NOT NULL DEFAULT '[]', raw_request TEXT, sort_order INTEGER NOT NULL DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+                 INSERT INTO rest_requests (id, name, response_body, response_headers) VALUES ('old', 'Saved', '{\"ok\":true}', '[]');",
+            )
+            .expect("legacy table");
+
+        init_schema(&connection).expect("migrate");
+        init_schema(&connection).expect("migrate again");
+
+        let mut statement = connection
+            .prepare("SELECT response_status_line FROM rest_requests WHERE id = 'old'")
+            .expect("migrated column");
+        let line: Option<String> = statement
+            .query_row([], |row| row.get(0))
+            .expect("legacy row");
+        assert_eq!(line, None, "the saved row keeps its body and gains no line");
     }
 
     #[test]

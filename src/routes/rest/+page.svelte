@@ -39,6 +39,7 @@
 	import {
 		buildCurl,
 		buildRawRequestPreview,
+		buildRawResponse,
 		byteLength,
 		detectLanguageFromHeaders,
 		filenameFromDisposition,
@@ -71,7 +72,7 @@
 		validationMessage
 	} from '$lib/utils/validation';
 
-	type RequestTab = 'headers' | 'query' | 'cookies';
+	type RequestTab = 'headers' | 'query' | 'cookies' | 'raw';
 	type ResponseTab = 'response' | 'headers' | 'raw';
 	type MultipartTab = 'fields' | 'files';
 
@@ -157,6 +158,14 @@
 				: '')
 	);
 	const requestStatus = $derived(response?.status ?? null);
+	const responseStatusLine = $derived(
+		response?.status_line ?? active?.response_status_line ?? ''
+	);
+	// The bytes as they arrived: never the formatted mirror, so `Raw` stays comparable
+	// with what the server actually sent, including for a response read back from SQLite.
+	const rawResponseText = $derived(
+		buildRawResponse(responseStatusLine, responseHeaders, response?.body ?? savedResponseBody)
+	);
 	const requestSize = $derived(
 		response ? response.size : savedResponseBody ? byteLength(savedResponseBody) : 0
 	);
@@ -410,6 +419,10 @@
 		if (responseText) await copyText(responseText);
 	}
 
+	async function copyRawResponse(): Promise<void> {
+		if (rawResponseText) await copyText(rawResponseText);
+	}
+
 	async function runRequest(): Promise<void> {
 		if (running) {
 			aborting = true;
@@ -480,10 +493,17 @@
 		const patch = {
 			response_body: result.body,
 			response_headers: result.headers,
-			raw_request: result.raw_request
+			raw_request: result.raw_request,
+			response_status_line: result.status_line
 		};
 		try {
-			await saveRestResponse(target.id, result.body, result.headers, result.raw_request);
+			await saveRestResponse(
+				target.id,
+				result.body,
+				result.headers,
+				result.raw_request,
+				result.status_line
+			);
 			requests = requests.map((request) =>
 				request.id === target.id ? { ...request, ...patch } : request
 			);
@@ -509,7 +529,8 @@
 			const cleared = {
 				response_body: null,
 				response_headers: [],
-				raw_request: null
+				raw_request: null,
+				response_status_line: null
 			};
 			requests = requests.map((request) =>
 				request.id === target.id ? { ...request, ...cleared } : request
@@ -1038,47 +1059,88 @@
 									></span>
 								{/if}
 							</button>
+							<button
+								type="button"
+								onclick={() => (requestTab = 'raw')}
+								title={$t('rest.rawRequestHint')}
+								class="rounded-md px-3 py-1.5 text-sm font-bold transition-colors duration-150 {requestTab ===
+								'raw'
+									? 'bg-[var(--panel-bg-alt)] text-[var(--text)]'
+									: 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
+							>
+								{$t('rest.rawRequest')}
+							</button>
 						</div>
-						<div class="min-h-0 flex-1 p-2">
-							{#if requestTab === 'headers'}
-								<PropertyEditor
-									rows={active.headers}
-									onchange={onHeadersChange}
-									fieldHint={hintFor('header')}
-									nameLabel={$t('rest.headerName')}
-									valueLabel={$t('rest.headerValue')}
-									namePlaceholder={$t('rest.headerName')}
-									valuePlaceholder={$t('rest.headerValue')}
-									addLabel={$t('rest.addProperty')}
-									removeLabel={$t('rest.removeProperty')}
-									headerAutocomplete={true}
-								/>
-							{:else if requestTab === 'query'}
-								<PropertyEditor
-									rows={queryRows}
-									onchange={onQueryChange}
-									fieldHint={hintFor('query')}
-									nameLabel={$t('rest.paramName')}
-									valueLabel={$t('rest.paramValue')}
-									namePlaceholder={$t('rest.paramName')}
-									valuePlaceholder={$t('rest.paramValue')}
-									addLabel={$t('rest.addProperty')}
-									removeLabel={$t('rest.removeProperty')}
-								/>
-							{:else}
-								<PropertyEditor
-									rows={cookieRows}
-									onchange={onCookiesChange}
-									fieldHint={hintFor('cookie')}
-									nameLabel={$t('rest.cookieName')}
-									valueLabel={$t('rest.cookieValue')}
-									namePlaceholder={$t('rest.cookieName')}
-									valuePlaceholder={$t('rest.cookieValue')}
-									addLabel={$t('rest.addProperty')}
-									removeLabel={$t('rest.removeProperty')}
-								/>
-							{/if}
-						</div>
+						{#if requestTab === 'raw'}
+							<div class="flex min-h-0 flex-1 flex-col gap-2 p-2">
+								<div class="flex shrink-0 flex-wrap items-center gap-2">
+									<button
+										type="button"
+										onclick={() => copyRawCurl('posix')}
+										class="rounded-full bg-[var(--accent)] px-4 py-1.5 text-xs font-bold text-[var(--accent-text)] transition-all duration-150 hover:scale-105 hover:bg-[var(--accent-hover)] active:scale-95"
+									>
+										{$t('rest.curlPosix')}
+									</button>
+									<button
+										type="button"
+										onclick={() => copyRawCurl('windows')}
+										class="rounded-full bg-[var(--accent)] px-4 py-1.5 text-xs font-bold text-[var(--accent-text)] transition-all duration-150 hover:scale-105 hover:bg-[var(--accent-hover)] active:scale-95"
+									>
+										{$t('rest.curlWindows')}
+									</button>
+								</div>
+								<div class="min-h-0 flex-1">
+									<CodeMirrorEditor
+										value={rawRequestText}
+										language="text"
+										dark={dark}
+										readonly={true}
+										ariaLabel={$t('rest.rawRequestHint')}
+									/>
+								</div>
+							</div>
+						{:else}
+							<div class="min-h-0 flex-1 p-2">
+								{#if requestTab === 'headers'}
+									<PropertyEditor
+										rows={active.headers}
+										onchange={onHeadersChange}
+										fieldHint={hintFor('header')}
+										nameLabel={$t('rest.headerName')}
+										valueLabel={$t('rest.headerValue')}
+										namePlaceholder={$t('rest.headerName')}
+										valuePlaceholder={$t('rest.headerValue')}
+										addLabel={$t('rest.addProperty')}
+										removeLabel={$t('rest.removeProperty')}
+										headerAutocomplete={true}
+									/>
+								{:else if requestTab === 'query'}
+									<PropertyEditor
+										rows={queryRows}
+										onchange={onQueryChange}
+										fieldHint={hintFor('query')}
+										nameLabel={$t('rest.paramName')}
+										valueLabel={$t('rest.paramValue')}
+										namePlaceholder={$t('rest.paramName')}
+										valuePlaceholder={$t('rest.paramValue')}
+										addLabel={$t('rest.addProperty')}
+										removeLabel={$t('rest.removeProperty')}
+									/>
+								{:else}
+									<PropertyEditor
+										rows={cookieRows}
+										onchange={onCookiesChange}
+										fieldHint={hintFor('cookie')}
+										nameLabel={$t('rest.cookieName')}
+										valueLabel={$t('rest.cookieValue')}
+										namePlaceholder={$t('rest.cookieName')}
+										valuePlaceholder={$t('rest.cookieValue')}
+										addLabel={$t('rest.addProperty')}
+										removeLabel={$t('rest.removeProperty')}
+									/>
+								{/if}
+							</div>
+						{/if}
 					</section>
 
 					<div
@@ -1253,12 +1315,13 @@
 						<button
 							type="button"
 							onclick={() => (responseTab = 'raw')}
+							title={$t('rest.rawResponseHint')}
 							class="rounded-md px-3 py-1.5 text-sm font-bold transition-colors duration-150 {responseTab ===
 							'raw'
 								? 'bg-[var(--panel-bg-alt)] text-[var(--text)]'
 								: 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
 						>
-							{$t('rest.rawRequest')}
+							{$t('rest.rawResponse')}
 						</button>
 					</div>
 
@@ -1447,29 +1510,37 @@
 						</div>
 					{:else}
 						<div class="flex min-h-0 flex-1 flex-col">
-							<div class="flex shrink-0 flex-wrap items-center gap-2 px-3 py-2">
+							<div class="flex shrink-0 items-center gap-2 px-3 py-2">
+								<span class="text-xs font-semibold text-[var(--text-muted)]">
+									{$t('rest.status')}:
+									<span class="ml-1 text-sm font-bold text-[var(--text)]">
+										{requestStatus ?? '—'}
+									</span>
+								</span>
+								<span class="text-xs font-semibold text-[var(--text-muted)]">
+									{$t('rest.size')}:
+									<span class="ml-1 text-sm font-bold text-[var(--text)]">
+										{formatRestSize(requestSize)}
+									</span>
+								</span>
 								<button
 									type="button"
-									onclick={() => copyRawCurl('posix')}
-									class="rounded-full bg-[var(--accent)] px-4 py-1.5 text-xs font-bold text-[var(--accent-text)] transition-all duration-150 hover:scale-105 hover:bg-[var(--accent-hover)] active:scale-95"
+									onclick={copyRawResponse}
+									disabled={!rawResponseText}
+									class="ml-auto flex h-8 w-8 items-center justify-center rounded-md text-[var(--text-muted)] transition-all duration-150 hover:scale-110 hover:bg-white/5 hover:text-[var(--text)] active:scale-95 disabled:opacity-40"
+									title={$t('common.copy')}
+									aria-label={$t('common.copy')}
 								>
-									{$t('rest.curlPosix')}
-								</button>
-								<button
-									type="button"
-									onclick={() => copyRawCurl('windows')}
-									class="rounded-full bg-[var(--accent)] px-4 py-1.5 text-xs font-bold text-[var(--accent-text)] transition-all duration-150 hover:scale-105 hover:bg-[var(--accent-hover)] active:scale-95"
-								>
-									{$t('rest.curlWindows')}
+									<Icon name="copy" size={18} strokeWidth={1.9} />
 								</button>
 							</div>
 							<div class="min-h-0 flex-1">
 								<CodeMirrorEditor
-									value={rawRequestText}
+									value={rawResponseText}
 									language="text"
 									dark={dark}
 									readonly={true}
-									ariaLabel={$t('rest.rawRequest')}
+									ariaLabel={$t('rest.rawResponseHint')}
 								/>
 							</div>
 						</div>

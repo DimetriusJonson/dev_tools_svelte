@@ -1,11 +1,13 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
+	clearRestResponse,
 	createRestRequest,
 	duplicateRestRequest,
 	listRestRequests,
 	loadRestSelection,
 	normalizeUrl,
 	resolveRestSelection,
+	saveRestResponse,
 	saveRestSelection,
 	updateRestRequest,
 	type RestProject,
@@ -34,6 +36,7 @@ function request(id: string, projectId: string | null): RestRequest {
 		response_body: null,
 		response_headers: [],
 		raw_request: null,
+		response_status_line: null,
 		created_at: '2026-01-01 00:00:00',
 		updated_at: '2026-01-01 00:00:00'
 	};
@@ -175,6 +178,27 @@ describe('REST multipart storage in the browser build', () => {
 		expect(legacy.multipart).toEqual([]);
 		expect(legacy.files).toEqual([]);
 		expect(legacy.headers).toEqual([{ name: 'Accept', value: '*/*' }]);
+		// Nor a status line: the Raw response tab rebuilds its dump without one.
+		expect(legacy.response_status_line).toBeNull();
+	});
+
+	it('keeps the saved status line so the Raw response tab survives a restart', async () => {
+		const created = await createRestRequest(draft({ body_type: 'json' }));
+		await saveRestResponse(
+			created.id,
+			'{"ok":true}',
+			[{ name: 'content-type', value: 'application/json' }],
+			'POST /upload HTTP/1.1',
+			'HTTP/1.1 200 OK'
+		);
+		const [saved] = await listRestRequests();
+		expect(saved.response_status_line).toBe('HTTP/1.1 200 OK');
+		expect(saved.raw_request).toBe('POST /upload HTTP/1.1');
+
+		await clearRestResponse(created.id);
+		const [cleared] = await listRestRequests();
+		expect(cleared.response_status_line).toBeNull();
+		expect(cleared.response_body).toBeNull();
 	});
 
 	it('writes every file row through the same stripping when the request is edited', async () => {

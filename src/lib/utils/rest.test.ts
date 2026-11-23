@@ -6,6 +6,7 @@ import {
 	buildMultipartPreview,
 	buildQuery,
 	buildRawRequestPreview,
+	buildRawResponse,
 	byteLength,
 	describeCharacter,
 	detectLanguageFromHeaders,
@@ -354,6 +355,37 @@ describe('response helpers', () => {
 		expect(raw).toContain('content-type: application/json');
 		expect(raw).toContain('content-length: 7');
 		expect(raw.endsWith('\r\n\r\n{"a":1}')).toBe(true);
+	});
+
+	it('frames the raw response dump like the wire format', () => {
+		expect(
+			buildRawResponse(
+				'HTTP/1.1 200 OK',
+				[
+					{ name: 'Date', value: 'Mon, 23 Nov 2026 09:00:00 GMT' },
+					{ name: 'Content-Type', value: 'application/json' },
+					{ name: 'Content-Length', value: '11' }
+				],
+				'{"ok":true}'
+			)
+		).toBe(
+			'HTTP/1.1 200 OK\r\nDate: Mon, 23 Nov 2026 09:00:00 GMT\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{"ok":true}'
+		);
+	});
+
+	it('shows the response body as it arrived, not the formatted mirror', () => {
+		expect(buildRawResponse('HTTP/1.1 200 OK', [], '{"a":1,\n"b":2}')).toBe(
+			'HTTP/1.1 200 OK\r\n\r\n{"a":1,\n"b":2}'
+		);
+	});
+
+	it('drops a nameless header row and a status line the store never kept', () => {
+		// A database written before the status line was persisted rebuilds without one.
+		expect(buildRawResponse('  ', [{ name: ' ', value: 'x' }, { name: 'a', value: '1' }], 'body')).toBe(
+			'a: 1\r\n\r\nbody'
+		);
+		expect(buildRawResponse('', [], 'body')).toBe('body');
+		expect(buildRawResponse('', [], '')).toBe('');
 	});
 });
 

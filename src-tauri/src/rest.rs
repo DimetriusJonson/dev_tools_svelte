@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use reqwest::header::{HeaderName, HeaderValue};
-use reqwest::{Client, Method, Url};
+use reqwest::{Client, Method, StatusCode, Url, Version};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
@@ -55,6 +55,9 @@ pub struct RestRequest {
     pub response_body: Option<String>,
     pub response_headers: Vec<RestProperty>,
     pub raw_request: Option<String>,
+    /// The status line of the stored answer (`HTTP/1.1 200 OK`), so the Raw response
+    /// tab can rebuild the dump after a restart without re-sending the request.
+    pub response_status_line: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -98,6 +101,8 @@ pub struct RestRequestUpdate {
 pub struct RestResponse {
     pub status: u16,
     pub status_text: String,
+    /// `HTTP/1.1 200 OK` — the status line as the server sent it, version included.
+    pub status_line: String,
     pub headers: Vec<RestProperty>,
     pub body: String,
     pub size: u64,
@@ -317,7 +322,8 @@ pub fn read_rest_request(conn: &Connection, id: &str) -> rusqlite::Result<Option
     let mut statement = conn.prepare(
         r#"
 		SELECT id, project_id, name, method, url, body, body_type, save_response,
-		       response_body, response_headers, raw_request, created_at, updated_at
+		       response_body, response_headers, raw_request, created_at, updated_at,
+		       response_status_line
 		FROM rest_requests WHERE id = ?1
 		"#,
     )?;
@@ -340,6 +346,7 @@ pub fn read_rest_request(conn: &Connection, id: &str) -> rusqlite::Result<Option
                 multipart: Vec::new(),
                 files: Vec::new(),
                 raw_request: row.get(10)?,
+                response_status_line: row.get(13)?,
                 created_at: row.get(11)?,
                 updated_at: row.get(12)?,
             })
@@ -570,18 +577,26 @@ pub fn save_rest_response(
     body: &str,
     headers: &[RestProperty],
     raw_request: &str,
+    status_line: &str,
 ) -> Result<(), String> {
     let encoded = serde_json::to_string(headers).map_err(|error| error.to_string())?;
+    // An empty status line is "no status known", which is NULL rather than ''.
+    let line = if status_line.is_empty() {
+        None
+    } else {
+        Some(status_line)
+    };
     conn.execute(
         r#"
 		UPDATE rest_requests SET
 			response_body = ?2,
 			response_headers = ?3,
 			raw_request = ?4,
+			response_status_line = ?5,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?1
 		"#,
-        params![id, body, encoded, raw_request],
+        params![id, body, encoded, raw_request, line],
     )
     .map_err(|error| error.to_string())?;
     Ok(())
@@ -594,6 +609,7 @@ pub fn clear_rest_response(conn: &Connection, id: &str) -> Result<(), String> {
 			response_body = NULL,
 			response_headers = '[]',
 			raw_request = NULL,
+			response_status_line = NULL,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?1
 		"#,
@@ -1107,6 +1123,20 @@ pub fn build_raw_request(method: &str, url: &Url, headers: &[RestProperty], body
     raw
 }
 
+/// The status line the server answered with, e.g. `HTTP/1.1 200 OK`. It is the first
+/// line of the Raw response dump and the only part of a response that is not otherwise
+/// stored, so it travels to SQLite with the saved body and headers.
+///
+/// `Version`'s `Display` is not implemented in the `http` crate; `Debug` prints the
+/// protocol token (`HTTP/1.1`, `HTTP/2.0`), which is what the wire format wants.
+pub fn build_status_line(version: Version, status: StatusCode) -> String {
+    match status.canonical_reason() {
+        Some(reason) => format!("{version:?} {} {reason}", status.as_u16()),
+        // A non-standard code has no reason phrase: keep the line free of a trailing space.
+        None => format!("{version:?} {}", status.as_u16()),
+    }
+}
+
 fn build_headers_map(headers: &[RestProperty]) -> Result<Vec<(HeaderName, HeaderValue)>, String> {
     let mut result = Vec::with_capacity(headers.len());
     for header in headers {
@@ -1286,9 +1316,17 @@ pub fn cmd_save_rest_response(
     body: String,
     headers: Vec<RestProperty>,
     raw_request: String,
+    status_line: String,
 ) -> Result<(), String> {
     let connection = db.conn.lock().map_err(|error| error.to_string())?;
-    save_rest_response(&connection, &id, &body, &headers, &raw_request)
+    save_rest_response(
+        &connection,
+        &id,
+        &body,
+        &headers,
+        &raw_request,
+        &status_line,
+    )
 }
 
 #[tauri::command(rename = "clear_rest_response", rename_all = "snake_case")]
@@ -1345,6 +1383,7 @@ pub async fn cmd_execute_rest_request(
             .map_err(|error| format!("Request failed: {error}"))?;
         let duration_ms = started.elapsed().as_secs_f64() * 1000.0;
         let status = response.status();
+        let version = response.version();
         let headers = response_headers(&response);
         let content_type = header_value(&headers, "content-type");
         let disposition = header_value(&headers, "content-disposition");
@@ -1386,6 +1425,7 @@ pub async fn cmd_execute_rest_request(
         Ok::<RestResponse, String>(RestResponse {
             status: status.as_u16(),
             status_text: status.canonical_reason().unwrap_or("").to_string(),
+            status_line: build_status_line(version, status),
             headers,
             body: body_text,
             size,
@@ -1555,6 +1595,24 @@ mod tests {
         assert!(raw.contains("content-type: application/json"));
         assert!(raw.contains("content-length: 7"));
         assert!(raw.ends_with("{\"a\":1}"));
+    }
+
+    #[test]
+    fn status_line_keeps_version_and_reason() {
+        assert_eq!(
+            build_status_line(Version::HTTP_11, StatusCode::OK),
+            "HTTP/1.1 200 OK"
+        );
+        assert_eq!(
+            build_status_line(Version::HTTP_2, StatusCode::NOT_FOUND),
+            "HTTP/2.0 404 Not Found"
+        );
+        // A code the RFCs never named has no reason phrase, so the line carries no
+        // trailing space for the Raw response dump to keep.
+        assert_eq!(
+            build_status_line(Version::HTTP_11, StatusCode::from_u16(599).unwrap()),
+            "HTTP/1.1 599"
+        );
     }
 
     #[test]
@@ -1755,6 +1813,7 @@ mod tests {
             "{\"ok\":true}",
             &[property("content-type", "application/json")],
             "POST /login HTTP/1.1",
+            "HTTP/1.1 200 OK",
         )
         .expect("save response");
         let with_response = read_rest_request(&connection, &created.id)
@@ -1772,6 +1831,10 @@ mod tests {
             with_response.raw_request.as_deref(),
             Some("POST /login HTTP/1.1")
         );
+        assert_eq!(
+            with_response.response_status_line.as_deref(),
+            Some("HTTP/1.1 200 OK")
+        );
 
         clear_rest_response(&connection, &created.id).expect("clear");
         let cleared = read_rest_request(&connection, &created.id)
@@ -1779,6 +1842,7 @@ mod tests {
             .expect("present");
         assert_eq!(cleared.response_body, None);
         assert!(cleared.response_headers.is_empty());
+        assert_eq!(cleared.response_status_line, None);
     }
 
     #[test]

@@ -750,6 +750,29 @@ export function buildRawRequestPreview(
 	return `${lines.join('\r\n')}\r\n\r\n${previewBody}`;
 }
 
+/**
+ * Builds the raw HTTP response dump: the status line the server answered with, one
+ * header per line, the blank line that separates the headers from the payload, and the
+ * body exactly as it arrived — never formatted, never re-encoded.
+ *
+ * A stored answer from a database written before the status line was persisted has no
+ * first line; that dump still shows what was kept, so an empty status line is skipped
+ * rather than invented. With neither line nor body there is nothing to show, hence `''`.
+ */
+export function buildRawResponse(
+	statusLine: string,
+	headers: RestProperty[],
+	body: string
+): string {
+	const lines: string[] = [];
+	if (statusLine.trim()) lines.push(statusLine.trim());
+	for (const header of headers) {
+		if (header.name.trim()) lines.push(`${header.name}: ${header.value}`);
+	}
+	if (!lines.length) return body;
+	return `${lines.join('\r\n')}\r\n\r\n${body}`;
+}
+
 export function formatRestSize(bytes: number): string {
 	if (bytes < 1024) return `${bytes} bytes`;
 	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(2)} KiB`;
