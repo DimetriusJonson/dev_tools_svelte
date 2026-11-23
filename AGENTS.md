@@ -45,6 +45,7 @@ git tag v0.1.0 && git push origin v0.1.0   # cuts the GitHub Release via .github
 ```
 
 - `npm run dev` runs Vite on `http://localhost:1420` with `strictPort: true`.
+- GitHub Actions pins `node-version: '24'` in both `preflight` and `build`. `lts/*` now resolves to Node 26, whose own `localStorage` accessor answers `undefined` unless the process got `--localstorage-file`; `src/lib/test-setup.ts` repairs that, so the suite also passes on Node 20/26 (`vitest run` under a Node 26 binary is the quickest way to prove it).
 - If `npm run tauri dev` fails with "Port 1420 is already in use", a stale Vite is holding it. When Tauri runs on Windows while a WSL-side `npm run dev` is alive, WSL localhost forwarding reserves 1420 on the Windows side too; find it with `ss -ltnp | grep 1420` (WSL) and stop that `vite` process.
 - `node_modules` installed from Windows only carries the win32 rollup/esbuild binaries, so Vitest, `npm run check` and `npm run build` fail under WSL with "Cannot find module @rollup/rollup-linux-x64-gnu". Restore them without touching `package-lock.json`: `npm pack @rollup/rollup-linux-x64-gnu@<rollup version> @esbuild/linux-x64@<esbuild version>`, then `tar -xzf <tgz> -C node_modules/@rollup/rollup-linux-x64-gnu --strip-components=1` (and `-C node_modules/@esbuild/linux-x64`), then `chmod +x node_modules/@esbuild/linux-x64/bin/esbuild`. A Windows-side `npm i` deletes these directories again; `npm ci` inside WSL is the persistent fix.
 - `npm run check` runs `svelte-kit sync && svelte-check`.
@@ -70,6 +71,8 @@ src/
 ├── app.css                              # theme variables, CodeMirror/diff/resizer styles
 ├── app.html                             # pre-hydration theme script, loading splash (markup + inline CSS + labels)
 ├── lib/
+│   ├── test-setup.ts                     # vitest setup: browser storage shim for Node ≥ 25
+│   ├── test-setup.test.ts                # the shim's round trip + "storage is usable" guard
 │   ├── components/
 │   │   ├── CodeMirrorEditor.svelte       # reusable CodeMirror wrapper + highlight API
 │   │   ├── Icon.svelte                   # inline SVG path dictionary
@@ -670,6 +673,7 @@ json_tolerant_candidate(candidates: &[String]) -> Option<&String>; // mirrors js
 - `tokenDiff` chooses one tokenizer for the whole changed pair through `looksLikeMarkup` (a real `<…>` pair, not any `<` or `>`), because per-line heuristics made the two sides of one changed line highlight differently. `wholeLine` returns no range for an empty line: the Compare page skips `end <= start` ranges, so a zero-width range is invisible and only keeps the line decoration.
 - Compare clears highlights when either side changes and on swap.
 - `CodeMirrorEditor` must destroy its view on unmount and reconfigure compartments on prop changes.
+- Vitest's jsdom environment never replaces a `globalThis` key Node already defines (`getWindowKeys` keeps an existing key that is not in its own list), and Node ≥ 25 defines `localStorage` as a lazy accessor answering `undefined` without `--localstorage-file`. That combination makes `window.localStorage` undefined and kills every storage-touching test file — it is what failed the release preflight when `lts/*` moved the runner to Node 26. `src/lib/test-setup.ts` (wired through `test.setupFiles`, preferring the environment's own jsdom window and falling back to `MemoryStorage`) is the only thing keeping the suite environment-independent: keep it, and do not work around the shadowing by passing `--localstorage-file` or by reading `localStorage` through some other global.
 - The loading splash lives in `src/app.html`, not in a component, because it must paint before the bundle exists. Keep its CSS inline there with `var(--token, fallback)` values, keep the markup a sibling of the `%sveltekit.body%` container, and dismiss it from `+layout.svelte` `onMount` through `utils/splash.ts`. Its label strings are the documented exception to the "no hardcoded user-facing strings" rule: they mirror `app.title` and the loading text, and the layout overwrites the title from the dictionary, so update both places when the app name changes.
 - Do not add `tauri-plugin-sql`; use the existing `rusqlite` backend.
 - Do not add external icon packs or copy icon markup into pages; extend `ICON_PATHS`.

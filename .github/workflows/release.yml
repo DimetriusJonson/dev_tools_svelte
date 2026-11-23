@@ -57,7 +57,12 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: lts/*
+          # Pinned instead of `lts/*`: that floating alias moved the runner to Node 26,
+          # whose own `localStorage` accessor shadows jsdom's, so vitest stopped
+          # exposing browser storage and the whole suite failed. `src/lib/test-setup.ts`
+          # repairs the environment anyway; a pinned LTS keeps a release reproducible.
+          # Both jobs must stay on the same version.
+          node-version: '24'
           cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
@@ -69,19 +74,9 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Report the frontend test environment
-        # Temporary diagnostic: the run log is not readable without a token, so
-        # every line becomes an annotation, which the Checks API exposes publicly.
-        run: |
-          {
-            echo "node=$(node -v) npm=$(npm -v)"
-            node -p "'vitest=' + require('vitest/package.json').version + ' jsdom=' + require('jsdom/package.json').version"
-            env | grep -E '^(CI|NODE_ENV|NODE_OPTIONS|TZ|VITEST|npm_config_|npm_lifecycle)' | sort
-            node --input-type=module -e "import { JSDOM } from 'jsdom'; const w = new JSDOM('', { url: 'http://localhost/' }).window; console.log('bare jsdom localStorage:', typeof w.localStorage)"
-            npx vitest run src/lib/utils/env-probe.test.ts
-          } 2>&1 | sed -e 's/%/%25/g' -e 's/\r//g' -e 's/^/::warning::/'
-
       - name: Frontend tests and type check
+        # Vitest's `github-actions` reporter writes the failing tests as annotations,
+        # so a broken suite is readable through the public Checks API without a token.
         run: |
           npm run test
           npm run check
@@ -176,7 +171,8 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: lts/*
+          # Must match `preflight`; see the note there about why the version is pinned.
+          node-version: '24'
           cache: npm
 
       - uses: dtolnay/rust-toolchain@stable

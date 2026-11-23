@@ -12,6 +12,8 @@ export default defineConfig({
 	test: {
 		include: ['src/**/*.{test,spec}.{js,ts}'],
 		environment: 'jsdom',
+		// Node ≥ 25 shadows jsdom's storage with its own `localStorage` accessor; see src/lib/test-setup.ts.
+		setupFiles: ['./src/lib/test-setup.ts'],
 		server: {
 			deps: {
 				inline: [/svelte/]
