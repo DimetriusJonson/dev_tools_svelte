@@ -11,6 +11,7 @@
 	import { isTauriRuntime } from '$lib/services/db';
 	import { pickSaveFile } from '$lib/services/files';
 	import {
+		deleteSharedUpload,
 		downloadSharedUpload,
 		formatBytes,
 		loadSharedUpload,
@@ -20,6 +21,9 @@
 	let upload = $state<SharedUploadResponse | null>(null);
 	let loading = $state(true);
 	let downloading = $state(false);
+	let deleting = $state(false);
+	let confirmingDelete = $state(false);
+	let deleted = $state(false);
 	let errorMessage = $state('');
 	let copied = $state(false);
 	let status = $state('');
@@ -36,6 +40,8 @@
 		errorMessage = '';
 		status = '';
 		upload = null;
+		confirmingDelete = false;
+		deleted = false;
 
 		if (!isTauriRuntime()) {
 			errorMessage = $t('viewer.desktopOnly');
@@ -93,6 +99,25 @@
 		}
 	}
 
+	/** The link is open to anyone on the LAN, so this removes the payload for every viewer. */
+	async function removeUpload(): Promise<void> {
+		if (!upload || deleting) return;
+		const targetServer = server;
+		const targetId = id;
+		deleting = true;
+		try {
+			await deleteSharedUpload(targetServer, targetId);
+			upload = null;
+			deleted = true;
+			status = '';
+			confirmingDelete = false;
+		} catch (error) {
+			notifyError(error);
+		} finally {
+			deleting = false;
+		}
+	}
+
 	onMount(() => {
 		return () => {
 			if (copyTimer) clearTimeout(copyTimer);
@@ -121,6 +146,37 @@
 			</div>
 		{/if}
 	</div>
+
+	{#if confirmingDelete && upload}
+		<div
+			class="flex shrink-0 flex-wrap items-center justify-between gap-3 rounded-xl px-4 py-2.5"
+			style="background-color: var(--danger-bg);"
+			role="alert"
+		>
+			<p class="min-w-0 flex-1 text-sm font-semibold text-[var(--danger-text)]">
+				{$t('viewer.deleteConfirm')}
+			</p>
+			<div class="flex shrink-0 items-center gap-2">
+				<button
+					type="button"
+					onclick={() => (confirmingDelete = false)}
+					disabled={deleting}
+					class="rounded-full bg-[var(--secondary-bg)] px-4 py-2 text-sm font-bold text-[var(--secondary-text)] transition-all duration-150 hover:scale-105 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
+				>
+					{$t('common.cancel')}
+				</button>
+				<button
+					type="button"
+					onclick={removeUpload}
+					disabled={deleting}
+					class="inline-flex items-center gap-2 rounded-full bg-[var(--danger)] px-4 py-2 text-sm font-bold text-white transition-all duration-150 hover:scale-105 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
+				>
+					<Icon name="trash" size={16} />
+					{$t('viewer.delete')}
+				</button>
+			</div>
+		</div>
+	{/if}
 
 	{#if loading}
 		<section
@@ -174,16 +230,37 @@
 				<dd class="font-semibold text-[var(--text)]">{formatBytes(upload.size)}</dd>
 				<dt class="font-semibold text-[var(--text-muted)]">{$t('viewer.created')}</dt>
 				<dd class="font-semibold text-[var(--text)]">{upload.created_at}</dd>
+				<dt class="font-semibold text-[var(--text-muted)]">{$t('viewer.expires')}</dt>
+				<dd class="font-semibold text-[var(--text)]">
+					{upload.expires_at ?? $t('viewer.forever')}
+				</dd>
 			</dl>
-			<button
-				type="button"
-				onclick={download}
-				disabled={downloading}
-				class="inline-flex items-center gap-2 rounded-full bg-[var(--accent)] px-5 py-2.5 text-sm font-bold text-[var(--accent-text)] transition-all duration-150 hover:scale-105 hover:bg-[var(--accent-hover)] active:scale-95"
-			>
-				<Icon name="download" size={17} />
-				{downloading ? $t('viewer.downloading') : $t('viewer.download')}
-			</button>
+			{#if !upload.stored}
+				<p class="flex items-start gap-2 text-sm text-amber-500">
+					<Icon name="warning" size={16} class="mt-0.5 shrink-0" />
+					{$t('viewer.memoryHint')}
+				</p>
+			{/if}
+			<div class="flex flex-wrap justify-center gap-2">
+				<button
+					type="button"
+					onclick={download}
+					disabled={downloading}
+					class="inline-flex items-center gap-2 rounded-full bg-[var(--accent)] px-5 py-2.5 text-sm font-bold text-[var(--accent-text)] transition-all duration-150 hover:scale-105 hover:bg-[var(--accent-hover)] active:scale-95"
+				>
+					<Icon name="download" size={17} />
+					{downloading ? $t('viewer.downloading') : $t('viewer.download')}
+				</button>
+				<button
+					type="button"
+					onclick={() => (confirmingDelete = true)}
+					disabled={deleting}
+					class="inline-flex items-center gap-2 rounded-full bg-[var(--secondary-bg)] px-5 py-2.5 text-sm font-bold text-[var(--secondary-text)] transition-all duration-150 hover:scale-105 hover:text-[var(--danger)] active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
+				>
+					<Icon name="trash" size={17} />
+					{$t('viewer.deleteAction')}
+				</button>
+			</div>
 		</section>
 	{:else if upload}
 		<section
@@ -197,6 +274,22 @@
 					<span class="truncate">{upload.filename}</span>
 					<span>·</span>
 					<span>{formatBytes(upload.size)}</span>
+					{#if upload.expires_at}
+						<span>·</span>
+						<span>{$t('viewer.expires')}: {upload.expires_at}</span>
+					{:else if upload.stored}
+						<span>·</span>
+						<span>{$t('viewer.forever')}</span>
+					{:else}
+						<span>·</span>
+						<span
+							class="inline-flex items-center gap-1 text-amber-500"
+							title={$t('viewer.memoryHint')}
+						>
+							<Icon name="warning" size={14} />
+							{$t('share.retention.none')}
+						</span>
+					{/if}
 				</div>
 				<div class="flex items-center gap-1.5">
 					<button
@@ -220,6 +313,16 @@
 					>
 						<Icon name="download" size={19} strokeWidth={1.9} />
 					</button>
+					<button
+						type="button"
+						onclick={() => (confirmingDelete = true)}
+						disabled={deleting}
+						class="flex h-8 w-8 items-center justify-center rounded-md text-[var(--text-muted)] transition-all duration-150 hover:scale-110 hover:bg-[var(--danger-bg)] hover:text-[var(--danger)] active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
+						title={$t('viewer.deleteAction')}
+						aria-label={$t('viewer.deleteAction')}
+					>
+						<Icon name="trash" size={19} strokeWidth={1.9} />
+					</button>
 				</div>
 			</div>
 			<div class="min-h-0 flex-1">
@@ -231,6 +334,26 @@
 					ariaLabel={$t('viewer.content')}
 				/>
 			</div>
+		</section>
+	{:else}
+		<section
+			class="flex flex-1 flex-col items-center justify-center gap-4 rounded-2xl border border-[var(--border)] bg-[var(--panel-bg)] p-8 text-center shadow-[var(--shadow)]"
+		>
+			<div
+				class="flex h-14 w-14 items-center justify-center rounded-2xl bg-[var(--secondary-bg)] text-[var(--secondary-text)]"
+			>
+				<Icon name={deleted ? 'check' : 'file'} size={26} strokeWidth={deleted ? 3 : 1.9} />
+			</div>
+			<p class="max-w-xl text-sm font-semibold text-[var(--text-muted)]">
+				{deleted ? $t('viewer.deleted') : $t('viewer.loading')}
+			</p>
+			<button
+				type="button"
+				onclick={() => goto('/share')}
+				class="rounded-full bg-[var(--secondary-bg)] px-5 py-2.5 text-sm font-bold text-[var(--secondary-text)] transition-all duration-150 hover:scale-105 active:scale-95"
+			>
+				{$t('viewer.back')}
+			</button>
 		</section>
 	{/if}
 

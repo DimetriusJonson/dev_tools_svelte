@@ -21,6 +21,10 @@ pub struct SharedUpload {
     pub data: Vec<u8>,
     pub size: i64,
     pub created_at: String,
+    /// `None` means "keep forever"; only database rows carry an expiry.
+    pub expires_at: Option<String>,
+    /// `false` for uploads kept in RAM only, `true` for rows in `shared_uploads`.
+    pub stored: bool,
 }
 
 #[derive(Clone)]
@@ -51,7 +55,9 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 			content_type TEXT NOT NULL,
 			data BLOB NOT NULL,
 			size INTEGER NOT NULL,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			-- NULL keeps the row forever; a value is the UTC instant it expires at.
+			expires_at DATETIME
 		);
 
 		CREATE TABLE IF NOT EXISTS rest_projects (
@@ -192,7 +198,31 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 
 		DELETE FROM rest_request_properties WHERE kind = 'form';
 		"#,
-    )
+    )?;
+    // Databases created before the retention selector have no expiry column.
+    ensure_column(conn, "shared_uploads", "expires_at", "DATETIME")
+}
+
+/// Adds a column to an existing table. `CREATE TABLE IF NOT EXISTS` never alters a
+/// table that is already there, so every schema change needs a guarded `ALTER TABLE`.
+fn ensure_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    declaration: &str,
+) -> rusqlite::Result<()> {
+    let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns: Vec<String> = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<_>>()?;
+    if columns.iter().any(|name| name == column) {
+        return Ok(());
+    }
+    conn.execute(
+        &format!("ALTER TABLE {table} ADD COLUMN {column} {declaration}"),
+        [],
+    )?;
+    Ok(())
 }
 
 pub fn read_editor_state(
@@ -253,18 +283,44 @@ pub fn write_setting(conn: &Connection, key: &str, value: &str) -> rusqlite::Res
     Ok(())
 }
 
+/// Deletes every upload whose retention has run out. Runs before reads and writes, so
+/// expired payloads leave the database even though nobody sweeps on a timer.
+pub fn purge_expired_uploads(conn: &Connection) -> rusqlite::Result<usize> {
+    conn.execute(
+        "DELETE FROM shared_uploads WHERE expires_at IS NOT NULL AND expires_at <= datetime('now')",
+        [],
+    )
+}
+
+/// The UTC instant a retention of whole `days` runs out, in the same text format
+/// `CURRENT_TIMESTAMP` writes, so the purge can compare the two directly.
+pub fn expiry_timestamp(conn: &Connection, days: u32) -> rusqlite::Result<String> {
+    conn.query_row(
+        "SELECT datetime('now', ?1)",
+        params![format!("+{days} days")],
+        |row| row.get(0),
+    )
+}
+
+/// The UTC instant right now, for payloads that are never written to the database.
+pub fn now_timestamp(conn: &Connection) -> rusqlite::Result<String> {
+    conn.query_row("SELECT datetime('now')", [], |row| row.get(0))
+}
+
 pub fn insert_shared_upload(
     conn: &Connection,
     filename: &str,
     content_type: &str,
     data: &[u8],
+    expires_at: Option<&str>,
 ) -> Result<String, String> {
+    purge_expired_uploads(conn).map_err(|error| error.to_string())?;
     let size = data.len() as i64;
     for _ in 0..8 {
         let id = Uuid::new_v4().to_string();
         match conn.execute(
-            "INSERT INTO shared_uploads (id, filename, content_type, data, size) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![id, filename, content_type, data, size],
+            "INSERT INTO shared_uploads (id, filename, content_type, data, size, expires_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, filename, content_type, data, size, expires_at],
         ) {
             Ok(_) => return Ok(id),
             Err(rusqlite::Error::SqliteFailure(error, _))
@@ -277,7 +333,7 @@ pub fn insert_shared_upload(
 
 pub fn read_shared_upload(conn: &Connection, id: &str) -> rusqlite::Result<Option<SharedUpload>> {
     let mut statement = conn.prepare(
-        "SELECT id, filename, content_type, data, size, created_at FROM shared_uploads WHERE id = ?1",
+        "SELECT id, filename, content_type, data, size, created_at, expires_at FROM shared_uploads WHERE id = ?1 AND (expires_at IS NULL OR expires_at > datetime('now'))",
     )?;
     statement
         .query_row(params![id], |row| {
@@ -288,9 +344,17 @@ pub fn read_shared_upload(conn: &Connection, id: &str) -> rusqlite::Result<Optio
                 data: row.get(3)?,
                 size: row.get(4)?,
                 created_at: row.get(5)?,
+                expires_at: row.get(6)?,
+                stored: true,
             })
         })
         .optional()
+}
+
+/// Removes one upload. The share link is the only credential: whoever holds it may
+/// delete the payload, so there is nothing to check beyond the id itself.
+pub fn delete_shared_upload(conn: &Connection, id: &str) -> rusqlite::Result<bool> {
+    Ok(conn.execute("DELETE FROM shared_uploads WHERE id = ?1", params![id])? > 0)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -464,8 +528,8 @@ mod tests {
     #[test]
     fn shared_upload_roundtrip_and_uuid_id() {
         let connection = memory_db();
-        let id =
-            insert_shared_upload(&connection, "notes.txt", "text/plain", b"hello").expect("insert");
+        let id = insert_shared_upload(&connection, "notes.txt", "text/plain", b"hello", None)
+            .expect("insert");
         let parsed = Uuid::parse_str(&id).expect("uuid");
         assert_eq!(parsed.get_version_num(), 4);
 
@@ -478,10 +542,134 @@ mod tests {
         assert_eq!(upload.data, b"hello");
         assert_eq!(upload.size, 5);
         assert!(!upload.created_at.is_empty());
+        assert_eq!(upload.expires_at, None);
+        assert!(upload.stored);
         assert_eq!(
             read_shared_upload(&connection, "missing").expect("read"),
             None
         );
+    }
+
+    #[test]
+    fn adds_the_expiry_column_to_an_older_database() {
+        let connection = Connection::open_in_memory().expect("database");
+        // The first release created this table without `expires_at`; the rows survive and
+        // keep their payload.
+        connection
+            .execute_batch(
+                "CREATE TABLE shared_uploads (id TEXT PRIMARY KEY, filename TEXT NOT NULL, content_type TEXT NOT NULL, data BLOB NOT NULL, size INTEGER NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+                 INSERT INTO shared_uploads (id, filename, content_type, data, size) VALUES ('old', 'a.txt', 'text/plain', CAST('x' AS BLOB), 1);",
+            )
+            .expect("legacy table");
+
+        init_schema(&connection).expect("migrate");
+        init_schema(&connection).expect("migrate again");
+
+        let upload = read_shared_upload(&connection, "old")
+            .expect("read")
+            .expect("legacy row");
+        assert_eq!(upload.expires_at, None);
+        assert_eq!(upload.size, 1);
+        assert_eq!(upload.data, b"x", "the payload survived the migration");
+        assert!(upload.stored);
+        assert!(delete_shared_upload(&connection, "old").expect("delete the legacy row"));
+    }
+
+    #[test]
+    fn keeps_retention_and_purges_expired_rows() {
+        let connection = memory_db();
+        let living = insert_shared_upload(
+            &connection,
+            "keep.txt",
+            "text/plain",
+            b"keep",
+            Some(&expiry_timestamp(&connection, 3).expect("expiry")),
+        )
+        .expect("insert");
+        let dead = insert_shared_upload(
+            &connection,
+            "gone.txt",
+            "text/plain",
+            b"gone",
+            Some("2001-01-01 00:00:00"),
+        )
+        .expect("insert");
+        let forever = insert_shared_upload(&connection, "stay.txt", "text/plain", b"stay", None)
+            .expect("insert");
+
+        // The expired row is already gone: an insert purges before writing.
+        assert_eq!(read_shared_upload(&connection, &dead).expect("read"), None);
+        assert!(read_shared_upload(&connection, &living)
+            .expect("read")
+            .is_some());
+        assert!(read_shared_upload(&connection, &forever)
+            .expect("read")
+            .is_some());
+        assert_eq!(purge_expired_uploads(&connection).expect("purge"), 0);
+
+        // Wiping the retention of a stored row makes it live forever.
+        connection
+            .execute(
+                "UPDATE shared_uploads SET expires_at = NULL WHERE id = ?1",
+                params![living],
+            )
+            .expect("clear expiry");
+        assert_eq!(
+            read_shared_upload(&connection, &living)
+                .expect("read")
+                .expect("present")
+                .expires_at,
+            None
+        );
+    }
+
+    #[test]
+    fn reading_expired_rows_does_not_delete_them_and_purge_removes_them() {
+        let connection = memory_db();
+        let id =
+            insert_shared_upload(&connection, "a.txt", "text/plain", b"a", None).expect("insert");
+        connection
+            .execute(
+                "UPDATE shared_uploads SET expires_at = '2001-01-01 00:00:00' WHERE id = ?1",
+                params![id],
+            )
+            .expect("expire it");
+
+        assert_eq!(
+            read_shared_upload(&connection, &id).expect("read"),
+            None,
+            "an expired row must not answer a read even before the purge"
+        );
+        assert_eq!(purge_expired_uploads(&connection).expect("purge"), 1);
+    }
+
+    #[test]
+    fn deletes_one_upload_and_reports_nothing_for_unknown_ids() {
+        let connection = memory_db();
+        let id =
+            insert_shared_upload(&connection, "a.txt", "text/plain", b"a", None).expect("insert");
+        assert!(delete_shared_upload(&connection, &id).expect("delete"));
+        assert_eq!(read_shared_upload(&connection, &id).expect("read"), None);
+        assert!(!delete_shared_upload(&connection, &id).expect("delete again"));
+        assert!(!delete_shared_upload(&connection, "missing").expect("delete"));
+    }
+
+    #[test]
+    fn deletes_a_row_the_read_already_hides() {
+        let connection = memory_db();
+        let id =
+            insert_shared_upload(&connection, "a.txt", "text/plain", b"a", None).expect("insert");
+        connection
+            .execute(
+                "UPDATE shared_uploads SET expires_at = '2001-01-01 00:00:00' WHERE id = ?1",
+                params![id],
+            )
+            .expect("expire it");
+
+        // A delete is not gated by the expiry filter: it wipes the payload the viewer can
+        // no longer read, so the row leaves the database instead of waiting for a purge.
+        assert!(delete_shared_upload(&connection, &id).expect("delete an expired row"));
+        assert_eq!(purge_expired_uploads(&connection).expect("purge"), 0);
     }
 
     #[test]

@@ -18,7 +18,7 @@
 - **File processing:** `quick-xml 0.42`, `serde_json` with `preserve_order`. WSDL 1.1 and XSD parsing are `quick-xml`-only too, in `src-tauri/src/wsdl/`; no additional crate was added for them.
 - **Tauri plugins:** `dialog`, `single-instance`, `deep-link`, `clipboard-manager`, `updater`.
 - **Testing:** Vitest + jsdom for frontend; Rust unit tests for DB, processing, and tray mapping.
-- **Current status:** XML, JSON, URL, Compare, Share (desktop only), Rest client (including `multipart/form-data` bodies with fields and file parts), WSDL client (desktop only: WSDL 1.1 import, XSD request template, tree explorer, `Headers`/`Raw` request tabs with locked binding headers, SOAP 1.1/1.2 send, response tabs with `Save`/`Copy`/`Format`/download), themes, i18n, persistence, notifications, tray, single-instance, deep links, updates (desktop only: startup + navbar check, banner with install), and large-file processing are implemented. The updater's install path is unverified until a signed release with a `latest.json` asset is published.
+- **Current status:** XML, JSON, URL, Compare, Share (desktop only: retention select, memory-only uploads, viewer delete), Rest client (including `multipart/form-data` bodies with fields and file parts), WSDL client (desktop only: WSDL 1.1 import, XSD request template, tree explorer, `Headers`/`Raw` request tabs with locked binding headers, SOAP 1.1/1.2 send, response tabs with `Save`/`Copy`/`Format`/download), themes, i18n, persistence, notifications, tray, single-instance, deep links, updates (desktop only: startup + navbar check, banner with install), and large-file processing are implemented. The updater's install path is unverified until a signed release with a `latest.json` asset is published.
 
 ## 2. Commands & Definition of Done
 
@@ -91,8 +91,8 @@ src/
 │   │   ├── files.test.ts                 # basename across separators + formatted output naming
 │   │   ├── rest.ts                       # REST IPC wrappers + browser fallback + explorer selection persistence
 │   │   ├── rest.test.ts                  # selection restore rules and browser-storage round trip
-│   │   ├── share.ts                      # share IPC wrappers + viewer URL helpers
-│   │   ├── share.test.ts
+│   │   ├── share.ts                      # share IPC wrappers + viewer URL helpers + retention codes and persistence
+│   │   ├── share.test.ts                 # byte formatting, token-free viewer URL, retention default/round trip, desktop-only delete
 │   │   ├── updater.ts                    # plugin check/downloadAndInstall/close wrappers + restart_app
 │   │   ├── wsdl.ts                       # WSDL IPC wrappers, desktop-only guard, explorer selection persistence
 │   │   └── wsdl.test.ts                  # desktop-only rejection and selection restore rules
@@ -128,8 +128,8 @@ src/
     ├── json/+page.svelte                 # XmlJsonFormatter mode="json"
     ├── url/+page.svelte                  # URL encode/decode
     ├── compare/+page.svelte              # diff UI
-    ├── share/+page.svelte                # desktop share UI: interfaces, file/content upload
-    ├── view/+page.svelte                 # read-only viewer opened by deep link
+    ├── share/+page.svelte                # desktop share UI: interfaces, retention select, file/content upload
+    ├── view/+page.svelte                 # read-only viewer opened by deep link, with the delete-upload control
     ├── rest/+page.svelte                 # REST client: explorer, request editor, response
     └── wsdl/+page.svelte                 # WSDL client: explorer, request template panel, SOAP response
 
@@ -152,7 +152,7 @@ src-tauri/
     │   ├── parser.rs                     # WSDL 1.1 `XmlDom` arena, `parse_wsdl`, `fetch_wsdl`
     │   ├── xsd.rs                        # XSD index and SOAP request-template generator
     │   └── store.rs                      # WSDL projects/files/services/operations/endpoints/state CRUD
-    └── http_server.rs                    # read-only axum share server on port 3030
+    └── http_server.rs                    # axum share server on port 3030: GET reads + DELETE by id
 
 src-tauri/tests/http_client.rs            # reqwest/axum plain-HTTP round trip
 screenshots/                              # design references, not automated tests
@@ -288,7 +288,7 @@ getEditorValue(): string;
 
 - Database file: `webdev-useful-tools.db` in `app_handle.path().app_data_dir()`.
 - Initialized once in `src-tauri/src/lib.rs` via `db::init_schema`.
-- Schema is idempotent (`CREATE TABLE IF NOT EXISTS`); there is no migration framework yet.
+- Schema is idempotent (`CREATE TABLE IF NOT EXISTS`); there is no migration framework yet, so a new column on an existing table goes through `db.rs::ensure_column` (`PRAGMA table_info` + guarded `ALTER TABLE`), called from `init_schema`. `CREATE TABLE IF NOT EXISTS` never alters an existing table, so without `ensure_column` an installed app would keep the old shape and every read of the new column would fail.
 - `AppDb` is a `Mutex<Connection>` managed by Tauri state.
 
 ```sql
@@ -312,7 +312,8 @@ CREATE TABLE IF NOT EXISTS shared_uploads (
   content_type TEXT NOT NULL,
   data BLOB NOT NULL,
   size INTEGER NOT NULL,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  expires_at DATETIME
 );
 
 CREATE TABLE IF NOT EXISTS rest_projects (
@@ -493,7 +494,7 @@ Persistence behavior:
 - Formatter/URL autosave debounce is 450 ms; Compare uses 500 ms.
 - localStorage prefixes: `devtools.editor.`, `devtools.setting.`.
 - Theme and locale are stored in `localStorage` only.
-- Settings in `app_settings` go through `get_setting`/`set_setting` (`services/db.ts` mirrors them to `localStorage`). Keys in use: `rest.activeProject` and `rest.activeRequest` — the explorer selection restored at startup; `wsdl.activeProject` and `wsdl.activeOperation` — the WSDL explorer selection; an empty string means "no project / no request / no operation selected"; `update.dismissedVersion` — the release version hidden with "Not now" (empty/absent means nothing was dismissed).
+- Settings in `app_settings` go through `get_setting`/`set_setting` (`services/db.ts` mirrors them to `localStorage`). Keys in use: `rest.activeProject` and `rest.activeRequest` — the explorer selection restored at startup; `wsdl.activeProject` and `wsdl.activeOperation` — the WSDL explorer selection; an empty string means "no project / no request / no operation selected"; `update.dismissedVersion` — the release version hidden with "Not now" (empty/absent means nothing was dismissed); `share.retention` — the retention the Share page preselects (`none|1d|3d|7d|always`, read through `services/share.ts::loadRetention`, which answers `none` — the default — for a missing or unknown value, so an unreadable setting never stores a payload the user did not ask for).
 
 ### Tauri commands
 
@@ -510,10 +511,11 @@ All commands use `#[tauri::command(rename_all = "snake_case")]`. Frontend invoke
 | `list_share_interfaces` | — | `NetworkInterface[]` |
 | `get_share_server_status` | — | `ShareServerStatus` |
 | `restart_share_server` | — | `ShareServerStatus` |
-| `upload_share_content` | `content`, `filename`, `content_type`, `server` | `ShareUploadResult` |
-| `upload_share_file` | `path`, `server` | `ShareUploadResult` |
+| `upload_share_content` | `content`, `filename`, `content_type`, `server`, `retention` | `ShareUploadResult` |
+| `upload_share_file` | `path`, `server`, `retention` | `ShareUploadResult` |
 | `load_shared_upload` | `server`, `id` | `SharedUploadResponse` |
 | `download_shared_upload` | `server`, `id`, `path` | `void` |
+| `delete_shared_upload` | `server`, `id` | `void` |
 | `consume_pending_deep_link` | — | `DeepLinkTarget \| null` |
 | `clear_pending_deep_link` | — | `void` |
 | `list_rest_projects` | — | `RestProject[]` |
@@ -546,7 +548,7 @@ All commands use `#[tauri::command(rename_all = "snake_case")]`. Frontend invoke
 | `clear_wsdl_response` | `operation_id` | `void` |
 
 `ProcessResult` contains `output_path`, `bytes_in`, `bytes_out`.
-`ShareServerStatus` contains `running`, `port`, `error`. `ShareUploadResult` contains `id`, `link`, `server`, `filename`, `size`.
+`ShareServerStatus` contains `running`, `port`, `error`. `ShareUploadResult` contains `id`, `link`, `server`, `filename`, `size`, `stored` (`false` for a memory-only upload) and `expires_at` (`None` for memory-only or "Always"). `SharedUploadResponse` adds `viewer`, `language`, `content`, `raw_url`, `created_at` and the same `stored`/`expires_at`, so the viewer can say "only in memory" or "available until …". Both upload commands take `retention` as a string and fail with `Unknown retention option` for a code `parse_retention` does not know — the frontend only ever sends the five codes in `RETENTION_OPTIONS`. `delete_shared_upload` goes over HTTP, so it answers `Upload not found` on 404 and `Share server is unavailable: …` when the listener is gone.
 `RestRequest`, `RestRequestDraft` and `RestRequestUpdate` carry `multipart: Vec<RestProperty>` and `files: Vec<RestFileRow>`; both fields are `#[serde(default)]` so requests and localStorage records saved before the Form tab still deserialize. `execute_rest_request` and `download_rest_response` take `multipart`/`files` as `Option<…>` and treat `None` as empty, so callers that only send JSON/XML/Text/Form-encode bodies keep working unchanged.
 `WsdlFileSummary` carries `id`, `project_id` (`''` = the "no project" bucket), `name`, `source_url`, `warnings`, `services[]` and `imported_at`; `WsdlService` carries `operations[]`, and `WsdlOperation` carries `soap_version`, `soap_action` and `endpoint_count` — no template and no URLs, so the tree stays cheap. `WsdlOperationDetail` adds `input_template`, `input_element`, `output_element`, `endpoints[]` and `state`; `WsdlImportResult` adds `reimported` and `warnings`.
 
@@ -610,8 +612,13 @@ json_tolerant_candidate(candidates: &[String]) -> Option<&String>; // mirrors js
 
 ### Share backend
 
-- `http_server::start` binds `0.0.0.0:3030` once at app setup and stores `ShareServerState` in Tauri state; `restart_share_server` stops the old listener, rebinds, and returns the fresh status.
-- The router is read-only: `GET /health`, `GET /api/uploads/{uuid}`, `GET /api/uploads/{uuid}/raw`. Uploads happen only through Tauri commands.
+- `http_server::start(store)` binds `0.0.0.0:3030` once at app setup and stores `ShareServerState` in Tauri state. `lib.rs` builds `share::ShareStore::new(database.clone())`, manages it, and hands a clone to the router, so the command path and the HTTP path read the same memory map and the same connection. `restart_share_server` stops the old listener, rebinds (which purges expired rows again), and returns the fresh status.
+- The router is not read-only anymore: `GET /health`, `GET /api/uploads/{uuid}`, `GET /api/uploads/{uuid}/raw` and `DELETE /api/uploads/{uuid}` — 204 when a row or a memory entry was dropped, 404 for an unknown or malformed id, 500 on a database error. Creating uploads still happens only through Tauri commands; there is no POST route.
+- There is no token anywhere: `build_deep_link`/`parse_deep_link` carry only `server` and `id`, so the link is the whole credential and whoever holds it may also delete the payload (README «Share»). `parse_deep_link` ignores unknown query keys, so a stale link with a `token=` param still opens. Do not reintroduce a secret without redesigning the delete path and the viewer.
+- Retention lives in `share.rs`: `Retention { Memory, Days(u32), Always }` and `parse_retention` for the codes `none | 1d | 3d | 7d | always`. `Memory` never touches SQLite — the payload goes into `MemoryUploads` (`MAX_MEMORY_UPLOADS = 24`, evicted by a monotonic sequence, oldest first) with `stored: false` and `created_at` from `db::now_timestamp`, so its link dies with the app. `Days(n)` stores `expires_at` from `db::expiry_timestamp` (`datetime('now', '+N days')`), `Always` stores NULL.
+- Expiry is computed in SQL, not in Rust — no chrono dependency. `db::read_shared_upload` filters `expires_at <= datetime('now')` on read, and `db::purge_expired_uploads` runs from `insert_shared_upload`, `ShareStore::find` and `bind_and_serve`. There is no timer; a row that ran out simply stops answering requests and is dropped by the next read, write or server start.
+- `ShareStore { db, memory }` is the router state: `find` prefers a memory entry over a row, `delete` removes a memory entry or a row and answers `false` when neither existed, `purge_expired` keeps the database clean. `db::delete_shared_upload` deliberately has no expiry filter, so deleting a row that is already past its expiry still succeeds and erases the row.
+- Frontend retention: `services/share.ts` owns `ShareRetention`, `RETENTION_OPTIONS`, `DEFAULT_RETENTION` (`'none'`: an upload is memory-only until the user picks a lifetime, and `normalizeRetention` folds a missing or unknown value back to it), and `loadRetention`/`saveRetention` on setting key `share.retention`; `/share` preselects the stored value (the select is built in the script, never with `$t()` inside a template literal) and passes the code to both upload commands. `/view` deletes through `deleteSharedUpload` with an in-place two-step confirm (`confirmingDelete`) and then shows the `deleted` state — no `window.confirm` and no floating `role="menu"`, which `npm run check` reports as an a11y warning.
 - `normalize_server` accepts only `http://` with port `3030` and loopback or RFC 1918/LAN IPv4 hosts; `normalize_id` accepts only UUID v4. Public or wrong-port hosts are rejected, so deep links cannot point at arbitrary servers.
 - Upload limit is 50 MB for both file and content paths; file uploads read the whole file in `spawn_blocking`.
 - `build_deep_link`/`parse_deep_link` use scheme `webdev-useful-tools://view?server=...&id=...`; `install_deep_link_handler` stores the target in `PendingDeepLink` and emits `share:deep-link`. The frontend consumes the pending target on mount and navigates to `/view` through `buildViewerUrl`.
@@ -648,7 +655,7 @@ json_tolerant_candidate(candidates: &[String]) -> Option<&String>; // mirrors js
 - **XML/JSON formatter:** `src/routes/{xml,json}/+page.svelte` → `XmlJsonFormatter.svelte` → `formatters.ts`. Client-side format/escape; file mode uses `processLargeFile`. Both `formatXmlText` and `formatJsonText` fall back to the tolerant re-indent path (`tokenizeXml`/`buildTolerantTree`/`prettyJsonTolerant`) when the strict parse fails, so the `formatter.invalid` toast only appears for text with no markup or no JSON structure.
 - **URL:** `src/routes/url/+page.svelte` → `encodeUrl`/`decodeUrl` in `formatters.ts`. Uses `encodeURI`/`decodeURI`, not `encodeURIComponent`.
 - **Compare:** `src/routes/compare/+page.svelte` → `diffTexts`/`lineOffsets`/`splitLines` in `diff.ts`; highlights are applied through `CodeMirrorEditor`. Highlight `line` numbers are 1-based in `splitLines`' normalized space and reach the editor through `lineOffsets` (see the pitfall below).
-- **Share (desktop):** `src/routes/share/+page.svelte` → `services/share.ts` → `share.rs` + `http_server.rs`; uploads go to `shared_uploads` in `db.rs`. Draft content arrives from `XmlJsonFormatter.svelte` through the `draftShare` store (`readOnly: true`). Viewer: `src/routes/view/+page.svelte` opened via deep link or `/view?server=...&id=...`.
+- **Share (desktop):** `src/routes/share/+page.svelte` (interface pick, file/content modes, retention select) + `src/routes/view/+page.svelte` (read-only viewer with the delete control) → `services/share.ts` (`buildViewerUrl`, `deleteSharedUpload`, retention helpers) → `share.rs` (`ShareStore`, retention, memory uploads, deep link) + `http_server.rs` + `db.rs::shared_uploads`. Draft content arrives from `XmlJsonFormatter.svelte` through the `draftShare` store (`readOnly: true`). Tests: `services/share.test.ts` (byte formatting, viewer URL shape with no secret, retention normalization and the settings round trip, the desktop-only delete guard) and the Rust tests in `share.rs` (deep link, retention parsing, memory eviction, `stored`/`expires_at` in the viewer response), `db.rs` (round trip, legacy migration, retention/purge, delete idempotence, delete of a hidden expired row), `http_server.rs` (GET/raw/404s, delete once, malformed id, memory serve + delete) and `tests/http_client.rs` (plain-HTTP round trip). Behavior and acceptance criteria: README section «Share».
 - **Rest client:** `src/routes/rest/+page.svelte` → `RestExplorer.svelte` + `PropertyEditor.svelte` + `PropertyFilesEditor.svelte` → `services/rest.ts` → `utils/rest.ts` → `rest.rs`. Projects/requests persist in `rest_projects`, `rest_requests`, `rest_request_properties` (headers), `rest_request_form` (Form-encode rows), `rest_request_multipart` (Form tab fields) and `rest_request_files` (Form tab file rows, path + display name only). Execution goes through the Rust backend in Tauri; browser mode falls back to `fetch` + `FormData` and `localStorage`. cURL shell quoting (`tokenizeCurl`), imported-body de-escaping (`unescapeImportedBody`), form-part parsing (`splitFormParameters`) and export quoting (`buildCurl`, `multipartCurlParts`, `quotePosix`, `quoteWindows`) live in `utils/rest.ts` and are covered by `utils/rest.test.ts`. Multipart is assembled client-side by `resolveRequestBody`/`buildMultipartPreview`/`buildMultipartFormData` and server-side by `rest.rs::encode_multipart` + `multipart_dump`, both from `multipart_boundary()`; file picking goes through `services/files.ts::pickPartFile`. RFC validation lives in `utils/rest.ts` (`validateRequest`, `validateProperties`, `validateRowName`, `validateFileRows`, `validateQueryUrl`); the page maps `ValidationKind` to the `rest.validation.*` keys, passes `fieldHint` to every table (`hintFor`/`fileHint`), and blocks send/cURL/download when issues exist. Explorer selection persistence lives in `services/rest.ts` (`loadRestSelection`, `saveRestSelection`, pure `resolveRestSelection`, covered by `services/rest.test.ts`): `+page.svelte` restores it in `onMount` and writes it from an `$effect` that is gated on `hydrated` and on a non-reactive `savedSelection` key, so the restore does not rewrite identical values.
 - **WSDL client (desktop):** `src/routes/wsdl/+page.svelte` → `WsdlExplorer.svelte` → `services/wsdl.ts` → `utils/wsdl.ts` → `src-tauri/src/wsdl/{mod,parser,xsd,store}.rs`. Import reads the URL from the clipboard (`utils/clipboard.ts`) and runs `import_wsdl`; parsing, the XSD index and the request template are Rust-only, execution reuses `execute_rest_request` (`body_type: 'xml'`, `POST`) and `cancel_rest_request`, and abort/failure toasts reuse `rest.aborted` / `rest.requestFailed`. Projects, files, services, operations, endpoints and per-operation state persist in `wsdl_projects`, `wsdl_files`, `wsdl_services`, `wsdl_operations`, `wsdl_endpoints` and `wsdl_operation_state`; explorer selection goes through `app_settings.wsdl.activeProject`/`wsdl.activeOperation` with the pure `resolveWsdlSelection` (`services/wsdl.test.ts`). The SOAP envelope, the locked headers, the raw-request preview, the endpoint choice and the import error/warning code tables live in `utils/wsdl.ts` (`buildEnvelope`, `buildSoapRawRequest`, `lockedHeadersFor`, `mergeLockedHeaders`, `editableForSave`, `normalizeHeaderRows`, `lockedHeaderNames`, `selectEndpoint`, `describeErrorText`, `describeWarningText`) and are mirrored in `store.rs`/`mod.rs`. Header cell hints, the tab error dot and the blocked-send message come from the shared `utils/validation.ts`, the response size/time formatting and the attachment/binary wording from `utils/rest.ts` (`formatRestSize`, `formatRestTime`, `filenameFromDisposition`), and the download file name is cleaned by `services/files.ts::sharedFileName`. Response persistence goes through `save_wsdl_response`/`clear_wsdl_response`. Behavior and acceptance criteria: README section «WSDL-клиент». Out of scope: cURL export of a SOAP call, the HTML preview of a response, WSDL 2.0 and non-SOAP bindings, and `xsd:import`/`xsd:include` fetching.
 - **Updates (desktop):** `src/routes/+layout.svelte` (startup check + banner slot) + `Navbar.svelte` (manual check) → `UpdateBanner.svelte` → `stores/update.ts` → `services/updater.ts` → `utils/update.ts` → `tauri-plugin-updater` + `src-tauri/src/update.rs`. Dismissal persists through `set_setting`/`get_setting` (`app_settings.update.dismissedVersion`). Pure helpers (percent, dismissal match, failure classification, Windows UA) are covered by `utils/update.test.ts`. Behavior and acceptance criteria: README section «Обновления».
@@ -681,6 +688,12 @@ json_tolerant_candidate(candidates: &[String]) -> Option<&String>; // mirrors js
 - Share uploads and the viewer require Tauri; the browser build shows the desktop-only notice instead of the share UI.
 - Never upload from the Share UI when `get_share_server_status.running` is false; deep links to a stopped server are dead. Use Retry (`restart_share_server`) instead of allowing the upload.
 - Share deep links must keep `normalize_server` LAN-only and pinned to port 3030; do not widen it to public hosts.
+- Share has no credential other than the id: `DELETE /api/uploads/{id}` is open to whoever can reach the port, which is the product decision behind the viewer's delete button (README «Share»). Do not "fix" it by adding a token to the link without also changing `build_deep_link`/`parse_deep_link`, `buildViewerUrl`, the viewer UI and the README contract.
+- Keep retention parsing strict: `parse_retention` knows exactly the five codes in `services/share.ts::RETENTION_OPTIONS`, and an unknown one is an error rather than a silent fallback to a stored lifetime — the client's own default is `none`, so a value nobody chose never becomes a database row. Adding an option means changing both lists and both `en`/`ru` labels (`share.retention.<code>`).
+- Memory-only uploads are process-scoped and capped at `MAX_MEMORY_UPLOADS`, evicting the oldest: their link dies with the app and can disappear while the app still runs. Never write a `Retention::Memory` payload to `shared_uploads`, and keep `stored: false` so the UI and the viewer say "only in memory" instead of promising a date.
+- Compute expiry only through SQLite (`expiry_timestamp`/`now_timestamp`, `expires_at <= datetime('now')`). Do not add chrono or compare Rust strings against `CURRENT_TIMESTAMP` by hand: the two formats must stay identical or the purge silently keeps or drops the wrong rows.
+- `read_shared_upload` hides expired rows but does not delete them; only `purge_expired_uploads` (from `insert_shared_upload`, `ShareStore::find` and `bind_and_serve`) erases them, and `db::delete_shared_upload` has no expiry filter so an explicitly deleted row always goes. Do not add `AND expires_at > now` to the delete — it would answer 404 while leaving the payload in the database.
+- The viewer's delete is a two-step in-place confirm (`confirmingDelete`), like the WSDL file menu's delete: the first click only opens the strip, and `removeUpload` clears `upload` and sets `deleted`. Keep it out of `window.confirm` and out of a floating `role="menu"` (a11y warnings in `npm run check`), and keep the delete triggers gated on a loaded `upload`.
 - Keep `invoke` argument names snake_case to match the Rust command signatures.
 - Browser mode must remain functional for client-side XML/JSON/URL/Compare features.
 - New Tauri APIs may require capability updates; check `capabilities/default.json`.

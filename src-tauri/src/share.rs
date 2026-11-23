@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -16,6 +17,30 @@ pub const SHARE_SCHEME: &str = "webdev-useful-tools";
 pub const SHARE_PORT: u16 = 3030;
 pub const MAX_UPLOAD_BYTES: usize = 50 * 1024 * 1024;
 pub const DEEP_LINK_EVENT: &str = "share:deep-link";
+/// Memory-only uploads are kept until the app closes; the cap stops a long session from
+/// holding an unbounded pile of payloads.
+pub const MAX_MEMORY_UPLOADS: usize = 24;
+
+/// How long an upload survives. `Memory` never reaches SQLite: the payload lives in RAM
+/// only, so its link dies with the app.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Retention {
+    Memory,
+    Days(u32),
+    Always,
+}
+
+/// The codes the frontend sends; an unknown one is a bug rather than a user typo.
+pub fn parse_retention(raw: &str) -> Option<Retention> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "none" => Some(Retention::Memory),
+        "1d" => Some(Retention::Days(1)),
+        "3d" => Some(Retention::Days(3)),
+        "7d" => Some(Retention::Days(7)),
+        "always" => Some(Retention::Always),
+        _ => None,
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeepLinkTarget {
@@ -91,6 +116,118 @@ impl ShareServerState {
     }
 }
 
+/// Uploads the user chose not to store. They answer the HTTP endpoints exactly like
+/// database rows, but only for as long as this process runs.
+#[derive(Clone, Default)]
+pub struct MemoryUploads {
+    entries: Arc<Mutex<MemoryEntries>>,
+}
+
+#[derive(Default)]
+struct MemoryEntries {
+    uploads: HashMap<String, (db::SharedUpload, u64)>,
+    sequence: u64,
+}
+
+impl MemoryUploads {
+    pub fn insert(&self, upload: db::SharedUpload) {
+        {
+            let Ok(mut entries) = self.entries.lock() else {
+                return;
+            };
+            entries.sequence += 1;
+            let sequence = entries.sequence;
+            entries
+                .uploads
+                .insert(upload.id.clone(), (upload, sequence));
+        }
+        // The cap is re-read through `len` after every eviction, so an insert that raced
+        // with this one cannot leave the map over the limit.
+        while self.len() > MAX_MEMORY_UPLOADS {
+            let Ok(mut entries) = self.entries.lock() else {
+                return;
+            };
+            let oldest = entries
+                .uploads
+                .values()
+                .min_by_key(|(_, sequence)| *sequence)
+                .map(|(upload, _)| upload.id.clone());
+            match oldest {
+                Some(id) => {
+                    entries.uploads.remove(&id);
+                }
+                None => break,
+            }
+        }
+    }
+
+    pub fn get(&self, id: &str) -> Option<db::SharedUpload> {
+        self.entries
+            .lock()
+            .ok()?
+            .uploads
+            .get(id)
+            .map(|(upload, _)| upload.clone())
+    }
+
+    pub fn remove(&self, id: &str) -> bool {
+        self.entries
+            .lock()
+            .map(|mut entries| entries.uploads.remove(id).is_some())
+            .unwrap_or(false)
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries
+            .lock()
+            .map(|entries| entries.uploads.len())
+            .unwrap_or(0)
+    }
+}
+
+/// Everything the share server reads from: expired rows are filtered out on the way.
+#[derive(Clone)]
+pub struct ShareStore {
+    pub db: AppDb,
+    pub memory: MemoryUploads,
+}
+
+impl ShareStore {
+    pub fn new(db: AppDb) -> Self {
+        Self {
+            db,
+            memory: MemoryUploads::default(),
+        }
+    }
+
+    /// Drops uploads whose retention ran out. Reads and writes call it, so no timer is
+    /// needed to keep the database from holding expired payloads.
+    pub fn purge_expired(&self) {
+        if let Ok(connection) = self.db.conn.lock() {
+            let _ = db::purge_expired_uploads(&connection);
+        }
+    }
+
+    pub fn find(&self, id: &str) -> Result<Option<db::SharedUpload>, String> {
+        if let Some(upload) = self.memory.get(id) {
+            return Ok(Some(upload));
+        }
+        self.purge_expired();
+        let connection = self.db.conn.lock().map_err(|error| error.to_string())?;
+        db::read_shared_upload(&connection, id).map_err(|error| error.to_string())
+    }
+
+    /// Forgets an upload, in memory or in the database. The share link is the whole
+    /// credential: anybody holding it can drop the payload it points at.
+    pub fn delete(&self, id: &str) -> Result<bool, String> {
+        if self.memory.remove(id) {
+            return Ok(true);
+        }
+        let connection = self.db.conn.lock().map_err(|error| error.to_string())?;
+        db::delete_shared_upload(&connection, id).map_err(|error| error.to_string())
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct PendingDeepLink {
     target: Arc<Mutex<Option<DeepLinkTarget>>>,
@@ -125,6 +262,10 @@ pub struct SharedUploadResponse {
     pub language: Option<String>,
     pub content: Option<String>,
     pub raw_url: String,
+    /// `false` when the payload is only in the sharer's memory.
+    pub stored: bool,
+    /// `None` means the upload does not expire.
+    pub expires_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -134,6 +275,10 @@ pub struct ShareUploadResult {
     pub server: String,
     pub filename: String,
     pub size: u64,
+    /// `false` when the payload lives in the sharer's RAM only and dies with the app.
+    pub stored: bool,
+    /// `None` for a memory-only upload or one kept forever.
+    pub expires_at: Option<String>,
 }
 
 pub fn is_lan_ipv4(ip: Ipv4Addr) -> bool {
@@ -260,6 +405,8 @@ pub fn viewer_response(upload: &db::SharedUpload) -> SharedUploadResponse {
         language,
         content,
         raw_url: format!("/api/uploads/{}/raw", upload.id),
+        stored: upload.stored,
+        expires_at: upload.expires_at.clone(),
     }
 }
 
@@ -340,6 +487,8 @@ fn upload_result(
     server: String,
     filename: String,
     size: u64,
+    stored: bool,
+    expires_at: Option<String>,
 ) -> Result<ShareUploadResult, String> {
     let link = build_deep_link(&server, &id)?;
     Ok(ShareUploadResult {
@@ -348,21 +497,63 @@ fn upload_result(
         server,
         filename,
         size,
+        stored,
+        expires_at,
     })
 }
 
+/// Stores the payload according to the retention the user picked. `Memory` never reaches
+/// SQLite, so the entry disappears when the app closes and cannot be deleted by hand.
 fn store_upload(
-    db: &AppDb,
+    store: &ShareStore,
     filename: String,
     content_type: String,
     data: &[u8],
     server: String,
+    raw_retention: &str,
 ) -> Result<ShareUploadResult, String> {
     validate_payload_size(data.len())?;
-    let connection = db.conn.lock().map_err(|error| error.to_string())?;
-    let id = db::insert_shared_upload(&connection, &filename, &content_type, data)?;
-    drop(connection);
-    upload_result(id, server, filename, data.len() as u64)
+    let retention =
+        parse_retention(raw_retention).ok_or_else(|| "Unknown retention option".to_string())?;
+    let size = data.len() as u64;
+
+    if retention == Retention::Memory {
+        let upload = {
+            let connection = store.db.conn.lock().map_err(|error| error.to_string())?;
+            db::SharedUpload {
+                id: Uuid::new_v4().to_string(),
+                filename: filename.clone(),
+                content_type,
+                data: data.to_vec(),
+                size: size as i64,
+                created_at: db::now_timestamp(&connection).map_err(|error| error.to_string())?,
+                expires_at: None,
+                stored: false,
+            }
+        };
+        let id = upload.id.clone();
+        store.memory.insert(upload);
+        return upload_result(id, server, filename, size, false, None);
+    }
+
+    let (id, expires_at) = {
+        let connection = store.db.conn.lock().map_err(|error| error.to_string())?;
+        let expires_at = match retention {
+            Retention::Days(days) => {
+                Some(db::expiry_timestamp(&connection, days).map_err(|error| error.to_string())?)
+            }
+            Retention::Always | Retention::Memory => None,
+        };
+        let written = db::insert_shared_upload(
+            &connection,
+            &filename,
+            &content_type,
+            data,
+            expires_at.as_deref(),
+        )?;
+        (written, expires_at)
+    };
+    upload_result(id, server, filename, size, true, expires_at)
 }
 
 fn focus_main_window(app: &AppHandle) {
@@ -414,38 +605,41 @@ pub fn get_share_server_status(status: State<'_, ShareServerState>) -> ShareServ
 
 #[tauri::command(rename_all = "snake_case")]
 pub fn restart_share_server(
-    db: State<'_, AppDb>,
+    store: State<'_, ShareStore>,
     status: State<'_, ShareServerState>,
 ) -> ShareServerStatus {
-    crate::http_server::restart(&status, db.inner().clone())
+    crate::http_server::restart(&status, store.inner().clone())
 }
 
 #[tauri::command(rename_all = "snake_case")]
 pub fn upload_share_content(
-    db: State<'_, AppDb>,
+    store: State<'_, ShareStore>,
     content: String,
     filename: String,
     content_type: String,
     server: String,
+    retention: String,
 ) -> Result<ShareUploadResult, String> {
     let server = normalize_server(&server)?;
     store_upload(
-        db.inner(),
+        store.inner(),
         sanitize_filename(&filename),
         content_type,
         content.as_bytes(),
         server,
+        &retention,
     )
 }
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn upload_share_file(
-    db: State<'_, AppDb>,
+    store: State<'_, ShareStore>,
     path: String,
     server: String,
+    retention: String,
 ) -> Result<ShareUploadResult, String> {
     let server = normalize_server(&server)?;
-    let db = db.inner().clone();
+    let store = store.inner().clone();
 
     tauri::async_runtime::spawn_blocking(move || {
         let metadata = std::fs::metadata(&path).map_err(|error| error.to_string())?;
@@ -458,7 +652,7 @@ pub async fn upload_share_file(
         let data = std::fs::read(&path).map_err(|error| error.to_string())?;
         let filename = filename_from_path(&path);
         let content_type = content_type_from_path(&path);
-        store_upload(&db, filename, content_type, &data, server)
+        store_upload(&store, filename, content_type, &data, server, &retention)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -532,10 +726,31 @@ pub async fn download_shared_upload(
 }
 
 #[tauri::command(rename_all = "snake_case")]
+pub async fn delete_shared_upload(server: String, id: String) -> Result<(), String> {
+    let server = normalize_server(&server)?;
+    let id = normalize_id(&id)?;
+    let url = format!("{server}/api/uploads/{id}");
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let response = client
+        .delete(url)
+        .send()
+        .await
+        .map_err(|error| format!("Share server is unavailable: {error}"))?;
+
+    match response.status() {
+        reqwest::StatusCode::NO_CONTENT => Ok(()),
+        reqwest::StatusCode::NOT_FOUND => Err("Upload not found".to_string()),
+        status => Err(format!("Share server returned {status}")),
+    }
+}
+
+#[tauri::command(rename_all = "snake_case")]
 pub fn consume_pending_deep_link(pending: State<'_, PendingDeepLink>) -> Option<DeepLinkTarget> {
     pending.take()
 }
-
 #[tauri::command(rename_all = "snake_case")]
 pub fn clear_pending_deep_link(pending: State<'_, PendingDeepLink>) {
     pending.clear();
@@ -599,11 +814,15 @@ mod tests {
             data: br#"{"a":1}"#.to_vec(),
             size: 7,
             created_at: "now".to_string(),
+            expires_at: None,
+            stored: true,
         };
         let response = viewer_response(&upload);
         assert_eq!(response.viewer, "code");
         assert_eq!(response.language.as_deref(), Some("json"));
         assert_eq!(response.content.as_deref(), Some(r#"{"a":1}"#));
+        assert!(response.stored);
+        assert_eq!(response.expires_at, None);
     }
 
     #[test]
@@ -615,12 +834,69 @@ mod tests {
             data: vec![0, 1, 2, 3],
             size: 4,
             created_at: "now".to_string(),
+            expires_at: Some("2030-01-01 00:00:00".to_string()),
+            stored: false,
         };
         let response = viewer_response(&upload);
         assert_eq!(response.viewer, "binary");
         assert_eq!(response.language, None);
         assert_eq!(response.content, None);
         assert_eq!(response.raw_url, format!("/api/uploads/{ID}/raw"));
+        assert!(!response.stored);
+        assert_eq!(response.expires_at.as_deref(), Some("2030-01-01 00:00:00"));
+    }
+
+    #[test]
+    fn parses_every_retention_option() {
+        assert_eq!(parse_retention("none"), Some(Retention::Memory));
+        assert_eq!(parse_retention("1D"), Some(Retention::Days(1)));
+        assert_eq!(parse_retention(" 3d "), Some(Retention::Days(3)));
+        assert_eq!(parse_retention("7d"), Some(Retention::Days(7)));
+        assert_eq!(parse_retention("always"), Some(Retention::Always));
+        assert_eq!(parse_retention(""), None);
+        assert_eq!(parse_retention("30d"), None);
+    }
+
+    #[test]
+    fn memory_store_evicts_the_oldest_entry() {
+        let uploads = MemoryUploads::default();
+        let mut ids = Vec::new();
+        for index in 0..=MAX_MEMORY_UPLOADS {
+            let id = format!("{index:08}-{index:08}-{index:08}-{index:08}");
+            uploads.insert(db::SharedUpload {
+                id: id.clone(),
+                filename: format!("{index}.txt"),
+                content_type: "text/plain".to_string(),
+                data: vec![index as u8],
+                size: 1,
+                created_at: "now".to_string(),
+                expires_at: None,
+                stored: false,
+            });
+            ids.push(id);
+        }
+
+        assert_eq!(uploads.len(), MAX_MEMORY_UPLOADS);
+        assert_eq!(uploads.get(&ids[0]), None, "the oldest entry gave way");
+        let newest = &ids[ids.len() - 1];
+        assert!(uploads.get(newest).is_some());
+        assert!(uploads.remove(newest), "the newest entry left on request");
+        assert!(
+            !uploads.remove(newest),
+            "a second delete finds nothing to remove"
+        );
+        assert!(uploads.remove(&ids[ids.len() - 2]));
+        assert_eq!(uploads.get(&ids[ids.len() - 2]), None);
+        assert!(!uploads.remove("absent"));
+    }
+
+    #[test]
+    fn builds_a_link_without_a_token_and_ignores_stray_parameters() {
+        let link = build_deep_link("http://192.168.1.10:3030", ID).expect("link");
+        assert!(!link.contains("token"));
+        let parsed = parse_deep_link(&format!("{link}&token=0123456789abcdef")).expect("parse");
+        assert_eq!(parsed.server, "http://192.168.1.10:3030");
+        assert_eq!(parsed.id, ID);
     }
 
     #[test]

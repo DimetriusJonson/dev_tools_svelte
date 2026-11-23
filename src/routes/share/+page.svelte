@@ -14,10 +14,16 @@
 		formatBytes,
 		getShareServerStatus,
 		listShareInterfaces,
+		loadRetention,
+		normalizeRetention,
 		restartShareServer,
+		saveRetention,
 		uploadShareContent,
 		uploadShareFile,
+		DEFAULT_RETENTION,
+		RETENTION_OPTIONS,
 		type NetworkInterface,
+		type ShareRetention,
 		type ShareServerStatus,
 		type ShareUploadResult,
 		MAX_UPLOAD_BYTES
@@ -36,6 +42,7 @@
 	let content = $state('');
 	let contentName = $state('snippet.json');
 	let contentLanguage = $state<ContentLanguage>('json');
+	let retention = $state<ShareRetention>(DEFAULT_RETENTION);
 	let draftReadOnly = $state(false);
 	let uploading = $state(false);
 	let retrying = $state(false);
@@ -57,6 +64,15 @@
 		Boolean(server) && serverStatus !== null && serverStatus.running && !uploading
 	);
 	const serverFailed = $derived(serverStatus !== null && !serverStatus.running);
+	// Built in the script: `$t()` inside a template literal in an attribute renders the code verbatim.
+	const retentionOptions = $derived(
+		RETENTION_OPTIONS.map((code) => ({ code, label: $t(`share.retention.${code}`) }))
+	);
+
+	function setRetention(value: string): void {
+		retention = normalizeRetention(value);
+		void saveRetention(retention);
+	}
 
 	function serverIsReady(): boolean {
 		if (serverStatus !== null && !serverStatus.running) {
@@ -113,7 +129,7 @@
 		uploading = true;
 		result = null;
 		try {
-			result = await uploadShareFile(path, server);
+			result = await uploadShareFile(path, server, retention);
 		} catch (error) {
 			flashError(String(error));
 		} finally {
@@ -149,7 +165,7 @@
 		result = null;
 		try {
 			const name = contentName.trim() || 'snippet.txt';
-			result = await uploadShareContent(content, name, contentType, server);
+			result = await uploadShareContent(content, name, contentType, server, retention);
 		} catch (error) {
 			flashError(String(error));
 		} finally {
@@ -181,6 +197,7 @@
 				interfaces = availableInterfaces;
 				serverStatus = status;
 				server = availableInterfaces[0]?.url ?? '';
+				retention = await loadRetention();
 
 				const draft = get(draftShare);
 				if (draft) {
@@ -309,26 +326,43 @@
 			</section>
 
 			<section class="rounded-2xl border border-[var(--border)] bg-[var(--panel-bg)] p-5 shadow-[var(--shadow)]">
-				<div class="mb-4 flex gap-2">
-					<button
-						type="button"
-						onclick={() => (mode = 'file')}
-						class="rounded-full px-4 py-2 text-sm font-bold transition-all duration-150 active:scale-95 {mode === 'file'
-							? 'bg-[var(--accent)] text-[var(--accent-text)]'
-							: 'bg-[var(--secondary-bg)] text-[var(--secondary-text)]'}"
-					>
-						{$t('share.fileMode')}
-					</button>
-					<button
-						type="button"
-						onclick={() => (mode = 'content')}
-						class="rounded-full px-4 py-2 text-sm font-bold transition-all duration-150 active:scale-95 {mode === 'content'
-							? 'bg-[var(--accent)] text-[var(--accent-text)]'
-							: 'bg-[var(--secondary-bg)] text-[var(--secondary-text)]'}"
-					>
-						{$t('share.contentMode')}
-					</button>
+				<div class="mb-4 flex flex-wrap items-center justify-between gap-3">
+					<div class="flex gap-2">
+						<button
+							type="button"
+							onclick={() => (mode = 'file')}
+							class="rounded-full px-4 py-2 text-sm font-bold transition-all duration-150 active:scale-95 {mode === 'file'
+								? 'bg-[var(--accent)] text-[var(--accent-text)]'
+								: 'bg-[var(--secondary-bg)] text-[var(--secondary-text)]'}"
+						>
+							{$t('share.fileMode')}
+						</button>
+						<button
+							type="button"
+							onclick={() => (mode = 'content')}
+							class="rounded-full px-4 py-2 text-sm font-bold transition-all duration-150 active:scale-95 {mode === 'content'
+								? 'bg-[var(--accent)] text-[var(--accent-text)]'
+								: 'bg-[var(--secondary-bg)] text-[var(--secondary-text)]'}"
+						>
+							{$t('share.contentMode')}
+						</button>
+					</div>
+					<label class="flex w-44 flex-col gap-1.5 text-xs font-bold text-[var(--text-muted)]">
+						{$t('share.retention')}
+						<select
+							value={retention}
+							onchange={(event) => setRetention((event.currentTarget as HTMLSelectElement).value)}
+							class="h-10 rounded-lg border border-[var(--border-strong)] bg-[var(--app-bg)] px-3 text-sm font-semibold text-[var(--text)] outline-none transition-colors duration-150 hover:border-[var(--accent)] focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+						>
+							{#each retentionOptions as option (option.code)}
+								<option value={option.code}>{option.label}</option>
+							{/each}
+						</select>
+					</label>
 				</div>
+				<p class="-mt-2 mb-4 text-xs leading-relaxed text-[var(--text-muted)]">
+					{retention === 'none' ? $t('share.memoryHint') : $t('share.retentionHint')}
+				</p>
 
 				{#if mode === 'file'}
 					<div class="grid gap-3">
@@ -456,6 +490,15 @@
 					</div>
 					<p class="mt-2 text-xs text-[var(--text-muted)]">
 						{$t('share.linkHint', { size: formatBytes(result.size) })}
+					</p>
+					<p class="mt-1 text-xs font-medium text-[var(--text-muted)]">
+						{#if !result.stored}
+							{$t('share.memoryHint')}
+						{:else if result.expires_at}
+							{$t('share.expiresAt', { date: result.expires_at })}
+						{:else}
+							{$t('share.storedForever')}
+						{/if}
 					</p>
 				</section>
 			{/if}

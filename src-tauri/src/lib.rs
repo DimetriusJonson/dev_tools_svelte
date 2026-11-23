@@ -68,13 +68,14 @@ pub fn run() {
         })
         .setup(|app| {
             let database = init_database(app.handle())?;
-            let share_database = database.clone();
+            let share_store = share::ShareStore::new(database.clone());
             app.manage(database);
             app.manage(rest::RestCancelState::default());
             app.manage(wsdl::WsdlFetchState::default());
             app.manage(share::PendingDeepLink::default());
             share::install_deep_link_handler(app.handle());
-            app.manage(http_server::start(share_database));
+            app.manage(share_store.clone());
+            app.manage(http_server::start(share_store));
 
             let open_item = MenuItem::with_id(
                 app,
@@ -123,6 +124,7 @@ pub fn run() {
             share::upload_share_file,
             share::load_shared_upload,
             share::download_shared_upload,
+            share::delete_shared_upload,
             share::consume_pending_deep_link,
             share::clear_pending_deep_link,
             rest::cmd_list_rest_projects,
