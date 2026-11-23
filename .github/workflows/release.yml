@@ -4,8 +4,9 @@ name: Release
 #
 #   git tag v0.1.0 && git push origin v0.1.0
 #
-# `workflow_dispatch` runs the same builds but uploads them only as workflow
-# artifacts, so the pipeline can be checked without publishing anything.
+# A push to `main` runs only `preflight` (checks, no bundles, no release), and
+# `workflow_dispatch` builds the bundles and uploads them as workflow artifacts
+# without creating a release.
 #
 # The updater endpoint in `src-tauri/tauri.conf.json` is
 # `releases/latest/download/latest.json`, which only resolves for a published,
@@ -19,6 +20,8 @@ name: Release
 # `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` stays unset).
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
   workflow_dispatch:
@@ -100,7 +103,7 @@ jobs:
           fi
 
       - name: Tag matches the app version
-        if: github.event_name == 'push'
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           set -euo pipefail
           expected="v$(jq -r '.version' src-tauri/tauri.conf.json)"
@@ -110,6 +113,7 @@ jobs:
           fi
 
       - name: Updater signing key is present
+        if: startsWith(github.ref, 'refs/tags/')
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
@@ -122,6 +126,9 @@ jobs:
   build:
     name: Build (${{ matrix.name }})
     needs: preflight
+    # A push to `main` only runs preflight: nothing is built and no release is
+    # touched. Bundles are produced for a tag and for a manual run.
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -186,10 +193,10 @@ jobs:
       - name: Build and attach the bundles
         uses: tauri-apps/tauri-action@v1
         with:
-          # Empty on `workflow_dispatch`: then nothing is created or uploaded to
-          # a release and the bundles stay workflow artifacts.
-          tagName: ${{ github.event_name == 'push' && 'v__VERSION__' || '' }}
-          releaseName: ${{ github.event_name == 'push' && 'WebDev Useful Tools v__VERSION__' || '' }}
+          # Empty unless this run is a tag release: then nothing is created or
+          # uploaded to a release and the bundles stay workflow artifacts.
+          tagName: ${{ startsWith(github.ref, 'refs/tags/') && 'v__VERSION__' || '' }}
+          releaseName: ${{ startsWith(github.ref, 'refs/tags/') && 'WebDev Useful Tools v__VERSION__' || '' }}
           # This text becomes `notes` in latest.json, so it is what the update
           # banner shows in the app.
           releaseBody: |
@@ -211,13 +218,13 @@ jobs:
           # so the updater manifest must point at the MSI bundle, not the NSIS one.
           updaterJsonPreferNsis: false
           retryAttempts: 3
-          uploadWorkflowArtifacts: ${{ github.event_name != 'push' }}
+          uploadWorkflowArtifacts: ${{ !startsWith(github.ref, 'refs/tags/') }}
           args: ${{ matrix.args }}
 
   manifest:
     name: Updater manifest
     needs: build
-    if: github.event_name == 'push'
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-22.04
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -294,7 +301,7 @@ jobs:
   publish:
     name: Publish release
     needs: manifest
-    if: github.event_name == 'push'
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-22.04
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
