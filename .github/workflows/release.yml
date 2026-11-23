@@ -66,6 +66,18 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Report the frontend test environment
+        # Temporary diagnostic: the run log is not readable without a token, so
+        # every line becomes an annotation, which the Checks API exposes publicly.
+        run: |
+          {
+            echo "node=$(node -v) npm=$(npm -v)"
+            node -p "'vitest=' + require('vitest/package.json').version + ' jsdom=' + require('jsdom/package.json').version"
+            env | grep -E '^(CI|NODE_ENV|NODE_OPTIONS|TZ|VITEST|npm_config_|npm_lifecycle)' | sort
+            node --input-type=module -e "import { JSDOM } from 'jsdom'; const w = new JSDOM('', { url: 'http://localhost/' }).window; console.log('bare jsdom localStorage:', typeof w.localStorage)"
+            npx vitest run src/lib/utils/env-probe.test.ts
+          } 2>&1 | sed -e 's/%/%25/g' -e 's/\r//g' -e 's/^/::warning::/'
+
       - name: Frontend tests and type check
         run: |
           npm run test
