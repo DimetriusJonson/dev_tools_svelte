@@ -644,6 +644,8 @@ pub fn language_for_content_type(content_type: &str) -> Option<String> {
     if value.is_empty() {
         return None;
     }
+    // The same rule as `detectLanguageFromContentType`: every subtype that says HTML is
+    // HTML-flavoured, checked before XML so `application/xhtml+xml` never becomes XML.
     if value.contains("html") {
         return Some("html".to_string());
     }
@@ -675,7 +677,10 @@ pub fn language_for_body(content_type: &str, body: &str) -> Option<String> {
         return None;
     }
     if trimmed.starts_with('<') {
-        if trimmed.to_ascii_lowercase().contains("<html") {
+        // An HTML tag or an HTML doctype is HTML even without a `text/html` header;
+        // other markup is better read by the XML language. Mirrors `detectLanguageFromHeaders`.
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.contains("<html") || lower.starts_with("<!doctype html") {
             return Some("html".to_string());
         }
         return Some("xml".to_string());
@@ -1569,6 +1574,45 @@ mod tests {
         assert_eq!(language_for_content_type("application/octet-stream"), None);
         assert_eq!(language_for_body("", "<root/>").as_deref(), Some("xml"));
         assert_eq!(language_for_body("", "{\"a\":1}").as_deref(), Some("json"));
+    }
+
+    #[test]
+    fn reads_html_flavoured_types_and_html_documents() {
+        // The HTML language is used for every subtype that says HTML, and XHTML is
+        // matched before XML so it never lands on the XML language.
+        for content_type in [
+            "text/html; charset=utf-8",
+            "application/xhtml+xml",
+            "application/xhtml",
+            "text/x-html",
+        ] {
+            assert_eq!(
+                language_for_content_type(content_type).as_deref(),
+                Some("html"),
+                "{content_type}"
+            );
+        }
+        assert_eq!(
+            language_for_content_type("application/atom+xml").as_deref(),
+            Some("xml")
+        );
+        // A body with no header is HTML when it carries an HTML tag or an HTML doctype.
+        assert_eq!(
+            language_for_body("", "<!DOCTYPE html><html><body>hi</body></html>").as_deref(),
+            Some("html")
+        );
+        assert_eq!(
+            language_for_body("", "<!doctype html>").as_deref(),
+            Some("html")
+        );
+        assert_eq!(
+            language_for_body("", "<!DOCTYPE html>").as_deref(),
+            Some("html")
+        );
+        assert_eq!(
+            language_for_body("", "<soap:Envelope/>").as_deref(),
+            Some("xml")
+        );
     }
 
     #[test]

@@ -201,6 +201,9 @@ export function bodyTypeFromContentType(contentType: string): BodyType | null {
 export function detectLanguageFromContentType(contentType: string): 'json' | 'xml' | 'html' | 'text' | null {
 	const value = contentType.toLowerCase();
 	if (!value) return null;
+	// Anything whose subtype says HTML is read by the HTML language: `text/html`,
+	// `application/xhtml+xml`, `application/xhtml`, `text/x-html`, `application/…+html`.
+	// This runs before the XML test so XHTML never falls through to the XML language.
 	if (value.includes('html')) return 'html';
 	if (value.includes('json')) return 'json';
 	if (value.includes('xml')) return 'xml';
@@ -227,7 +230,10 @@ export function detectLanguageFromHeaders(
 	const trimmed = body.trimStart();
 	if (!trimmed) return null;
 	if (trimmed.startsWith('<')) {
-		return trimmed.toLowerCase().includes('<html') ? 'html' : 'xml';
+		// An HTML tag or an HTML doctype is HTML even without a `text/html` header;
+		// other markup is better read by the XML language.
+		const lower = trimmed.toLowerCase();
+		return lower.includes('<html') || lower.startsWith('<!doctype html') ? 'html' : 'xml';
 	}
 	if (trimmed.startsWith('{') || trimmed.startsWith('[')) return 'json';
 	return 'text';

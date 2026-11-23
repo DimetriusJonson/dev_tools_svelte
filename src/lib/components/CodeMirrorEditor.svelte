@@ -14,6 +14,7 @@
 		placeholder as cmPlaceholder,
 		type DecorationSet
 	} from '@codemirror/view';
+	import { html as htmlLang } from '@codemirror/lang-html';
 	import { json as jsonLang } from '@codemirror/lang-json';
 	import { xml as xmlLang } from '@codemirror/lang-xml';
 	import {
@@ -23,7 +24,7 @@
 	} from '@codemirror/language';
 	import { oneDarkHighlightStyle } from '@codemirror/theme-one-dark';
 
-	export type EditorLanguage = 'xml' | 'json' | 'text';
+	export type EditorLanguage = 'xml' | 'json' | 'html' | 'text';
 
 	export interface Highlight {
 		from: number;
@@ -83,6 +84,11 @@
 	function languageExtension(lang: EditorLanguage): Extension {
 		if (lang === 'json') return jsonLang();
 		if (lang === 'xml') return xmlLang();
+		// `selfClosingTags` is what makes an XHTML response (`application/xhtml+xml`)
+		// parse correctly, and `<script>`/`<style>` bodies are highlighted by the CSS and
+		// JS parsers this language already carries. `autoCloseTags` only writes text, so
+		// the read-only response editor never needs it.
+		if (lang === 'html') return htmlLang({ selfClosingTags: true, autoCloseTags: false });
 		return [];
 	}
 

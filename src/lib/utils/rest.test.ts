@@ -9,6 +9,7 @@ import {
 	buildRawResponse,
 	byteLength,
 	describeCharacter,
+	detectLanguageFromContentType,
 	detectLanguageFromHeaders,
 	filenameFromDisposition,
 	encodeForm,
@@ -340,6 +341,28 @@ describe('response helpers', () => {
 		);
 		expect(detectLanguageFromHeaders([], '{"a":1}')).toBe('json');
 		expect(detectLanguageFromHeaders([], '<root/>')).toBe('xml');
+	});
+
+	it('reads every HTML-flavoured content type as HTML', () => {
+		for (const type of [
+			'text/html; charset=utf-8',
+			'application/xhtml+xml',
+			'application/xhtml',
+			'text/x-html'
+		]) {
+			expect(detectLanguageFromContentType(type)).toBe('html');
+		}
+		// XHTML never falls through to the XML test, and markup that is not HTML does.
+		expect(detectLanguageFromContentType('application/atom+xml')).toBe('xml');
+	});
+
+	it('sniffs an HTML document from its tag or its doctype', () => {
+		expect(detectLanguageFromHeaders([], '<!DOCTYPE html><html><body>hi</body></html>')).toBe(
+			'html'
+		);
+		expect(detectLanguageFromHeaders([], '<!doctype html>')).toBe('html');
+		expect(detectLanguageFromHeaders([], '<!DOCTYPE html>')).toBe('html');
+		expect(detectLanguageFromHeaders([], '<soap:Envelope/>')).toBe('xml');
 	});
 
 	it('builds a raw request preview with default headers', () => {

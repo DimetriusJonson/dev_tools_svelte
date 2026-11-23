@@ -1179,7 +1179,7 @@
 								{:else}
 									<CodeMirrorEditor
 										value={responseText}
-										language={responseLanguage === 'html' ? 'text' : (responseLanguage ?? 'text')}
+										language={responseLanguage ?? 'text'}
 										dark={dark}
 										readonly={true}
 										ariaLabel={$t('wsdl.response')}
