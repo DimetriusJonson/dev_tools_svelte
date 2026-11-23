@@ -222,6 +222,9 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-22.04
+    # `publish` needs the release id: a draft is not resolvable by tag name.
+    outputs:
+      release_id: ${{ steps.release.outputs.id }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -301,19 +304,44 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_ID: ${{ needs.manifest.outputs.release_id }}
     steps:
       # The builds upload to a draft on purpose: published too early, a release
       # would be "latest" while the other platforms' bundles are still missing,
       # and a client on that OS would download nothing. `releases/latest` moves
-      # only when this step runs.
+      # only when this job runs.
+      #
+      # Everything here addresses the release by its id, which `manifest` read
+      # from the release list: `gh release edit <tag>` and
+      # `GET /repos/{owner}/{repo}/releases/tags/{tag}` see published releases
+      # only, so pointing them at the draft answers "release not found" and the
+      # publish step dies in seconds.
       #
       # Re-running this workflow for a tag that is already published fails on
       # purpose — `releaseDraft: true` makes tauri-action refuse to attach to a
       # published release. Cut a new version instead.
-      - name: Publish and mark as latest
+      - name: The manifest job reported a release
         run: |
           set -euo pipefail
-          gh release edit "$GITHUB_REF_NAME" --draft=false --latest=true
+          if [ -z "$RELEASE_ID" ]; then
+            echo "::error::no release id came from the manifest job — nothing to publish"
+            exit 1
+          fi
+          echo "publishing release $RELEASE_ID for $GITHUB_REF_NAME"
+
+      - name: Publish the draft
+        run: |
+          set -euo pipefail
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            -F draft=false --jq '{tag: .tag_name, draft: .draft, prerelease: .prerelease, published: .published_at}'
+
+      - name: Mark as latest
+        run: |
+          set -euo pipefail
+          # `make_latest` rejects a draft or a prerelease, so it goes in only
+          # after the release is published.
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            -F make_latest=true --jq '{tag: .tag_name, draft: .draft, prerelease: .prerelease}'
 
       - name: The updater endpoint resolves
         run: |
