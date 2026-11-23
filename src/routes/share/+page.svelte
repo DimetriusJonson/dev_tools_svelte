@@ -36,7 +36,7 @@
 	let interfaces = $state<NetworkInterface[]>([]);
 	let server = $state('');
 	let serverStatus = $state<ShareServerStatus | null>(null);
-	let mode = $state<'file' | 'content'>('file');
+	let mode = $state<'file' | 'content' | 'link'>('file');
 	let selectedPath = $state<string | null>(null);
 	let selectedName = $state('');
 	let content = $state('');
@@ -68,6 +68,12 @@
 	const retentionOptions = $derived(
 		RETENTION_OPTIONS.map((code) => ({ code, label: $t(`share.retention.${code}`) }))
 	);
+
+	// The "Link" tab exists only while there is an upload to show: picking a new file or a
+	// failed upload drops the result, so the page returns to the tab the user was working in.
+	$effect(() => {
+		if (!result && mode === 'link') mode = 'file';
+	});
 
 	function setRetention(value: string): void {
 		retention = normalizeRetention(value);
@@ -130,6 +136,7 @@
 		result = null;
 		try {
 			result = await uploadShareFile(path, server, retention);
+			if (result) mode = 'link';
 		} catch (error) {
 			flashError(String(error));
 		} finally {
@@ -166,6 +173,7 @@
 		try {
 			const name = contentName.trim() || 'snippet.txt';
 			result = await uploadShareContent(content, name, contentType, server, retention);
+			if (result) mode = 'link';
 		} catch (error) {
 			flashError(String(error));
 		} finally {
@@ -188,7 +196,11 @@
 		let unlistenDragDrop: (() => void) | undefined;
 
 		(async () => {
-			if (!desktop) return;
+			if (!desktop) {
+				// The browser build has nothing to load, so the "Starting share server…" line must not stay up.
+				loading = false;
+				return;
+			}
 			try {
 				const [availableInterfaces, status] = await Promise.all([
 					listShareInterfaces(),
@@ -330,6 +342,7 @@
 					<div class="flex gap-2">
 						<button
 							type="button"
+							aria-pressed={mode === 'file'}
 							onclick={() => (mode = 'file')}
 							class="rounded-full px-4 py-2 text-sm font-bold transition-all duration-150 active:scale-95 {mode === 'file'
 								? 'bg-[var(--accent)] text-[var(--accent-text)]'
@@ -339,6 +352,7 @@
 						</button>
 						<button
 							type="button"
+							aria-pressed={mode === 'content'}
 							onclick={() => (mode = 'content')}
 							class="rounded-full px-4 py-2 text-sm font-bold transition-all duration-150 active:scale-95 {mode === 'content'
 								? 'bg-[var(--accent)] text-[var(--accent-text)]'
@@ -346,23 +360,40 @@
 						>
 							{$t('share.contentMode')}
 						</button>
+						{#if result}
+							<button
+								type="button"
+								aria-pressed={mode === 'link'}
+								onclick={() => (mode = 'link')}
+								class="rounded-full px-4 py-2 text-sm font-bold transition-all duration-150 active:scale-95 {mode === 'link'
+									? 'bg-[var(--accent)] text-[var(--accent-text)]'
+									: 'bg-[var(--secondary-bg)] text-[var(--secondary-text)]'}"
+							>
+								{$t('share.linkMode')}
+							</button>
+						{/if}
 					</div>
-					<label class="flex w-44 flex-col gap-1.5 text-xs font-bold text-[var(--text-muted)]">
-						{$t('share.retention')}
-						<select
-							value={retention}
-							onchange={(event) => setRetention((event.currentTarget as HTMLSelectElement).value)}
-							class="h-10 rounded-lg border border-[var(--border-strong)] bg-[var(--app-bg)] px-3 text-sm font-semibold text-[var(--text)] outline-none transition-colors duration-150 hover:border-[var(--accent)] focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
-						>
-							{#each retentionOptions as option (option.code)}
-								<option value={option.code}>{option.label}</option>
-							{/each}
-						</select>
-					</label>
+					{#if mode !== 'link'}
+						<label class="flex w-44 flex-col gap-1.5 text-xs font-bold text-[var(--text-muted)]">
+							{$t('share.retention')}
+							<select
+								id="share-retention"
+								value={retention}
+								onchange={(event) => setRetention((event.currentTarget as HTMLSelectElement).value)}
+								class="h-10 rounded-lg border border-[var(--border-strong)] bg-[var(--app-bg)] px-3 text-sm font-semibold text-[var(--text)] outline-none transition-colors duration-150 hover:border-[var(--accent)] focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+							>
+								{#each retentionOptions as option (option.code)}
+									<option value={option.code}>{option.label}</option>
+								{/each}
+							</select>
+						</label>
+					{/if}
 				</div>
-				<p class="-mt-2 mb-4 text-xs leading-relaxed text-[var(--text-muted)]">
-					{retention === 'none' ? $t('share.memoryHint') : $t('share.retentionHint')}
-				</p>
+				{#if mode !== 'link'}
+					<p class="-mt-2 mb-4 text-xs leading-relaxed text-[var(--text-muted)]">
+						{retention === 'none' ? $t('share.memoryHint') : $t('share.retentionHint')}
+					</p>
+				{/if}
 
 				{#if mode === 'file'}
 					<div class="grid gap-3">
@@ -407,7 +438,7 @@
 							</button>
 						</div>
 					</div>
-				{:else}
+				{:else if mode === 'content'}
 					<div class="grid gap-3">
 						<div class="grid gap-3 sm:grid-cols-[minmax(0,1fr)_160px]">
 							<label class="flex flex-col gap-1.5 text-xs font-bold text-[var(--text-muted)]">
@@ -460,48 +491,44 @@
 							</button>
 						</div>
 					</div>
+				{:else if result}
+					<div class="fade-in grid gap-3">
+						<div class="flex items-center gap-2 text-sm font-bold text-[var(--text)]">
+							<Icon name="check" size={18} strokeWidth={3} class="text-emerald-500" />
+							{$t('share.ready')}
+						</div>
+						<div class="flex flex-col gap-2 sm:flex-row">
+							<input
+								readonly
+								value={result.link}
+								class="h-11 min-w-0 flex-1 rounded-lg border border-[var(--border-strong)] bg-[var(--app-bg)] px-3 text-sm font-semibold text-[var(--text)] outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+								aria-label={$t('share.link')}
+								onfocus={(event) => (event.currentTarget as HTMLInputElement).select()}
+							/>
+							<button
+								type="button"
+								onclick={copyLink}
+								class="inline-flex h-11 shrink-0 items-center justify-center gap-2 rounded-full bg-[var(--accent)] px-5 text-sm font-bold text-[var(--accent-text)] transition-all duration-150 hover:scale-105 hover:bg-[var(--accent-hover)] active:scale-95"
+							>
+								<Icon name={copied ? 'check' : 'copy'} size={17} strokeWidth={copied ? 3 : 2} />
+								{copied ? $t('common.copied') : $t('share.copyLink')}
+							</button>
+						</div>
+						<p class="text-xs text-[var(--text-muted)]">
+							{$t('share.linkHint', { size: formatBytes(result.size) })}
+						</p>
+						<p class="text-xs font-medium text-[var(--text-muted)]">
+							{#if !result.stored}
+								{$t('share.memoryHint')}
+							{:else if result.expires_at}
+								{$t('share.expiresAt', { date: result.expires_at })}
+							{:else}
+								{$t('share.storedForever')}
+							{/if}
+						</p>
+					</div>
 				{/if}
 			</section>
-
-			{#if result}
-				<section
-					class="fade-in rounded-2xl border border-[var(--accent)]/40 bg-[var(--panel-bg)] p-5 shadow-[var(--shadow)]"
-				>
-					<div class="mb-2 flex items-center gap-2 text-sm font-bold text-[var(--text)]">
-						<Icon name="check" size={18} strokeWidth={3} class="text-emerald-500" />
-						{$t('share.ready')}
-					</div>
-					<div class="flex flex-col gap-2 sm:flex-row">
-						<input
-							readonly
-							value={result.link}
-							class="h-11 min-w-0 flex-1 rounded-lg border border-[var(--border-strong)] bg-[var(--app-bg)] px-3 text-sm font-semibold text-[var(--text)] outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
-							aria-label={$t('share.link')}
-							onfocus={(event) => (event.currentTarget as HTMLInputElement).select()}
-						/>
-						<button
-							type="button"
-							onclick={copyLink}
-							class="inline-flex h-11 shrink-0 items-center justify-center gap-2 rounded-full bg-[var(--accent)] px-5 text-sm font-bold text-[var(--accent-text)] transition-all duration-150 hover:scale-105 hover:bg-[var(--accent-hover)] active:scale-95"
-						>
-							<Icon name={copied ? 'check' : 'copy'} size={17} strokeWidth={copied ? 3 : 2} />
-							{copied ? $t('common.copied') : $t('share.copyLink')}
-						</button>
-					</div>
-					<p class="mt-2 text-xs text-[var(--text-muted)]">
-						{$t('share.linkHint', { size: formatBytes(result.size) })}
-					</p>
-					<p class="mt-1 text-xs font-medium text-[var(--text-muted)]">
-						{#if !result.stored}
-							{$t('share.memoryHint')}
-						{:else if result.expires_at}
-							{$t('share.expiresAt', { date: result.expires_at })}
-						{:else}
-							{$t('share.storedForever')}
-						{/if}
-					</p>
-				</section>
-			{/if}
 		{/if}
 
 		{#if loading}
