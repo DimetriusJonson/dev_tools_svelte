@@ -70,6 +70,10 @@ struct Field {
     /// `true` for attributes, which print inline on the parent tag.
     attribute: bool,
     nillable: bool,
+    /// Text the element carries beside its attributes: a `simpleContent` extension
+    /// of a simple type has attributes *and* a value. `None` for markup that has
+    /// no text of its own.
+    text: Option<String>,
 }
 
 /// What a resolved declaration contributes to the template.
@@ -91,9 +95,9 @@ enum Kind {
 struct Definition {
     type_name: String,
     kind: Kind,
-    /// True when the declaration can carry text, which is how a type with simple
-    /// content is recognized.
-    has_text: bool,
+    /// Text a type carries alongside attributes, taken from the base of a
+    /// `simpleContent` extension. Markup without a value of its own is `None`.
+    text: Option<String>,
 }
 
 impl Definition {
@@ -101,7 +105,7 @@ impl Definition {
         Definition {
             type_name: type_name.to_string(),
             kind: Kind::Unknown,
-            has_text: false,
+            text: None,
         }
     }
 
@@ -111,17 +115,27 @@ impl Definition {
             kind: Kind::Leaf {
                 sample: sample.to_string(),
             },
-            has_text: true,
+            // A leaf prints its sample from `kind`; `text` is only the value a
+            // composite carries beside its attributes.
+            text: None,
         }
     }
 
-    fn composite(type_name: &str, fields: Vec<Field>) -> Definition {
+    fn composite(type_name: &str, fields: Vec<Field>, text: Option<String>) -> Definition {
         Definition {
             type_name: type_name.to_string(),
             kind: Kind::Composite { fields },
-            has_text: false,
+            text,
         }
     }
+}
+
+/// What a `complexContent`/`simpleContent` block contributes: the type named on
+/// `base` plus the attributes and the content model the derivation itself adds.
+struct Derivation {
+    base: Option<Definition>,
+    attributes: Vec<Field>,
+    content: Vec<Field>,
 }
 
 /// What a local declaration of a schema means namespace-wise. `elementFormDefault`
@@ -428,7 +442,7 @@ impl<'a> Walk<'a> {
         Some(Definition {
             type_name: name,
             kind: found.kind,
-            has_text: found.has_text,
+            text: found.text,
         })
     }
 
@@ -438,7 +452,7 @@ impl<'a> Walk<'a> {
         let dom = self.dom;
         let mut fields = self.attributes_of(node, context, depth);
         let mut content = Vec::new();
-        let mut base = None;
+        let mut derivation: Option<Derivation> = None;
 
         for child in dom.children(node) {
             if !is_xsd_ns(dom.uri(*child)) {
@@ -448,38 +462,59 @@ impl<'a> Walk<'a> {
                 "sequence" | "all" => content.extend(self.composite(*child, context, depth)),
                 "choice" => content.extend(self.choice(*child, context, depth)),
                 "complexContent" | "simpleContent" => {
-                    base = self.derivation(*child, context, depth)
+                    derivation = self.derivation(*child, context, depth)
                 }
                 _ => {}
             }
         }
 
         let name = get_attr(dom, node, "name").unwrap_or_default();
-        if let Some(definition) = base {
-            match definition.kind {
-                Kind::Composite { fields: inherited } => fields.extend(inherited),
-                Kind::Choice { branches } => {
-                    content.push(choice_field(branches, Occurs::default()))
-                }
-                Kind::Unknown => self.note(&format!("unknown-type:{}", definition.type_name)),
-                Kind::Leaf { sample } => {
-                    if fields.is_empty() {
-                        return Some(Definition::leaf(&definition.type_name, &sample));
+        let mut text: Option<String> = None;
+
+        if let Some(Derivation {
+            base,
+            attributes,
+            content: added,
+        }) = derivation
+        {
+            match base {
+                Some(definition) => match definition.kind {
+                    // The base's markup comes first: an extension appends what it
+                    // declares after it. A restriction that cuts the base is only
+                    // over-generated here, which is what a starting point means —
+                    // the user edits the block out rather than losing the base.
+                    Kind::Composite { fields: inherited } => {
+                        fields.extend(inherited);
+                        fields.extend(added);
+                        text = definition.text;
                     }
-                    return Some(Definition {
-                        type_name: definition.type_name.clone(),
-                        kind: Kind::Composite { fields },
-                        has_text: true,
-                    });
-                }
+                    Kind::Choice { branches } => {
+                        content.push(choice_field(branches, Occurs::default()));
+                        content.extend(added);
+                    }
+                    Kind::Unknown => self.note(&format!("unknown-type:{}", definition.type_name)),
+                    Kind::Leaf { sample } => {
+                        if fields.is_empty()
+                            && attributes.is_empty()
+                            && content.is_empty()
+                            && added.is_empty()
+                        {
+                            return Some(Definition::leaf(&definition.type_name, &sample));
+                        }
+                        text = Some(sample);
+                        content.extend(added);
+                    }
+                },
+                None => content.extend(added),
             }
+            fields.extend(attributes);
         }
 
         fields.extend(content);
         if fields.is_empty() {
             return Some(Definition::leaf(&name, ""));
         }
-        Some(Definition::composite(&name, fields))
+        Some(Definition::composite(&name, fields, text))
     }
 
     /// A `choice` becomes a single field holding every branch, so the template can
@@ -493,8 +528,11 @@ impl<'a> Walk<'a> {
     }
 
     /// Follows the `base` of an `xsd:extension` or `xsd:restriction` written
-    /// inside `complexContent`/`simpleContent`.
-    fn derivation(&mut self, node: usize, _context: &Context, depth: u8) -> Option<Definition> {
+    /// inside `complexContent`/`simpleContent`, and collects what the derivation
+    /// itself adds: attributes and a content model of its own. Reading only the
+    /// `base` would drop the added markup, which is where a derived request type
+    /// loses the body element it declares over its base.
+    fn derivation(&mut self, node: usize, context: &Context, depth: u8) -> Option<Derivation> {
         let dom = self.dom;
         for child in dom.children(node) {
             if !is_xsd_ns(dom.uri(*child)) {
@@ -503,8 +541,27 @@ impl<'a> Walk<'a> {
             if !matches!(dom.local(*child), "extension" | "restriction") {
                 continue;
             }
-            let (uri, local) = get_reference(dom, *child, "base")?;
-            return self.resolve(&uri, &local, depth + 1);
+            let base = get_reference(dom, *child, "base").and_then(|(uri, local)| {
+                match builtin_leaf(&uri, &local) {
+                    // A derivation of a built-in type is a leaf with a sample, so
+                    // resolving it as a global declaration would report a type the
+                    // XSD namespace defines as unknown.
+                    Some(leaf) => Some(Definition::leaf(&leaf.type_name, &leaf.sample)),
+                    None => self.resolve(&uri, &local, depth + 1),
+                }
+            });
+            // The base first: it is the shorter half of a derivation, so spending
+            // the element budget on a deep body before reaching it would leave the
+            // requisites of the base type out of an otherwise long template.
+            let attributes = self.attributes_of(*child, context, depth);
+            // The derivation's own group children, in the namespace of the schema
+            // that writes them rather than that of the base.
+            let content = self.composite(*child, context, depth + 1);
+            return Some(Derivation {
+                base,
+                attributes,
+                content,
+            });
         }
         None
     }
@@ -562,6 +619,7 @@ impl<'a> Walk<'a> {
             },
             attribute: true,
             nillable: false,
+            text: None,
         })
     }
 
@@ -598,6 +656,7 @@ impl<'a> Walk<'a> {
                         occurs: occurs(dom, *child),
                         attribute: false,
                         nillable: false,
+                        text: None,
                     });
                 }
                 _ => {}
@@ -624,6 +683,7 @@ impl<'a> Walk<'a> {
                 occurs: occurs(dom, node),
                 attribute: false,
                 nillable: get_attr(dom, node, "nillable").as_deref() == Some("true"),
+                text: found.text,
             });
         }
 
@@ -650,6 +710,7 @@ impl<'a> Walk<'a> {
             occurs: occurs(dom, node),
             attribute: false,
             nillable: get_attr(dom, node, "nillable").as_deref() == Some("true"),
+            text: found.text,
         })
     }
 
@@ -690,6 +751,7 @@ fn choice_field(branches: Vec<Field>, occurs: Occurs) -> Field {
         occurs,
         attribute: false,
         nillable: false,
+        text: None,
     }
 }
 
@@ -1024,7 +1086,12 @@ impl Printer {
                     .flat_map(|child| self.entry(child, indent + 1))
                     .collect();
                 if children.is_empty() {
-                    lines.push(format!("{pad}<{tag}{attributes}></{tag}>"));
+                    // Only attributes here: a type derived from a simple one by
+                    // `simpleContent` has attributes *and* a value to write.
+                    match &field.text {
+                        Some(text) => lines.push(format!("{pad}<{tag}{attributes}>{text}</{tag}>")),
+                        None => lines.push(format!("{pad}<{tag}{attributes}></{tag}>")),
+                    }
                 } else {
                     lines.push(format!("{pad}<{tag}{attributes}>"));
                     lines.extend(children);
@@ -1121,6 +1188,7 @@ pub fn body_template(
         occurs: Occurs::default(),
         attribute: false,
         nillable: get_attr(dom, node, "nillable").as_deref() == Some("true"),
+        text: found.text,
     };
 
     let mut uris = Vec::new();
@@ -1216,17 +1284,14 @@ mod tests {
   </wsdl:service>
 </wsdl:definitions>"#;
 
-    fn template_of(source: &str) -> String {
+    fn template_for(source: &str, uri: &str, local: &str) -> String {
         let parsed = parse_wsdl(source).expect("wsdl");
         let index = XsdIndex::build(&parsed.dom);
-        body_template(
-            &parsed.dom,
-            &index,
-            parsed.dom.root(),
-            "http://nemo-ibe.com/Avia",
-            "CloseSession",
-        )
-        .xml
+        body_template(&parsed.dom, &index, parsed.dom.root(), uri, local).xml
+    }
+
+    fn template_of(source: &str) -> String {
+        template_for(source, "http://nemo-ibe.com/Avia", "CloseSession")
     }
 
     #[test]
@@ -1367,5 +1432,169 @@ mod tests {
             1,
             "{xml}"
         );
+    }
+
+    /// A derived request type of the shape a real WSDL writes: a wrapper that
+    /// extends a base requisites type and adds a body element of another
+    /// namespace over it, plus a restriction and a `simpleContent` extension.
+    const DERIVED: &str = r#"<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+      xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+      xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+      xmlns:tns="http://nemo-ibe.com/Avia"
+      xmlns:ns1="http://nemo-ibe.com/STL"
+      targetNamespace="http://nemo-ibe.com/Avia">
+  <wsdl:types>
+    <xsd:schema targetNamespace="http://nemo-ibe.com/Avia" elementFormDefault="qualified">
+      <xsd:element name="Search">
+        <xsd:complexType>
+          <xsd:sequence>
+            <xsd:element name="Request" type="ns1:RequestWithBody" minOccurs="0" nillable="true"/>
+            <xsd:element name="Limited" type="ns1:LimitedRequest" minOccurs="0"/>
+          </xsd:sequence>
+        </xsd:complexType>
+      </xsd:element>
+    </xsd:schema>
+    <xsd:schema targetNamespace="http://nemo-ibe.com/STL" elementFormDefault="qualified">
+      <xsd:complexType name="BaseRequest">
+        <xsd:sequence>
+          <xsd:element name="Requisites" type="xsd:string" minOccurs="0"/>
+          <xsd:element name="UserID" type="xsd:int"/>
+        </xsd:sequence>
+      </xsd:complexType>
+      <xsd:complexType name="RequestWithBody">
+        <xsd:complexContent>
+          <xsd:extension base="ns1:BaseRequest">
+            <xsd:sequence>
+              <xsd:element name="RequestBody" type="ns1:SearchBody" nillable="true"/>
+            </xsd:sequence>
+          </xsd:extension>
+        </xsd:complexContent>
+      </xsd:complexType>
+      <xsd:complexType name="SearchBody">
+        <xsd:sequence>
+          <xsd:element name="FlightRef" type="xsd:string" minOccurs="0"/>
+        </xsd:sequence>
+      </xsd:complexType>
+      <xsd:complexType name="LimitedRequest">
+        <xsd:complexContent>
+          <xsd:restriction base="ns1:BaseRequest">
+            <xsd:attribute name="Version" type="xsd:string"/>
+          </xsd:restriction>
+        </xsd:complexContent>
+      </xsd:complexType>
+      <xsd:complexType name="Amount">
+        <xsd:simpleContent>
+          <xsd:extension base="xsd:decimal">
+            <xsd:attribute name="Currency" type="xsd:string" use="required"/>
+          </xsd:extension>
+        </xsd:simpleContent>
+      </xsd:complexType>
+      <xsd:element name="Total" type="ns1:Amount"/>
+    </xsd:schema>
+  </wsdl:types>
+  <wsdl:message name="SearchInput">
+    <wsdl:part name="body" element="tns:Search"/>
+  </wsdl:message>
+  <wsdl:portType name="AviaPortType">
+    <wsdl:operation name="Search">
+      <wsdl:input message="tns:SearchInput"/>
+    </wsdl:operation>
+  </wsdl:portType>
+  <wsdl:binding name="AviaBinding" type="tns:AviaPortType">
+    <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <wsdl:operation name="Search">
+      <soap:operation soapAction="urn:Search" style="document"/>
+      <wsdl:input><soap:body use="literal"/></wsdl:input>
+    </wsdl:operation>
+  </wsdl:binding>
+  <wsdl:service name="AviaService">
+    <wsdl:port name="AviaPort" binding="tns:AviaBinding">
+      <soap:address location="http://127.0.0.1:9000/soap"/>
+    </wsdl:port>
+  </wsdl:service>
+</wsdl:definitions>"#;
+
+    fn derived_template() -> String {
+        template_for(DERIVED, "http://nemo-ibe.com/Avia", "Search")
+    }
+
+    #[test]
+    fn adds_the_elements_a_complex_extension_declares_over_its_base() {
+        let xml = derived_template();
+        // The base contributes its fields first, the extension then its own body.
+        let requisites = xml.find("ns1:Requisites").expect("base field");
+        let user_id = xml.find("ns1:UserID").expect("base field");
+        let body = xml.find("ns1:RequestBody").expect("added element");
+        assert!(requisites < user_id, "{xml}");
+        assert!(user_id < body, "{xml}");
+        // The added element keeps the namespace of the schema that declares it.
+        assert!(
+            xml.contains(r#"xmlns:ns1="http://nemo-ibe.com/STL""#),
+            "{xml}"
+        );
+        assert!(
+            xml.contains(
+                "<!-- ns1:RequestBody is nillable: write xsi:nil=\"true\" to send no value -->"
+            ),
+            "{xml}"
+        );
+        assert!(
+            xml.find("ns1:FlightRef").expect("nested body field") > body,
+            "{xml}"
+        );
+    }
+
+    #[test]
+    fn keeps_the_base_of_a_restriction_and_the_attributes_it_adds() {
+        let xml = derived_template();
+        let limited = xml
+            .find("tns:Limited")
+            .expect("the restricted element is printed");
+        let block = &xml[limited..];
+        // A restriction repeats what it allows, so the base fields stay visible.
+        assert!(block.contains("ns1:Requisites"), "{block}");
+        assert!(block.contains("ns1:UserID"), "{block}");
+        assert!(
+            xml.contains(r#"<!-- optional attribute Version="text" -->"#),
+            "{xml}"
+        );
+    }
+
+    #[test]
+    fn prints_the_value_and_the_attributes_of_a_simple_extension() {
+        let xml = template_for(DERIVED, "http://nemo-ibe.com/STL", "Total");
+        assert!(xml.contains(r#"<ns1:Total Currency="text"#), "{xml}");
+        assert!(xml.contains(">0</ns1:Total>"), "{xml}");
+    }
+
+    #[test]
+    fn does_not_report_a_built_in_base_as_an_unknown_type() {
+        let parsed = parse_wsdl(DERIVED).expect("wsdl");
+        let index = XsdIndex::build(&parsed.dom);
+        let out = body_template(
+            &parsed.dom,
+            &index,
+            parsed.dom.root(),
+            "http://nemo-ibe.com/STL",
+            "Total",
+        );
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    }
+
+    #[test]
+    fn prints_a_derived_template_that_reads_as_xml() {
+        build_dom(&derived_template()).expect("template is well-formed markup");
+        build_dom(&template_for(DERIVED, "http://nemo-ibe.com/STL", "Total"))
+            .expect("template is well-formed markup");
+    }
+
+    #[test]
+    fn prints_one_comment_per_line_for_a_derived_template() {
+        for line in derived_template().lines() {
+            assert!(line.matches("<!--").count() <= 1, "nested markers: {line}");
+            assert!(line.matches("-->").count() <= 1, "nested markers: {line}");
+            assert!(!line.contains("<!- -"), "softened opener: {line}");
+            assert!(!line.contains("- ->"), "softened closer: {line}");
+        }
     }
 }
