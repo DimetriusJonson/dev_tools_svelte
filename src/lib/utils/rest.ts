@@ -1085,13 +1085,152 @@ function splitFormParameters(raw: string): { value: string; filename: string } {
 	return { value, filename };
 }
 
+/**
+ * cmd.exe escapes every special character with a caret, so Chrome's "Copy as cURL
+ * (cmd)" wraps each argument in `^"…^"` and writes `^$`, `^|`, `^(`, `^ ` as well.
+ * A caret before a double quote is the marker, and it is only looked for outside
+ * POSIX single-quoted arguments, where a caret is literal text.
+ */
+function usesCmdCaretQuoting(command: string): boolean {
+	let inSingleQuote = false;
+	for (let index = 0; index < command.length; index += 1) {
+		const char = command[index];
+		if (inSingleQuote) {
+			if (char === "'") inSingleQuote = false;
+			continue;
+		}
+		if (char === "'") {
+			inSingleQuote = true;
+			continue;
+		}
+		if (char === '^' && command[index + 1] === '"') return true;
+	}
+	return false;
+}
+
+/** Boundary of a `multipart/form-data; boundary=…` value, without its quotes. */
+function contentTypeBoundary(contentType: string): string {
+	const value = /boundary=([^;]+)/i.exec(contentType)?.[1] ?? '';
+	return value.trim().replace(/^"|"$/g, '');
+}
+
+/** `name="…"` or `name=…` of a part header line; `filename` cannot match `name`. */
+function partAttribute(headerText: string, attribute: string): string {
+	const quoted = new RegExp(`\\b${attribute}="([^"]*)"`, 'i').exec(headerText);
+	if (quoted) return quoted[1];
+	return new RegExp(`\\b${attribute}=([^;\\s]+)`, 'i').exec(headerText)?.[1] ?? '';
+}
+
+interface MultipartBodyParts {
+	fields: RestProperty[];
+	files: RestFileRow[];
+}
+
+// A dumped break, together with the indentation a continuation line carries with it:
+// cmd.exe escapes a break as `^` + break and the joiner of a multi-line command adds
+// two spaces, so one payload break can reach the parser as two breaks and start the
+// next line with spaces. `LEADING_FRAMING` eats that run at the start of a chunk,
+// `BLANK_LINE` finds the header separator through it, and `TRAILING_FRAMING` removes it
+// before the next delimiter — a leftover `\r` inside a value is exactly what
+// `validateMultipartValue` reports.
+const LEADING_FRAMING = /^(?:[\r\n][ \t]*)+/;
+const BLANK_LINE = /[\r\n][ \t]*[\r\n]/;
+const TRAILING_FRAMING = /[ \t]*(?:[\r\n][ \t]*)+$/;
+
+/**
+ * Splits a `multipart/form-data` payload that an exporter put into `--data-raw` back
+ * into parts. `boundaryHint` may be empty: then the boundary is read from the first
+ * delimiter line. A body with no delimiter, or with no `Content-Disposition` part, is
+ * not a multipart dump and answers `null` so the caller keeps it as text.
+ *
+ * A part with `filename` cannot carry its bytes through a command line, so it becomes
+ * a file row without a path: `validateFileRows` then reports `file-missing` instead of
+ * sending an empty part.
+ */
+function parseMultipartBody(boundaryHint: string, body: string): MultipartBodyParts | null {
+	if (!body.trim()) return null;
+	const boundary =
+		contentTypeBoundary(boundaryHint) || (/^--([^\r\n]+)/.exec(body)?.[1] ?? '');
+	if (!boundary || !body.includes(`--${boundary}`)) return null;
+
+	const fields: RestProperty[] = [];
+	const files: RestFileRow[] = [];
+	// Everything before the first delimiter is a preamble, and the chunk after the
+	// closing `--boundary--` starts with the remaining `--`.
+	for (const chunk of body.split(`--${boundary}`).slice(1)) {
+		const text = chunk.replace(LEADING_FRAMING, '');
+		if (!text || text.startsWith('--')) break;
+		const headerEnd = text.search(BLANK_LINE);
+		if (headerEnd < 0) continue;
+		const headerText = text.slice(0, headerEnd);
+		// Only the `Content-Disposition` line carries the part's names: the parameter
+		// runs to the next `;` or to the end of that line, so `Content-Type` below it
+		// must not be swallowed into the file name.
+		const disposition = /content-disposition:[^\r\n]*/i.exec(headerText)?.[0] ?? '';
+		if (!/form-data/i.test(disposition)) continue;
+		const name = partAttribute(disposition, 'name');
+		if (!name) continue;
+		// The value is whatever sits between the blank line and the next delimiter; the
+		// framing runs around it belong to the dump, not to the part.
+		const value = text.slice(headerEnd).replace(LEADING_FRAMING, '').replace(TRAILING_FRAMING, '');
+		const filename = filenameFromDisposition(disposition);
+		if (filename) files.push({ name, path: '', filename });
+		else fields.push({ name, value });
+	}
+	return fields.length || files.length ? { fields, files } : null;
+}
+
+/** Strips cmd.exe's caret escaping and the doubled `%` of a batch file. */
+function unescapeCmdText(text: string): string {
+	return text
+		.replace(/\^([\s\S])/g, (_, char: string) => char)
+		.replace(/%%/g, '%');
+}
+
+/**
+ * Chrome's "Copy as cURL (cmd)" writes a multipart payload *after* an empty
+ * `--data-raw "^"`: the dump continues on the following lines, each closed by the `^`
+ * that joins the next line and indented like the arguments. Tokenizing cannot carry it
+ * — a delimiter line starts with `-`, so it reads as an unknown flag — so the dump is
+ * rebuilt from the raw text instead: de-escape the cmd carets first, then drop the
+ * indent and the joiner's trailing blanks from every line. Only a placeholder argument
+ * (`""`) opens that region, so a command whose body really fits in one argument never
+ * loses it.
+ */
+function cmdWrappedPayload(command: string): string | null {
+	const flag = /(?:^|\s)(?:--data(?:-raw|-binary|-ascii)?|-d)[ \t]+(\S+)/g;
+	let tail = '';
+	let match: RegExpExecArray | null;
+	while ((match = flag.exec(command))) {
+		// `""`, `"^"` and `^"^"` all mean "the payload follows on its own lines".
+		if (match[1].replace(/[\^"']/g, '')) continue;
+		tail = command.slice(match.index + match[0].length);
+	}
+	if (!tail.trim()) return null;
+	const lines = unescapeCmdText(tail)
+		.split(/\r\n|\r|\n/)
+		.map((line) => line.replace(/^[ \t]+/, '').replace(/[ \t]+$/, ''));
+	while (lines.length && lines[0] === '') lines.shift();
+	while (lines.length && lines[lines.length - 1] === '') lines.pop();
+	return lines.length > 1 ? lines.join('\r\n') : null;
+}
+
 export function parseCurl(command: string): ParsedCurl | null {
-	let normalized = command.replace(/\\\r?\n|\^\r?\n/g, ' ');
+	// A caret-quoted command keeps its own line breaks: inside a quoted argument cmd
+	// escapes a break as `^` + break, and dropping the caret alone preserves the body.
+	// Every other flavor folds a line continuation into a space instead.
+	const caretQuoted = usesCmdCaretQuoting(command);
+	let normalized = command.replace(/\\\r?\n/g, ' ');
+	if (!caretQuoted) normalized = normalized.replace(/\^\r?\n/g, ' ');
 	// Windows commands quote arguments either plainly (`"value"`) or with a caret
-	// (`^"value^"`), and batch files double `%`. Detect curl.exe so the normalization
-	// never touches POSIX commands that keep carets or percent signs literally.
+	// (`^"value^"`), and batch files double `%`. A caret before a quote covers the
+	// browser's cmd.exe flavor, whose arguments are fully caret-escaped; a plain
+	// `curl.exe` command only loses its quoting carets, so literal carets in values
+	// survive. POSIX commands never enter either branch.
 	const firstWord = normalized.trimStart().split(/\s+/)[0] ?? '';
-	if (firstWord.toLowerCase().endsWith('curl.exe')) {
+	if (caretQuoted) {
+		normalized = unescapeCmdText(normalized);
+	} else if (firstWord.toLowerCase().endsWith('curl.exe')) {
 		normalized = normalized.replace(/\^"/g, '"').replace(/%%/g, '%');
 	}
 	const tokens = tokenizeCurl(normalized);
@@ -1224,9 +1363,20 @@ export function parseCurl(command: string): ParsedCurl | null {
 	if (!url.trim()) return null;
 
 	const rawBody = bodyParts.join('&');
+	// A browser export puts the whole multipart body into `--data-raw`, so the payload
+	// itself is the source of the `Form` tables, not only `-F` flags.
+	let embedded = rawBody ? parseMultipartBody(getHeader(headers, 'content-type'), rawBody) : null;
+	if (!embedded && caretQuoted) {
+		const wrapped = cmdWrappedPayload(command);
+		if (wrapped) embedded = parseMultipartBody(getHeader(headers, 'content-type'), wrapped);
+	}
+	if (embedded) {
+		multipart.push(...embedded.fields);
+		files.push(...embedded.files);
+	}
 	const hasFormParts = multipart.length > 0 || files.length > 0;
 	// curl sends `-d` together with `-F` as extra parts of the same multipart body.
-	if (hasFormParts && rawBody) multipart.push(...parseForm(rawBody));
+	if (hasFormParts && rawBody && !embedded) multipart.push(...parseForm(rawBody));
 	const contentTypeIndex = headers.findIndex((header) => header.name.toLowerCase() === 'content-type');
 	// The client generates the boundary, so an imported boundary from another tool is
 	// noise the user cannot act on; dropping it keeps the header list honest.

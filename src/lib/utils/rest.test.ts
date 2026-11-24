@@ -579,6 +579,17 @@ describe('required parameter names', () => {
 	});
 });
 
+/** A `multipart/form-data` payload as a browser export writes it into `--data-raw`. */
+function multipartDump(boundary: string): string {
+	return [
+		`--${boundary}\r\nContent-Disposition: form-data; name="action"\r\n\r\nsave`,
+		`--${boundary}\r\nContent-Disposition: form-data; name="code"\r\n\r\n`,
+		`--${boundary}\r\nContent-Disposition: form-data; name="note"\r\n\r\nНК Роснефть`,
+		`--${boundary}\r\nContent-Disposition: form-data; name="doc"; filename="отчёт.pdf"\r\nContent-Type: application/pdf\r\n\r\n%PDF-1.4`,
+		`--${boundary}--\r\n`
+	].join('\r\n');
+}
+
 describe('multipart form data', () => {
 	it('ignores the text buffer while the Form tab is active', () => {
 		expect(
@@ -751,6 +762,172 @@ describe('multipart form data', () => {
 			{ name: 'a', value: '1' },
 			{ name: 'b', value: '2' }
 		]);
+	});
+
+	it('imports a multipart body a browser export wrote into --data-raw', () => {
+		const boundary = '----WebKitFormBoundaryabc';
+		// "Copy as cURL (bash)" keeps the payload in `$'…'`, so every break is an escape.
+		const escaped = multipartDump(boundary)
+			.replace(/\\/g, '\\\\')
+			.replace(/'/g, "\\'")
+			.replace(/\r/g, '\\r')
+			.replace(/\n/g, '\\n');
+		const parsed = parseCurl(
+			`curl --url 'https://example.com/register' \\\n` +
+				`  -H 'content-type: multipart/form-data; boundary=${boundary}' \\\n` +
+				`  --data-raw $'${escaped}'`
+		);
+		expect(parsed?.method).toBe('POST');
+		expect(parsed?.bodyType).toBe('multipart');
+		// The tables own the body, so the text buffer stays empty.
+		expect(parsed?.body).toBe('');
+		expect(parsed?.multipart).toEqual([
+			{ name: 'action', value: 'save' },
+			{ name: 'code', value: '' },
+			{ name: 'note', value: 'НК Роснефть' }
+		]);
+		// A part with a filename cannot carry its bytes through a command line: the row
+		// keeps the name and stays blocked until the user picks the file.
+		expect(parsed?.files).toEqual([{ name: 'doc', path: '', filename: 'отчёт.pdf' }]);
+		expect(validateFileRows(parsed?.files ?? [])).toHaveLength(1);
+		// The imported boundary belongs to the exporter, not to this client.
+		expect(parsed?.headers).toEqual([]);
+	});
+
+	it('reads the boundary out of the body when the command has no Content-Type', () => {
+		const boundary = '----WebKitFormBoundaryabc';
+		const parsed = parseCurl(
+			`curl 'https://example.com/register' --data-raw '${multipartDump(boundary)}'`
+		);
+		expect(parsed?.bodyType).toBe('multipart');
+		expect(parsed?.multipart).toEqual([
+			{ name: 'action', value: 'save' },
+			{ name: 'code', value: '' },
+			{ name: 'note', value: 'НК Роснефть' }
+		]);
+	});
+
+	it('unescapes a caret-escaped cmd.exe command copied from a browser', () => {
+		const boundary = '----WebKitFormBoundaryabc';
+		// cmd.exe flavor: every quote becomes `^\^"`, every `%` is doubled, a break is
+		// escaped as `^` + CR, and the command lines continue with ` ^`.
+		const cmdBody = multipartDump(boundary)
+			.replace(/\r/g, '^\r')
+			.replace(/"/g, '^\\^"')
+			.replace(/%/g, '%%');
+		const parsed = parseCurl(
+			`curl --url ^"https://example.com/register^" ^\r\n` +
+				`  -H ^"cache-control: no-cache^" ^\r\n` +
+				`  -H ^"content-type: multipart/form-data; boundary=${boundary}^" ^\r\n` +
+				`  -H ^"sec-ch-ua: ^\\^"Google Chrome^\\^";v=^\\^"159^\\^"^" ^\r\n` +
+				`  -b ^"acs=100%%^|^;sid=^$9^" ^\r\n` +
+				`  --data-raw ^"${cmdBody}^" ^\r\n`
+		);
+		expect(parsed?.url).toBe('https://example.com/register');
+		expect(parsed?.headers).toEqual([
+			{ name: 'cache-control', value: 'no-cache' },
+			{ name: 'sec-ch-ua', value: '"Google Chrome";v="159"' },
+			{ name: 'Cookie', value: 'acs=100%|;sid=$9' }
+		]);
+		expect(parsed?.bodyType).toBe('multipart');
+		expect(parsed?.body).toBe('');
+		expect(parsed?.multipart).toEqual([
+			{ name: 'action', value: 'save' },
+			{ name: 'code', value: '' },
+			{ name: 'note', value: 'НК Роснефть' }
+		]);
+		expect(parsed?.files).toEqual([{ name: 'doc', path: '', filename: 'отчёт.pdf' }]);
+	});
+
+	it('keeps imported field values free of the continuation framing', () => {
+		const boundary = '----WebKitFormBoundaryabc';
+		// A browser that wraps the payload writes each payload break the way cmd.exe joins
+		// argument lines: `^` + break + the joiner's two-space indent. Those characters
+		// frame the dump rather than belong to a part, so a leftover CR would paint every
+		// value cell of the Fields table as invalid.
+		const wrapped = multipartDump(boundary)
+			.replace(/\r/g, '^\r')
+			.replace(/\n/g, '^\n  ')
+			.replace(/"/g, '^\\^"');
+		const parsed = parseCurl(
+			`curl --url ^"https://example.com/register^" ^\r\n` +
+				`  -H ^"content-type: multipart/form-data; boundary=${boundary}^" ^\r\n` +
+				`  --data-raw ^"${wrapped}^"`
+		);
+		expect(parsed?.bodyType).toBe('multipart');
+		expect(parsed?.multipart).toEqual([
+			{ name: 'action', value: 'save' },
+			{ name: 'code', value: '' },
+			{ name: 'note', value: 'НК Роснефть' }
+		]);
+		// Nothing on the Fields table is reported: the import produced clean values.
+		expect(validateProperties('multipart', parsed?.multipart ?? [])).toEqual([]);
+	});
+
+	it('imports the cmd.exe payload Chrome writes after an empty --data-raw', () => {
+		const boundary = '----MultipartFormBoundaryByMQ6AY1ZBj74yDf';
+		// Chrome's cmd.exe export gives up on a multipart body: it passes an empty
+		// argument and then writes the dump as continuation lines, each closed by the
+		// caret that joins the next one and indented like the arguments.
+		const command = [
+			'curl --url ^"https://www.tez-tour.com/agencyRegistration.html^" ^',
+			'  --compressed ^',
+			'  -H ^"cache-control: no-cache^" ^',
+			`  -H ^"content-type: multipart/form-data; boundary=${boundary}^" ^`,
+			'  -H ^"sec-ch-ua-platform: ^"Windows^"^" ^',
+			'  -b ^"PHPSESSID=ok0q%%^|^;userAuth=;^" ^',
+			'  --data-raw "^" ^',
+			`  --${boundary} ^`,
+			'  Content-Disposition: form-data; name="firstName" ^',
+			'  ^',
+			'  Ekaterinburg ^',
+			`  --${boundary} ^`,
+			'  Content-Disposition: form-data; name="attachment"; filename=^"report.txt^" ^',
+			'  Content-Type: text/plain ^',
+			'  ^',
+			'  ^',
+			`  --${boundary}--`
+		].join('\r\n');
+
+		const parsed = parseCurl(command);
+		expect(parsed?.url).toBe('https://www.tez-tour.com/agencyRegistration.html');
+		expect(parsed?.method).toBe('POST');
+		expect(parsed?.bodyType).toBe('multipart');
+		expect(parsed?.body).toBe('');
+		expect(parsed?.headers).toEqual([
+			{ name: 'cache-control', value: 'no-cache' },
+			{ name: 'sec-ch-ua-platform', value: 'Windows' },
+			{ name: 'Cookie', value: 'PHPSESSID=ok0q%|;userAuth=;' }
+		]);
+		expect(parsed?.multipart).toEqual([{ name: 'firstName', value: 'Ekaterinburg' }]);
+		expect(parsed?.files).toEqual([{ name: 'attachment', path: '', filename: 'report.txt' }]);
+		// The Fields table is clean; only the file row reports itself, because the
+		// clipboard can carry a file name but never the bytes behind it.
+		expect(validateProperties('multipart', parsed?.multipart ?? [])).toEqual([]);
+		expect(validateFileRows(parsed?.files ?? []).map((issue) => issue.kind)).toEqual([
+			'file-missing'
+		]);
+		// The other spelling of the placeholder argument carries the same dump.
+		expect(parseCurl(command.replace('--data-raw "^"', '--data-raw ^"^"'))?.multipart).toEqual([
+			{ name: 'firstName', value: 'Ekaterinburg' }
+		]);
+	});
+
+	it('keeps a payload break inside an imported field value', () => {
+		const boundary = '--abc';
+		const parsed = parseCurl(
+			`curl 'https://example.com/u' --data-raw '--abc\r\nContent-Disposition: form-data; name="msg"\r\n\r\nline one\r\nline two\r\n--abc--\r\n'`
+		);
+		expect(parsed?.multipart).toEqual([{ name: 'msg', value: 'line one\r\nline two' }]);
+	});
+
+	it('keeps a body that merely mentions form-data as text', () => {
+		const parsed = parseCurl(
+			`curl 'https://example.com/log' --data-raw 'Content-Disposition: form-data; name="a"'`
+		);
+		expect(parsed?.bodyType).toBe('text');
+		expect(parsed?.multipart).toEqual([]);
+		expect(parsed?.body).toBe('Content-Disposition: form-data; name="a"');
 	});
 
 	it('round trips an exported multipart command back into the tables', () => {
