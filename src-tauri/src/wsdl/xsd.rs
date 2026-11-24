@@ -69,7 +69,6 @@ struct Field {
     occurs: Occurs,
     /// `true` for attributes, which print inline on the parent tag.
     attribute: bool,
-    nillable: bool,
     /// Text the element carries beside its attributes: a `simpleContent` extension
     /// of a simple type has attributes *and* a value. `None` for markup that has
     /// no text of its own.
@@ -618,7 +617,6 @@ impl<'a> Walk<'a> {
                 max: 1,
             },
             attribute: true,
-            nillable: false,
             text: None,
         })
     }
@@ -655,7 +653,6 @@ impl<'a> Walk<'a> {
                         kind: Kind::Unknown,
                         occurs: occurs(dom, *child),
                         attribute: false,
-                        nillable: false,
                         text: None,
                     });
                 }
@@ -682,7 +679,6 @@ impl<'a> Walk<'a> {
                 kind: found.kind,
                 occurs: occurs(dom, node),
                 attribute: false,
-                nillable: get_attr(dom, node, "nillable").as_deref() == Some("true"),
                 text: found.text,
             });
         }
@@ -709,7 +705,6 @@ impl<'a> Walk<'a> {
             kind: found.kind,
             occurs: occurs(dom, node),
             attribute: false,
-            nillable: get_attr(dom, node, "nillable").as_deref() == Some("true"),
             text: found.text,
         })
     }
@@ -750,7 +745,6 @@ fn choice_field(branches: Vec<Field>, occurs: Occurs) -> Field {
         kind: Kind::Choice { branches },
         occurs,
         attribute: false,
-        nillable: false,
         text: None,
     }
 }
@@ -947,7 +941,7 @@ fn note(pad: &str, text: &str) -> String {
 }
 
 /// Comment body of one generated line. A note that is already a comment — the
-/// nillable and cardinality notes of a child reached through an optional parent —
+/// optional and cardinality notes of a child reached through an optional parent —
 /// contributes only its text: a comment cannot hold another one, and wrapping it
 /// twice is what produced the `<!-- <!-- x --> -->` and the softened
 /// `<!- - … - ->` garbage.
@@ -1050,12 +1044,6 @@ impl Printer {
         let pad = "  ".repeat(indent);
         let tag = self.qualified(&field.uri, &field.local);
         let mut lines = self.attribute_notes(field, indent);
-        if field.nillable {
-            lines.push(note(
-                &pad,
-                &format!("{tag} is nillable: write xsi:nil=\"true\" to send no value"),
-            ));
-        }
 
         let attributes = if indent == 0 && !field.attribute {
             format!("{}{}", self.inline_attributes(field), self.declarations)
@@ -1187,7 +1175,6 @@ pub fn body_template(
         kind: found.kind,
         occurs: Occurs::default(),
         attribute: false,
-        nillable: get_attr(dom, node, "nillable").as_deref() == Some("true"),
         text: found.text,
     };
 
@@ -1221,8 +1208,10 @@ mod tests {
     use super::*;
     use crate::wsdl::parser::{build_dom, parse_wsdl};
 
-    /// A chain of optional, nillable elements across two schemas — the shape that
-    /// makes a note line of a child reach a comment of its parent.
+    /// A chain of optional elements across two schemas, each also written
+    /// `nillable="true"` because real WSDLs do that — the shape that makes a note
+    /// line of a child reach a comment of its parent. `nillable` itself adds no
+    /// comment: the optional line already says what the element means.
     const SAMPLE: &str = r#"<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
       xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
       xmlns:xsd="http://www.w3.org/2001/XMLSchema"
@@ -1301,8 +1290,8 @@ mod tests {
             "optional: ns1:Login"
         );
         assert_eq!(
-            comment_body("<!-- <!-- ns1:Login is nillable --> -->"),
-            "ns1:Login is nillable"
+            comment_body("<!-- <!-- repeat as needed --> -->"),
+            "repeat as needed"
         );
         assert_eq!(
             comment_body("  <ns1>Login>text</ns1>Login>  "),
@@ -1380,20 +1369,10 @@ mod tests {
         let xml = template_of(SAMPLE);
         assert!(xml.contains("<tns:CloseSession xmlns:tns="), "{xml}");
         assert!(xml.contains("<!-- optional: tns:Request -->"), "{xml}");
-        assert!(
-            xml.contains(
-                "<!-- tns:Request is nillable: write xsi:nil=\"true\" to send no value -->"
-            ),
-            "{xml}"
-        );
         assert!(xml.contains("<!-- <ns1:Login> -->"), "{xml}");
         assert!(xml.contains("<!-- </ns1:Login> -->"), "{xml}");
-        assert!(
-            xml.contains(
-                "<!-- ns1:Password is nillable: write xsi:nil=\"true\" to send no value -->"
-            ),
-            "{xml}"
-        );
+        // A `nillable` attribute adds nothing: one optional line says it all.
+        assert!(!xml.contains("nillable"), "{xml}");
         assert!(
             xml.contains("<!-- <ns1:SessionId>text</ns1:SessionId> -->"),
             "{xml}"
@@ -1418,14 +1397,7 @@ mod tests {
             1,
             "{xml}"
         );
-        assert_eq!(
-            xml.matches(
-                "<!-- ns1:TicketRef is nillable: write xsi:nil=\"true\" to send no value -->"
-            )
-            .count(),
-            1,
-            "{xml}"
-        );
+        assert!(!xml.contains("nillable"), "{xml}");
         assert_eq!(
             xml.matches("<!-- <ns1:OrderRef>text</ns1:OrderRef> -->")
                 .count(),
@@ -1532,12 +1504,8 @@ mod tests {
             xml.contains(r#"xmlns:ns1="http://nemo-ibe.com/STL""#),
             "{xml}"
         );
-        assert!(
-            xml.contains(
-                "<!-- ns1:RequestBody is nillable: write xsi:nil=\"true\" to send no value -->"
-            ),
-            "{xml}"
-        );
+        assert!(xml.contains("<!-- <ns1:RequestBody> -->"), "{xml}");
+        assert!(!xml.contains("nillable"), "{xml}");
         assert!(
             xml.find("ns1:FlightRef").expect("nested body field") > body,
             "{xml}"
