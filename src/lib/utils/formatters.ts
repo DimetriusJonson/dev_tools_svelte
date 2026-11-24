@@ -647,17 +647,28 @@ export function escapeContent(mode: Mode, source: string): string {
 	return mode === 'json' ? escapeJson(source) : escapeXml(source);
 }
 
+/**
+ * Escapes every character outside the unreserved set, reserved ones included:
+ * a URL copied out of another tool has to come back as the text that was put
+ * in, so `http://host:3030&id=…` becomes `http%3A%2F%2Fhost%3A3030%26id%3D…`.
+ * `encodeURI` leaves `:` `/` `?` `&` `=` as structure and never produces that.
+ */
 export function encodeUrl(input: string): string {
 	try {
-		return encodeURI(input);
+		return encodeURIComponent(input);
 	} catch {
 		return input;
 	}
 }
 
+/**
+ * Decodes every percent-escape, including the reserved characters, which is
+ * the exact inverse of `encodeUrl`. `decodeURI` cannot recover them, so a
+ * link copied from another tool would stay `http%3A%2F%2Fhost%3A3030`.
+ */
 export function decodeUrl(input: string): string {
 	try {
-		return decodeURI(input);
+		return decodeURIComponent(input);
 	} catch {
 		return input;
 	}

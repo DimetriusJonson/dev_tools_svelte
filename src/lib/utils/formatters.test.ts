@@ -192,17 +192,35 @@ describe('formatContent', () => {
 });
 
 describe('URL encoding', () => {
-	it('encodes with encodeURI semantics and decodes back', () => {
+	it('encodes every reserved character and decodes back', () => {
 		const source = 'https://example.com/a b?x=1&y=привет';
 		const encoded = encodeUrl(source);
 		expect(encoded).toBe(
-			'https://example.com/a%20b?x=1&y=%D0%BF%D1%80%D0%B8%D0%B2%D0%B5%D1%82'
+			'https%3A%2F%2Fexample.com%2Fa%20b%3Fx%3D1%26y%3D%D0%BF%D1%80%D0%B8%D0%B2%D0%B5%D1%82'
 		);
 		expect(decodeUrl(encoded)).toBe(source);
 	});
 
+	it('encodes the characters a deep link is built from', () => {
+		expect(encodeUrl('http://10.7.6.86:3030&id=8f82124b-cd30-42ed-84a6-1b8567810614')).toBe(
+			'http%3A%2F%2F10.7.6.86%3A3030%26id%3D8f82124b-cd30-42ed-84a6-1b8567810614'
+		);
+	});
+
+	it('decodes reserved characters', () => {
+		expect(decodeUrl('http%3A%2F%2F10.7.6.86%3A3030&id=8f82124b-cd30-42ed-84a6-1b8567810614')).toBe(
+			'http://10.7.6.86:3030&id=8f82124b-cd30-42ed-84a6-1b8567810614'
+		);
+		expect(decodeUrl('a%20b%2Fc%3Fd%3De')).toBe('a b/c?d=e');
+	});
+
 	it('returns input unchanged for malformed sequences', () => {
 		expect(decodeUrl('%E0%A4%A')).toBe('%E0%A4%A');
+		expect(decodeUrl('100%')).toBe('100%');
+	});
+
+	it('returns input unchanged when it cannot be encoded', () => {
+		expect(encodeUrl('a\uD800b')).toBe('a\uD800b');
 	});
 });
 
