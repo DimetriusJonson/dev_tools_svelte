@@ -10,13 +10,24 @@ const KEY_SEPARATOR: char = '\u{0001}';
 /// `maxOccurs="unbounded"` is kept as zero, which means "no cap is implied".
 const UNBOUNDED: u8 = 0;
 
-/// A repeating element is shown this many times before the comment that tells
-/// the user to copy the block.
+/// A finite `maxOccurs` prints at most this many copies of the element: the user
+/// sees that the block is a list and copies it for the rest.
 const REPETITIONS: usize = 2;
 
 /// Prefix used for a namespace the schema never declared. Printing the URI as a
 /// prefix would be unreadable, and printing nothing silently changes meaning.
 const GENERATED_PREFIX: &str = "ns";
+
+/// Value of every leaf, attribute and text: SoapUI writes `?` and the user
+/// replaces it with test data, so no plausible-looking sample is invented.
+const PLACEHOLDER: &str = "?";
+
+/// SoapUI's own markers above a block, spelled exactly as SoapUI spells them.
+/// An optional element is *not* commented out — the marker says it may go.
+const OPTIONAL_NOTE: &str = "Optional:";
+const ZERO_OR_MORE: &str = "Zero or more repetitions:";
+const ONE_OR_MORE: &str = "One or more repetitions:";
+const CHOICE_NOTE: &str = "Choice:";
 
 fn key(uri: &str, local: &str) -> String {
     format!("{uri}{KEY_SEPARATOR}{local}")
@@ -70,16 +81,16 @@ struct Field {
     /// `true` for attributes, which print inline on the parent tag.
     attribute: bool,
     /// Text the element carries beside its attributes: a `simpleContent` extension
-    /// of a simple type has attributes *and* a value. `None` for markup that has
+    /// of a simple type has attributes *and* a value. `false` for markup that has
     /// no text of its own.
-    text: Option<String>,
+    text: bool,
 }
 
 /// What a resolved declaration contributes to the template.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Kind {
-    /// Text content only.
-    Leaf { sample: String },
+    /// Text content, printed as the placeholder.
+    Leaf,
     /// Nested markup.
     Composite { fields: Vec<Field> },
     /// Alternatives: every branch is printed, commented out, so the user picks one.
@@ -95,8 +106,8 @@ struct Definition {
     type_name: String,
     kind: Kind,
     /// Text a type carries alongside attributes, taken from the base of a
-    /// `simpleContent` extension. Markup without a value of its own is `None`.
-    text: Option<String>,
+    /// `simpleContent` extension. Markup without a value of its own is `false`.
+    text: bool,
 }
 
 impl Definition {
@@ -104,23 +115,21 @@ impl Definition {
         Definition {
             type_name: type_name.to_string(),
             kind: Kind::Unknown,
-            text: None,
+            text: false,
         }
     }
 
-    fn leaf(type_name: &str, sample: &str) -> Definition {
+    fn leaf(type_name: &str) -> Definition {
         Definition {
             type_name: type_name.to_string(),
-            kind: Kind::Leaf {
-                sample: sample.to_string(),
-            },
-            // A leaf prints its sample from `kind`; `text` is only the value a
+            kind: Kind::Leaf,
+            // A leaf prints the placeholder; `text` is only the value a
             // composite carries beside its attributes.
-            text: None,
+            text: false,
         }
     }
 
-    fn composite(type_name: &str, fields: Vec<Field>, text: Option<String>) -> Definition {
+    fn composite(type_name: &str, fields: Vec<Field>, text: bool) -> Definition {
         Definition {
             type_name: type_name.to_string(),
             kind: Kind::Composite { fields },
@@ -217,13 +226,11 @@ fn occurs(dom: &XmlDom, index: usize) -> Occurs {
 /// in another namespace is never a builtin, however it is spelled: `int` in the
 /// target namespace is a user type that shadows the built-in one.
 fn builtin_leaf(uri: &str, local: &str) -> Option<Leaf> {
-    if !is_xsd_ns(uri) {
+    if !is_xsd_ns(uri) || !builtin_type(local) {
         return None;
     }
-    let sample = builtin_sample(local)?;
     Some(Leaf {
         type_name: local.to_string(),
-        sample,
     })
 }
 
@@ -233,34 +240,51 @@ struct Leaf {
     /// `xsd:string` and friends, or the name of a user type when nothing builtin
     /// could be reached — that name becomes the comment text.
     type_name: String,
-    sample: String,
 }
 
-/// The built-in types a template can fill with plausible text. Anything else is
-/// reported as a comment instead of guessed at.
-fn builtin_sample(type_name: &str) -> Option<String> {
-    let sample = match type_name {
-        "string" | "ID" | "IDREF" | "IDREFS" | "NCName" | "NMTOKEN" | "NMTOKENS" | "QName" => {
-            "text"
-        }
-        "normalizedString" | "token" => "text",
-        "base64Binary" | "hexBinary" => "",
-        "boolean" => "false",
-        "integer" | "int" | "long" | "short" | "byte" | "nonNegativeInteger"
-        | "positiveInteger" | "nonPositiveInteger" | "negativeInteger" | "unsignedInt"
-        | "unsignedLong" | "unsignedShort" | "unsignedByte" => "0",
-        "decimal" | "float" | "double" => "0",
-        "date" => "2026-01-01",
-        "time" => "12:00:00",
-        "dateTime" => "2026-01-01T12:00:00",
-        "duration" => "PT0S",
-        "gYear" => "2026",
-        "gMonth" => "--01",
-        "gDay" => "---01",
-        "language" => "en",
-        _ => return None,
-    };
-    Some(sample.to_string())
+/// The built-in types a template can print. Only whether the name is known
+/// matters: the value itself is always the placeholder.
+fn builtin_type(type_name: &str) -> bool {
+    matches!(
+        type_name,
+        "string"
+            | "ID"
+            | "IDREF"
+            | "IDREFS"
+            | "NCName"
+            | "NMTOKEN"
+            | "NMTOKENS"
+            | "QName"
+            | "normalizedString"
+            | "token"
+            | "base64Binary"
+            | "hexBinary"
+            | "boolean"
+            | "integer"
+            | "int"
+            | "long"
+            | "short"
+            | "byte"
+            | "nonNegativeInteger"
+            | "positiveInteger"
+            | "nonPositiveInteger"
+            | "negativeInteger"
+            | "unsignedInt"
+            | "unsignedLong"
+            | "unsignedShort"
+            | "unsignedByte"
+            | "decimal"
+            | "float"
+            | "double"
+            | "date"
+            | "time"
+            | "dateTime"
+            | "duration"
+            | "gYear"
+            | "gMonth"
+            | "gDay"
+            | "language"
+    )
 }
 
 /// Everything one template walk needs: where definitions are registered, the
@@ -338,7 +362,7 @@ impl<'a> Walk<'a> {
                 return self.builtin(*child, attribute, depth);
             }
             if self.dom.local(*child) == "union" {
-                // A union names several types; the first one is the sample, because
+                // A union names several types; the first one is printed, because
                 // nothing in the schema says which member the author intends.
                 let members = get_attr(self.dom, *child, "memberTypes")?;
                 let first = members.split_whitespace().next()?;
@@ -408,7 +432,7 @@ impl<'a> Walk<'a> {
         match self.dom.local(node) {
             "simpleType" => {
                 let leaf = self.leaf(node, depth)?;
-                Some(Definition::leaf(&leaf.type_name, &leaf.sample))
+                Some(Definition::leaf(&leaf.type_name))
             }
             "complexType" => self.complex(node, context, depth),
             "element" => self.expand_element(node, context, depth),
@@ -424,7 +448,7 @@ impl<'a> Walk<'a> {
         let found = if get_attr(dom, node, "type").is_some() {
             let (uri, local) = get_reference(dom, node, "type")?;
             match builtin_leaf(&uri, &local) {
-                Some(leaf) => Definition::leaf(&leaf.type_name, &leaf.sample),
+                Some(leaf) => Definition::leaf(&leaf.type_name),
                 None => self.resolve(&uri, &local, depth)?,
             }
         } else {
@@ -434,7 +458,7 @@ impl<'a> Walk<'a> {
             });
             match anonymous {
                 Some(child) => self.expand(child, context, depth)?,
-                None => Definition::leaf(&name, ""),
+                None => Definition::leaf(&name),
             }
         };
 
@@ -468,7 +492,7 @@ impl<'a> Walk<'a> {
         }
 
         let name = get_attr(dom, node, "name").unwrap_or_default();
-        let mut text: Option<String> = None;
+        let mut text = false;
 
         if let Some(Derivation {
             base,
@@ -492,15 +516,17 @@ impl<'a> Walk<'a> {
                         content.extend(added);
                     }
                     Kind::Unknown => self.note(&format!("unknown-type:{}", definition.type_name)),
-                    Kind::Leaf { sample } => {
+                    Kind::Leaf => {
                         if fields.is_empty()
                             && attributes.is_empty()
                             && content.is_empty()
                             && added.is_empty()
                         {
-                            return Some(Definition::leaf(&definition.type_name, &sample));
+                            return Some(Definition::leaf(&definition.type_name));
                         }
-                        text = Some(sample);
+                        // The value the base's simple type carries stays printable
+                        // beside the attributes the derivation adds.
+                        text = true;
                         content.extend(added);
                     }
                 },
@@ -511,7 +537,7 @@ impl<'a> Walk<'a> {
 
         fields.extend(content);
         if fields.is_empty() {
-            return Some(Definition::leaf(&name, ""));
+            return Some(Definition::leaf(&name));
         }
         Some(Definition::composite(&name, fields, text))
     }
@@ -542,10 +568,10 @@ impl<'a> Walk<'a> {
             }
             let base = get_reference(dom, *child, "base").and_then(|(uri, local)| {
                 match builtin_leaf(&uri, &local) {
-                    // A derivation of a built-in type is a leaf with a sample, so
+                    // A derivation of a built-in type is a printable leaf, so
                     // resolving it as a global declaration would report a type the
                     // XSD namespace defines as unknown.
-                    Some(leaf) => Some(Definition::leaf(&leaf.type_name, &leaf.sample)),
+                    Some(leaf) => Some(Definition::leaf(&leaf.type_name)),
                     None => self.resolve(&uri, &local, depth + 1),
                 }
             });
@@ -597,12 +623,7 @@ impl<'a> Walk<'a> {
         };
 
         let (type_name, kind) = match leaf {
-            Some(leaf) => (
-                leaf.type_name,
-                Kind::Leaf {
-                    sample: leaf.sample,
-                },
-            ),
+            Some(leaf) => (leaf.type_name, Kind::Leaf),
             None => (String::new(), Kind::Unknown),
         };
 
@@ -617,7 +638,7 @@ impl<'a> Walk<'a> {
                 max: 1,
             },
             attribute: true,
-            text: None,
+            text: false,
         })
     }
 
@@ -653,7 +674,7 @@ impl<'a> Walk<'a> {
                         kind: Kind::Unknown,
                         occurs: occurs(dom, *child),
                         attribute: false,
-                        text: None,
+                        text: false,
                     });
                 }
                 _ => {}
@@ -687,7 +708,7 @@ impl<'a> Walk<'a> {
         let found = if get_attr(dom, node, "type").is_some() {
             let (uri, local) = get_reference(dom, node, "type")?;
             match builtin_leaf(&uri, &local) {
-                Some(leaf) => Definition::leaf(&leaf.type_name, &leaf.sample),
+                Some(leaf) => Definition::leaf(&leaf.type_name),
                 None => self.resolve(&uri, &local, depth + 1)?,
             }
         } else if let Some(anonymous) = dom.children(node).iter().copied().find(|child| {
@@ -695,7 +716,7 @@ impl<'a> Walk<'a> {
         }) {
             self.expand(anonymous, context, depth + 1)?
         } else {
-            Definition::leaf(&name, "")
+            Definition::leaf(&name)
         };
 
         Some(Field {
@@ -745,21 +766,19 @@ fn choice_field(branches: Vec<Field>, occurs: Occurs) -> Field {
         kind: Kind::Choice { branches },
         occurs,
         attribute: false,
-        text: None,
+        text: false,
     }
 }
 
-/// Turns a resolved definition into a leaf value. A definition that has children
+/// Turns a resolved definition into a leaf. A definition that has children
 /// is not a leaf, and `Unknown` keeps its type name as the comment text.
 fn leaf_of(found: &Definition) -> Option<Leaf> {
     match &found.kind {
-        Kind::Leaf { sample } => Some(Leaf {
+        Kind::Leaf => Some(Leaf {
             type_name: found.type_name.clone(),
-            sample: sample.clone(),
         }),
         Kind::Unknown => Some(Leaf {
             type_name: found.type_name.clone(),
-            sample: String::new(),
         }),
         _ => None,
     }
@@ -933,38 +952,85 @@ fn soften(text: &str) -> String {
     text.replace("--", "- -")
 }
 
-/// One comment line of a template. Every note goes through here so a name or a
-/// built-in sample that holds a double hyphen (`--01` of `xsd:gMonth`) can never
-/// break the comment it is printed in.
+/// One explanatory comment line of a template. Every note goes through here so a
+/// type or element name that holds a double hyphen can never break the comment it
+/// is printed in.
 fn note(pad: &str, text: &str) -> String {
     format!("{pad}<!-- {} -->", soften(text))
 }
 
-/// Comment body of one generated line. A note that is already a comment — the
-/// optional and cardinality notes of a child reached through an optional parent —
-/// contributes only its text: a comment cannot hold another one, and wrapping it
-/// twice is what produced the `<!-- <!-- x --> -->` and the softened
-/// `<!- - … - ->` garbage.
-fn comment_body(line: &str) -> String {
-    let mut text = line.trim();
-    // Peel whole-line comment wrappers as many times as they are nested.
-    while text.len() > "<!---->".len() && text.starts_with("<!--") && text.ends_with("-->") {
-        text = text["<!--".len()..text.len() - "-->".len()].trim();
+/// SoapUI's marker above a block, printed without the spaces of [`note`] so the
+/// template reads like the one SoapUI writes (`<!--Optional:-->`).
+fn marker(pad: &str, text: &str) -> String {
+    format!("{pad}<!--{}-->", soften(text))
+}
+
+/// A whole-line marker comment (`<!--Optional:-->`). It is a comment already, so
+/// wrapping it again would nest markers for no reason. `<!---->` is an empty
+/// comment rather than a marker, and a note written with spaces (`<!-- x -->`)
+/// is not one either: only SoapUI's tight spelling is. Returns the text inside.
+fn is_marker(line: &str) -> Option<&str> {
+    let text = line.trim();
+    if text.len() <= "<!---->".len()
+        || !text.starts_with("<!--")
+        || !text.ends_with("-->")
+        || text.starts_with("<!-- ")
+    {
+        return None;
     }
-    soften(text.replace("<!--", "").replace("-->", "").trim())
+    Some(text["<!--".len()..text.len() - "-->".len()].trim())
+}
+
+/// The text of one generated line with its comment wrappers peeled off, and
+/// whether the innermost line was written in SoapUI's tight marker spelling. A
+/// note that is already a comment — the marker of a child reached through a
+/// commented `choice` branch — contributes only its text: a comment cannot hold
+/// another one, and wrapping it twice is what produced the `<!-- <!-- x --> -->`
+/// and the softened `<!- - … - ->` garbage.
+fn comment_text(line: &str) -> (String, bool) {
+    let mut text = line.trim();
+    let mut tight = false;
+    loop {
+        if let Some(body) = is_marker(text) {
+            tight = true;
+            text = body;
+        } else if text.len() > "<!---->".len() && text.starts_with("<!--") && text.ends_with("-->")
+        {
+            text = text["<!--".len()..text.len() - "-->".len()].trim();
+        } else {
+            break;
+        }
+    }
+    (
+        soften(text.replace("<!--", "").replace("-->", "").trim()),
+        tight,
+    )
+}
+
+/// Comment body of one generated line, markers stripped and double hyphens made
+/// safe. Kept separate from [`comment_text`] so the flattening stays testable.
+fn comment_body(line: &str) -> String {
+    comment_text(line).0
 }
 
 /// Wraps markup so the user sees it as a block they can uncomment. Each line
 /// keeps its own indentation, so an uncommented block nests the way the schema
-/// does. A line with nothing to say produces no comment: an empty comment is
-/// noise, and `<!---->` is not markup.
+/// does. A marker line is a comment of its own: it stays tight and uncommented
+/// rather than being wrapped again. A line with nothing to say produces no
+/// comment: an empty comment is noise, and `<!---->` is not markup.
 fn comment_block(lines: &[String]) -> Vec<String> {
     lines
         .iter()
         .filter_map(|line| {
-            let body = comment_body(line);
-            let pad = line.len() - line.trim_start().len();
-            (!body.is_empty()).then(|| format!("{}<!-- {body} -->", &line[..pad]))
+            let pad = &line[..line.len() - line.trim_start().len()];
+            let (body, tight) = comment_text(line);
+            if body.is_empty() {
+                return None;
+            }
+            if tight {
+                return Some(format!("{pad}<!--{body}-->"));
+            }
+            Some(format!("{pad}<!-- {body} -->"))
         })
         .collect()
 }
@@ -985,48 +1051,20 @@ impl Printer {
         }
     }
 
-    /// Attributes printed inside the tag: only the required ones, because an
-    /// optional attribute would make the element invalid when left unfilled.
+    /// Attributes printed inside the tag, all of them with the placeholder, as
+    /// SoapUI does: an attribute the user does not need is simply removed.
     fn inline_attributes(&self, field: &Field) -> String {
         let mut text = String::new();
         for child in fields_of(&field.kind) {
-            if !child.attribute || child.occurs.min == 0 {
+            if !child.attribute {
                 continue;
             }
-            let value = match &child.kind {
-                Kind::Leaf { sample } => sample.clone(),
-                _ => String::new(),
-            };
             text.push_str(&format!(
-                " {}=\"{}\"",
-                self.qualified(&child.uri, &child.local),
-                value
+                " {}=\"{PLACEHOLDER}\"",
+                self.qualified(&child.uri, &child.local)
             ));
         }
         text
-    }
-
-    /// Comments naming the attributes the user may add, printed above the element.
-    fn attribute_notes(&self, field: &Field, indent: usize) -> Vec<String> {
-        let pad = "  ".repeat(indent);
-        fields_of(&field.kind)
-            .iter()
-            .filter(|child| child.attribute && child.occurs.min == 0)
-            .map(|child| {
-                let value = match &child.kind {
-                    Kind::Leaf { sample } => format!("=\"{sample}\""),
-                    _ => String::new(),
-                };
-                note(
-                    &pad,
-                    &format!(
-                        "optional attribute {}{}",
-                        self.qualified(&child.uri, &child.local),
-                        value
-                    ),
-                )
-            })
-            .collect()
     }
 }
 /// Element children a kind carries. Attributes are not returned here: they print
@@ -1039,11 +1077,11 @@ fn fields_of(kind: &Kind) -> &[Field] {
 }
 
 impl Printer {
-    /// Markup of one field, with nothing commented yet.
+    /// Markup of one field, with nothing commented yet and no cardinality note.
     fn markup(&self, field: &Field, indent: usize) -> Vec<String> {
         let pad = "  ".repeat(indent);
         let tag = self.qualified(&field.uri, &field.local);
-        let mut lines = self.attribute_notes(field, indent);
+        let mut lines = Vec::new();
 
         let attributes = if indent == 0 && !field.attribute {
             format!("{}{}", self.inline_attributes(field), self.declarations)
@@ -1064,8 +1102,8 @@ impl Printer {
                     &format!("{label}: content could not be generated"),
                 ));
             }
-            Kind::Leaf { sample } => {
-                lines.push(format!("{pad}<{tag}{attributes}>{sample}</{tag}>"));
+            Kind::Leaf => {
+                lines.push(format!("{pad}<{tag}{attributes}>{PLACEHOLDER}</{tag}>"));
             }
             Kind::Composite { fields } => {
                 let children: Vec<String> = fields
@@ -1076,9 +1114,10 @@ impl Printer {
                 if children.is_empty() {
                     // Only attributes here: a type derived from a simple one by
                     // `simpleContent` has attributes *and* a value to write.
-                    match &field.text {
-                        Some(text) => lines.push(format!("{pad}<{tag}{attributes}>{text}</{tag}>")),
-                        None => lines.push(format!("{pad}<{tag}{attributes}></{tag}>")),
+                    if field.text {
+                        lines.push(format!("{pad}<{tag}{attributes}>{PLACEHOLDER}</{tag}>"));
+                    } else {
+                        lines.push(format!("{pad}<{tag}{attributes}></{tag}>"));
                     }
                 } else {
                     lines.push(format!("{pad}<{tag}{attributes}>"));
@@ -1087,11 +1126,8 @@ impl Printer {
                 }
             }
             Kind::Choice { branches } => {
-                lines.push(note(
-                    &pad,
-                    &format!("choose one of {} alternatives", branches.len()),
-                ));
                 for branch in branches {
+                    lines.push(marker(&pad, CHOICE_NOTE));
                     lines.extend(comment_block(&self.entry(branch, indent)));
                 }
             }
@@ -1100,26 +1136,39 @@ impl Printer {
         lines
     }
 
-    /// Markup of one field with its cardinality applied: an optional block comes
-    /// commented out, a repeating one appears twice with a note to copy it.
+    /// Markup of one field with SoapUI's cardinality markers: an optional element
+    /// stays in the template under `<!--Optional:-->` so the user deletes the tag
+    /// they do not need, an unbounded one under a repetitions marker with a single
+    /// copy to duplicate, and a choice prints commented alternatives. A finite
+    /// `maxOccurs` needs no marker: it simply shows a couple of copies.
     fn entry(&self, field: &Field, indent: usize) -> Vec<String> {
         let pad = "  ".repeat(indent);
 
-        if field.occurs.min == 0 {
-            let mut lines = vec![note(
+        if field.occurs.max == UNBOUNDED {
+            let mut lines = vec![marker(
                 &pad,
-                &format!("optional: {}", self.qualified(&field.uri, &field.local)),
+                if field.occurs.min == 0 {
+                    ZERO_OR_MORE
+                } else {
+                    ONE_OR_MORE
+                },
             )];
-            lines.extend(comment_block(&self.markup(field, indent)));
+            lines.extend(self.markup(field, indent));
             return lines;
         }
 
-        if field.occurs.max == UNBOUNDED || field.occurs.max > 1 {
+        if field.occurs.max > 1 {
+            let copies = (field.occurs.max as usize).min(REPETITIONS);
             let mut lines = Vec::new();
-            for _ in 0..REPETITIONS {
+            for _ in 0..copies {
                 lines.extend(self.markup(field, indent));
             }
-            lines.push(note(&pad, "repeat as needed"));
+            return lines;
+        }
+
+        if field.occurs.min == 0 {
+            let mut lines = vec![marker(&pad, OPTIONAL_NOTE)];
+            lines.extend(self.markup(field, indent));
             return lines;
         }
 
@@ -1209,9 +1258,10 @@ mod tests {
     use crate::wsdl::parser::{build_dom, parse_wsdl};
 
     /// A chain of optional elements across two schemas, each also written
-    /// `nillable="true"` because real WSDLs do that — the shape that makes a note
-    /// line of a child reach a comment of its parent. `nillable` itself adds no
-    /// comment: the optional line already says what the element means.
+    /// `nillable="true"` because real WSDLs do that, plus a `choice` whose branch
+    /// is a complex type — the shape that makes a marker of a child reach a
+    /// commented branch of its parent. `nillable` itself adds no marker: the
+    /// optional marker already says what the element means.
     const SAMPLE: &str = r#"<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
       xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
       xmlns:xsd="http://www.w3.org/2001/XMLSchema"
@@ -1233,9 +1283,15 @@ mod tests {
           <xsd:element name="Requisites" type="ns1:Requisites" minOccurs="0" nillable="true"/>
           <xsd:choice>
             <xsd:element name="TicketRef" type="xsd:string" minOccurs="0" nillable="true"/>
-            <xsd:element name="OrderRef" type="xsd:string" minOccurs="0"/>
+            <xsd:element name="OrderRef" type="ns1:OrderRefType" minOccurs="0"/>
           </xsd:choice>
           <xsd:element name="RequestType" type="xsd:string" minOccurs="0"/>
+        </xsd:sequence>
+      </xsd:complexType>
+      <xsd:complexType name="OrderRefType">
+        <xsd:sequence>
+          <xsd:element name="Position" type="xsd:int"/>
+          <xsd:element name="Note" type="xsd:string" minOccurs="0"/>
         </xsd:sequence>
       </xsd:complexType>
       <xsd:complexType name="Requisites">
@@ -1285,17 +1341,11 @@ mod tests {
 
     #[test]
     fn comment_body_drops_the_markers_of_an_already_commented_line() {
+        assert_eq!(comment_body("<!--Optional:-->"), "Optional:");
+        assert_eq!(comment_body("<!-- <!--Optional:--> -->"), "Optional:");
         assert_eq!(
-            comment_body("<!-- optional: ns1:Login -->"),
-            "optional: ns1:Login"
-        );
-        assert_eq!(
-            comment_body("<!-- <!-- repeat as needed --> -->"),
-            "repeat as needed"
-        );
-        assert_eq!(
-            comment_body("  <ns1>Login>text</ns1>Login>  "),
-            "<ns1>Login>text</ns1>Login>"
+            comment_body("  <ns1>Login>?</ns1>Login>  "),
+            "<ns1>Login>?</ns1>Login>"
         );
         // An unclosed opener is text rather than a comment; the markers still go.
         assert_eq!(comment_body("<!-- a -- b"), "a - - b");
@@ -1305,13 +1355,13 @@ mod tests {
     fn comment_block_never_emits_an_empty_or_nested_comment() {
         let lines = vec![
             "   ".to_string(),
-            "<!-- <!-- optional: ns1:Login --> -->".to_string(),
+            "<!-- <!--Optional:--> -->".to_string(),
             "<a>x</a>".to_string(),
         ];
         assert_eq!(
             comment_block(&lines),
             vec![
-                "<!-- optional: ns1:Login -->".to_string(),
+                "<!--Optional:-->".to_string(),
                 "<!-- <a>x</a> -->".to_string()
             ]
         );
@@ -1324,12 +1374,22 @@ mod tests {
             vec!["    <!-- <a>x</a> -->".to_string()]
         );
         assert!(comment_block(&["<!---->".to_string()]).is_empty());
+        // A marker is a comment already: it is kept tight, not wrapped again.
+        assert_eq!(
+            comment_block(&["  <!--Zero or more repetitions:-->".to_string()]),
+            vec!["  <!--Zero or more repetitions:-->".to_string()]
+        );
     }
 
     #[test]
-    fn a_note_survives_a_name_or_sample_with_double_hyphens() {
-        assert_eq!(note("  ", "gMonth is --01"), "  <!-- gMonth is - -01 -->");
-        assert_eq!(note("", "optional: ns:a--b"), "<!-- optional: ns:a- -b -->");
+    fn a_note_survives_a_name_with_double_hyphens() {
+        assert_eq!(
+            note("  ", "cycle in ns:a--b"),
+            "  <!-- cycle in ns:a- -b -->"
+        );
+        assert_eq!(note("", "unknown type a--b"), "<!-- unknown type a- -b -->");
+        assert_eq!(marker("  ", "Optional:"), "  <!--Optional:-->");
+        assert_eq!(marker("", "a--b"), "<!--a- -b-->");
     }
 
     #[test]
@@ -1358,52 +1418,168 @@ mod tests {
     #[test]
     fn keeps_the_indentation_of_a_commented_block() {
         let xml = template_of(SAMPLE);
-        assert!(xml.contains("  <!-- <tns:Request> -->"), "{xml}");
-        assert!(xml.contains("      <!-- <ns1:Login> -->"), "{xml}");
-        assert!(xml.contains("      <!-- </ns1:Login> -->"), "{xml}");
-        assert!(xml.contains("  <!-- </tns:Request> -->"), "{xml}");
+        // A commented `choice` branch of a complex type keeps every line's own
+        // indentation, so the block nests the way the schema does once the user
+        // uncomments it.
+        assert!(xml.contains("    <!-- <ns1:OrderRef> -->"), "{xml}");
+        assert!(
+            xml.contains("      <!-- <ns1:Position>?</ns1:Position> -->"),
+            "{xml}"
+        );
+        assert!(xml.contains("      <!--Optional:-->"), "{xml}");
+        assert!(
+            xml.contains("      <!-- <ns1:Note>?</ns1:Note> -->"),
+            "{xml}"
+        );
+        assert!(xml.contains("    <!-- </ns1:OrderRef> -->"), "{xml}");
     }
 
     #[test]
-    fn keeps_the_notes_of_a_nested_optional_element_readable() {
+    fn prints_optional_elements_live_under_the_optional_marker() {
         let xml = template_of(SAMPLE);
         assert!(xml.contains("<tns:CloseSession xmlns:tns="), "{xml}");
-        assert!(xml.contains("<!-- optional: tns:Request -->"), "{xml}");
-        assert!(xml.contains("<!-- <ns1:Login> -->"), "{xml}");
-        assert!(xml.contains("<!-- </ns1:Login> -->"), "{xml}");
-        // A `nillable` attribute adds nothing: one optional line says it all.
-        assert!(!xml.contains("nillable"), "{xml}");
+        // Nothing is commented out: the marker tells the user the tag may go.
+        assert!(xml.contains("  <!--Optional:-->\n  <tns:Request>"), "{xml}");
         assert!(
-            xml.contains("<!-- <ns1:SessionId>text</ns1:SessionId> -->"),
+            xml.contains("        <!--Optional:-->\n        <ns1:SessionId>?</ns1:SessionId>"),
             "{xml}"
         );
-        // Every commented block says each thing once.
-        assert_eq!(
-            xml.matches("<!-- optional: ns1:Login -->").count(),
-            1,
-            "{xml}"
-        );
+        assert!(!xml.contains("<!-- <ns1:SessionId>"), "{xml}");
+        // A `nillable` attribute adds nothing: one marker says it all.
+        assert!(!xml.contains("nillable"), "{xml}");
+        // A marker is never wrapped in another comment.
+        assert!(!xml.contains("<!-- Optional: -->"), "{xml}");
+        assert!(!xml.contains("<!--Optional:--> -->"), "{xml}");
     }
 
     #[test]
-    fn flattens_the_notes_of_a_choice_branch_inside_an_optional_element() {
+    fn prints_placeholder_values_instead_of_guessed_samples() {
         let xml = template_of(SAMPLE);
         assert!(
-            xml.contains("<!-- choose one of 2 alternatives -->"),
+            xml.contains("<ns1:RequestType>?</ns1:RequestType>"),
             "{xml}"
         );
+        // Nothing that looks like real data: the user replaces or deletes `?`.
+        assert!(!xml.contains("text"), "{xml}");
+        assert!(!xml.contains("2026"), "{xml}");
+        assert!(!xml.contains(">0<"), "{xml}");
+    }
+
+    #[test]
+    fn flattens_the_markers_of_a_choice_branch() {
+        let xml = template_of(SAMPLE);
+        assert_eq!(xml.matches("<!--Choice:-->").count(), 2, "{xml}");
         assert_eq!(
-            xml.matches("<!-- optional: ns1:TicketRef -->").count(),
-            1,
-            "{xml}"
-        );
-        assert!(!xml.contains("nillable"), "{xml}");
-        assert_eq!(
-            xml.matches("<!-- <ns1:OrderRef>text</ns1:OrderRef> -->")
+            xml.matches("<!-- <ns1:TicketRef>?</ns1:TicketRef> -->")
                 .count(),
             1,
             "{xml}"
         );
+        // The optional marker of a branch stays tight inside the commented block.
+        assert!(!xml.contains("<!-- Optional: -->"), "{xml}");
+        assert!(!xml.contains("nillable"), "{xml}");
+        assert!(!xml.contains("<!-- <!--"), "{xml}");
+        assert!(!xml.contains(" --> -->"), "{xml}");
+    }
+
+    /// Cardinality: SoapUI says what may be missing and how often a block may
+    /// repeat, and the user copies or deletes tags accordingly.
+    const OCCURS: &str = r#"<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+      xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+      xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+      xmlns:tns="http://example.com/cards"
+      targetNamespace="http://example.com/cards">
+  <wsdl:types>
+    <xsd:schema targetNamespace="http://example.com/cards" elementFormDefault="qualified">
+      <xsd:element name="Cards" type="tns:CardsRequest"/>
+      <xsd:complexType name="CardsRequest">
+        <xsd:sequence>
+          <xsd:element name="Required" type="xsd:string"/>
+          <xsd:element name="Optional" type="xsd:string" minOccurs="0"/>
+          <xsd:element name="Any" type="tns:Card" minOccurs="0" maxOccurs="unbounded"/>
+          <xsd:element name="AtLeastOne" type="tns:Card" maxOccurs="unbounded"/>
+          <xsd:element name="UpToThree" type="tns:Card" maxOccurs="3"/>
+        </xsd:sequence>
+        <xsd:attribute name="Note" type="xsd:string"/>
+      </xsd:complexType>
+      <xsd:complexType name="Card">
+        <xsd:sequence>
+          <xsd:element name="Code" type="xsd:string"/>
+        </xsd:sequence>
+        <xsd:attribute name="Kind" type="xsd:string" use="required"/>
+      </xsd:complexType>
+    </xsd:schema>
+  </wsdl:types>
+  <wsdl:message name="CardsInput">
+    <wsdl:part name="body" element="tns:Cards"/>
+  </wsdl:message>
+  <wsdl:portType name="CardsPortType">
+    <wsdl:operation name="Cards">
+      <wsdl:input message="tns:CardsInput"/>
+    </wsdl:operation>
+  </wsdl:portType>
+  <wsdl:binding name="CardsBinding" type="tns:CardsPortType">
+    <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <wsdl:operation name="Cards">
+      <soap:operation soapAction="urn:Cards" style="document"/>
+      <wsdl:input><soap:body use="literal"/></wsdl:input>
+    </wsdl:operation>
+  </wsdl:binding>
+  <wsdl:service name="CardsService">
+    <wsdl:port name="CardsPort" binding="tns:CardsBinding">
+      <soap:address location="http://127.0.0.1:9000/soap"/>
+    </wsdl:port>
+  </wsdl:service>
+</wsdl:definitions>"#;
+
+    fn occurs_template() -> String {
+        template_for(OCCURS, "http://example.com/cards", "Cards")
+    }
+
+    #[test]
+    fn prints_the_repetitions_markers_of_a_repeating_element() {
+        let xml = occurs_template();
+        // An unbounded element appears once under a marker that says to copy it.
+        assert!(
+            xml.contains("  <!--Zero or more repetitions:-->\n  <tns:Any Kind=\"?\">"),
+            "{xml}"
+        );
+        assert_eq!(xml.matches("<tns:Any").count(), 1, "{xml}");
+        assert!(
+            xml.contains("  <!--One or more repetitions:-->\n  <tns:AtLeastOne Kind=\"?\">"),
+            "{xml}"
+        );
+        assert_eq!(xml.matches("<tns:AtLeastOne").count(), 1, "{xml}");
+        // A finite `maxOccurs` shows two copies and needs no marker to copy them.
+        assert!(xml.contains("  <tns:UpToThree Kind=\"?\">"), "{xml}");
+        assert_eq!(xml.matches("<tns:UpToThree").count(), 2, "{xml}");
+        assert!(!xml.contains("repetitions:-->\n  <tns:UpToThree"), "{xml}");
+    }
+
+    #[test]
+    fn prints_every_attribute_with_the_placeholder() {
+        let xml = occurs_template();
+        // Optional attributes are printed too: an attribute the user does not
+        // need is deleted along with the tag.
+        assert!(xml.contains(r#"<tns:Cards Note="?"#), "{xml}");
+        assert_eq!(xml.matches(r#"Kind="?"#).count(), 4, "{xml}");
+        assert!(!xml.contains("optional attribute"), "{xml}");
+        assert!(!xml.contains("<!--Note"), "{xml}");
+    }
+
+    #[test]
+    fn a_required_leaf_carries_no_marker() {
+        let xml = occurs_template();
+        assert!(xml.contains("  <tns:Required>?</tns:Required>"), "{xml}");
+        assert!(xml.contains("    <tns:Code>?</tns:Code>"), "{xml}");
+        assert!(
+            xml.contains("  <!--Optional:-->\n  <tns:Optional>?</tns:Optional>"),
+            "{xml}"
+        );
+        build_dom(&xml).expect("the cardinality template is well-formed markup");
+        for line in xml.lines() {
+            assert!(line.matches("<!--").count() <= 1, "nested markers: {line}");
+        }
     }
 
     /// A derived request type of the shape a real WSDL writes: a wrapper that
@@ -1504,10 +1680,14 @@ mod tests {
             xml.contains(r#"xmlns:ns1="http://nemo-ibe.com/STL""#),
             "{xml}"
         );
-        assert!(xml.contains("<!-- <ns1:RequestBody> -->"), "{xml}");
+        assert!(xml.contains("<ns1:RequestBody>"), "{xml}");
         assert!(!xml.contains("nillable"), "{xml}");
         assert!(
             xml.find("ns1:FlightRef").expect("nested body field") > body,
+            "{xml}"
+        );
+        assert!(
+            xml.contains("      <!--Optional:-->\n      <ns1:FlightRef>?</ns1:FlightRef>"),
             "{xml}"
         );
     }
@@ -1516,23 +1696,24 @@ mod tests {
     fn keeps_the_base_of_a_restriction_and_the_attributes_it_adds() {
         let xml = derived_template();
         let limited = xml
-            .find("tns:Limited")
+            .find("<tns:Limited")
             .expect("the restricted element is printed");
         let block = &xml[limited..];
         // A restriction repeats what it allows, so the base fields stay visible.
         assert!(block.contains("ns1:Requisites"), "{block}");
         assert!(block.contains("ns1:UserID"), "{block}");
-        assert!(
-            xml.contains(r#"<!-- optional attribute Version="text" -->"#),
-            "{xml}"
-        );
+        // The attribute the derivation adds is printed on the tag, not in a note.
+        assert!(block.contains("<tns:Limited Version=\"?\">"), "{block}");
+        assert!(!xml.contains("optional attribute"), "{xml}");
     }
 
     #[test]
     fn prints_the_value_and_the_attributes_of_a_simple_extension() {
         let xml = template_for(DERIVED, "http://nemo-ibe.com/STL", "Total");
-        assert!(xml.contains(r#"<ns1:Total Currency="text"#), "{xml}");
-        assert!(xml.contains(">0</ns1:Total>"), "{xml}");
+        assert_eq!(
+            xml,
+            r#"<ns1:Total Currency="?" xmlns:ns1="http://nemo-ibe.com/STL">?</ns1:Total>"#
+        );
     }
 
     #[test]

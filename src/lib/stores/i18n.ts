@@ -234,7 +234,7 @@ export const en: Dictionary = {
 	'wsdl.import': 'Import WSDL from clipboard',
 	'wsdl.importHelp': 'Import help',
 	'wsdl.importHelpText':
-		'Copy a WSDL url to the clipboard and press Import. The document is fetched, parsed and stored with its services, operations and endpoints, and the request template is generated from its schema. WSDL 2.0 and external schemas are not supported.',
+		'Copy a WSDL url to the clipboard and press Import. The document is fetched, parsed and stored with its services, operations and endpoints, and the request template is generated from its schema: every tag of the schema appears with `?` in place of a value, so you replace `?` or delete the tag. WSDL 2.0 and external schemas are not supported.',
 	'wsdl.importing': 'Importing…',
 	'wsdl.cancelImport': 'Cancel import',
 	'wsdl.imported': 'WSDL imported: {name}',
@@ -575,7 +575,7 @@ export const ru: Dictionary = {
 	'wsdl.import': 'Импортировать WSDL из буфера обмена',
 	'wsdl.importHelp': 'Справка по импорту',
 	'wsdl.importHelpText':
-		'Скопируйте адрес файла WSDL в буфер обмена и нажмите «Импортировать». Документ выгружается, разбирается и сохраняется вместе со службами, операциями и адресами, а шаблон запроса строится по его схеме. WSDL 2.0 и внешние схемы не поддерживаются.',
+		'Скопируйте адрес файла WSDL в буфер обмена и нажмите «Импортировать». Документ выгружается, разбирается и сохраняется вместе со службами, операциями и адресами, а шаблон запроса строится по его схеме: в нём есть каждый элемент схемы со `?` вместо значения — `?` заменяют своими данными или убирают тег. WSDL 2.0 и внешние схемы не поддерживаются.',
 	'wsdl.importing': 'Импорт…',
 	'wsdl.cancelImport': 'Отменить импорт',
 	'wsdl.imported': 'WSDL импортирован: {name}',

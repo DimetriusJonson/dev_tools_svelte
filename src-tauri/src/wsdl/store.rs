@@ -1294,10 +1294,16 @@ mod tests {
         assert_eq!(detail.output_element, "tns:GetPersonResponse");
         assert_eq!(detail.soap_version, SOAP_VERSION_11);
         assert!(detail.input_template.contains("<tns:GetPerson"));
-        assert!(detail.input_template.contains("<id>"));
-        // `minOccurs="0"` is a comment, not a forced element.
-        assert!(detail.input_template.contains("comment"));
-        // A note wrapped by its optional parent must stay one comment.
+        assert!(detail.input_template.contains("<id>?</id>"));
+        // `minOccurs="0"` is a marker above a live element, not a commented block.
+        assert!(
+            detail
+                .input_template
+                .contains("  <!--Optional:-->\n  <comment>?</comment>"),
+            "{}",
+            detail.input_template
+        );
+        // A marker must stay one comment.
         assert!(
             !detail.input_template.contains("<!- -"),
             "{}",
@@ -1564,7 +1570,10 @@ mod tests {
         assert_eq!(stored.response_body, "<fault/>");
         assert_eq!(stored.raw_request, "POST /soap HTTP/1.1");
         assert_eq!(stored.response_headers.len(), 1);
-        assert_eq!(stored.response_status_line, "HTTP/1.1 500 Internal Server Error");
+        assert_eq!(
+            stored.response_status_line,
+            "HTTP/1.1 500 Internal Server Error"
+        );
 
         // The request stays when the response is cleared, and the other way round.
         drop_response(&conn, &operation_id).expect("clear");
