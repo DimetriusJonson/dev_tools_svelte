@@ -14,7 +14,7 @@ import {
 	describeErrorText,
 	describeWarningText,
 } from './wsdl';
-import { buildEnvelope, buildSoapRawRequest } from './wsdl';
+import { buildEnvelope, buildSoapRawRequest, formatRawResponseDump } from './wsdl';
 
 const SOAP_NS = 'http://schemas.xmlsoap.org/wsdl/soap/';
 const SOAP12_NS = 'http://schemas.xmlsoap.org/wsdl/soap12/';
@@ -166,6 +166,48 @@ describe('envelope and raw preview', () => {
 		expect(raw).toContain('SOAPAction: "urn:demo:echo"');
 		// The envelope is the body that goes on the wire.
 		expect(raw).toContain('<soap:Envelope');
+	});
+});
+
+describe('formatted response dump', () => {
+	const HEADERS = [
+		{ name: 'Content-Type', value: 'text/xml; charset=utf-8' },
+		{ name: 'Content-Length', value: '42' }
+	];
+
+	it('re-indents the payload and keeps the framing as it arrived', () => {
+		const dump = formatRawResponseDump(
+			'HTTP/1.1 200 OK',
+			HEADERS,
+			'<soap:Envelope><soap:Body><reply/></soap:Body></soap:Envelope>',
+			2
+		);
+		const lines = dump.split(/\r?\n/);
+		// The exchange's own lines are copied, not rebuilt.
+		expect(lines[0]).toBe('HTTP/1.1 200 OK');
+		expect(lines[1]).toBe('Content-Type: text/xml; charset=utf-8');
+		expect(lines[2]).toBe('Content-Length: 42');
+		// One blank line, then the body with a line per element.
+		expect(lines[3]).toBe('');
+		expect(lines.slice(4)).toEqual([
+			'<soap:Envelope>',
+			'  <soap:Body>',
+			'    <reply/>',
+			'  </soap:Body>',
+			'</soap:Envelope>'
+		]);
+	});
+
+	it('throws when the payload carries no markup', () => {
+		// The caller reports `formatter.invalid`; nothing is invented for plain text.
+		expect(() => formatRawResponseDump('HTTP/1.1 200 OK', HEADERS, 'not markup')).toThrow();
+	});
+
+	it('keeps a stored answer without a status line headless', () => {
+		// An older database has no first line; the dump must not invent one.
+		const dump = formatRawResponseDump('', [], '<a><b/></a>');
+		expect(dump.startsWith('<a>')).toBe(true);
+		expect(dump).not.toContain('HTTP/');
 	});
 });
 

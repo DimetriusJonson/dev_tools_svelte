@@ -223,9 +223,17 @@ pub fn save_response(
     body: String,
     headers: Vec<RestProperty>,
     raw_request: String,
+    status_line: Option<String>,
 ) -> Result<(), String> {
     let connection = db.conn.lock().map_err(lock_error)?;
-    store_response(&connection, &operation_id, &body, &headers, &raw_request)
+    store_response(
+        &connection,
+        &operation_id,
+        &body,
+        &headers,
+        &raw_request,
+        status_line.as_deref().unwrap_or_default(),
+    )
 }
 
 /// Empties the stored answer without touching the request the user wrote.
@@ -544,6 +552,16 @@ fn optional_project(project_id: &str) -> Option<&str> {
     }
 }
 
+/// "No status known" is NULL, exactly like `save_rest_response` writes it: a dump
+/// rebuilt from such a row simply has no first line instead of an invented one.
+fn optional_status_line(status_line: &str) -> Option<&str> {
+    if status_line.is_empty() {
+        None
+    } else {
+        Some(status_line)
+    }
+}
+
 /// The endpoint ids already in use for this file, keyed by the operation and the
 /// address they point at, so a re-import of the same document keeps them and the
 /// state that names one of them stays valid.
@@ -848,7 +866,7 @@ fn endpoint_ids(conn: &Connection, operation_id: &str) -> Result<Vec<String>, St
 
 fn read_state(conn: &Connection, operation_id: &str) -> Result<Option<WsdlState>, String> {
     conn.query_row(
-        "SELECT COALESCE(endpoint_id, ''), request_body, headers, save_response, COALESCE(response_body, ''), response_headers, COALESCE(raw_request, '') FROM wsdl_operation_state WHERE operation_id = ?1",
+        "SELECT COALESCE(endpoint_id, ''), request_body, headers, save_response, COALESCE(response_body, ''), response_headers, COALESCE(raw_request, ''), COALESCE(response_status_line, '') FROM wsdl_operation_state WHERE operation_id = ?1",
         params![operation_id],
         |row| {
             let headers: String = row.get(2)?;
@@ -861,6 +879,7 @@ fn read_state(conn: &Connection, operation_id: &str) -> Result<Option<WsdlState>
                 response_body: row.get(4)?,
                 response_headers: decode_headers(&response_headers),
                 raw_request: row.get(6)?,
+                response_status_line: row.get(7)?,
             })
         },
     )
@@ -876,7 +895,7 @@ fn write_state(conn: &Connection, operation_id: &str, state: &WsdlState) -> Resu
     let response_headers = encode_headers(&state.response_headers)?;
 
     conn.execute(
-        "INSERT INTO wsdl_operation_state (operation_id, endpoint_id, request_body, headers, save_response, response_body, response_headers, raw_request, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, CURRENT_TIMESTAMP) ON CONFLICT(operation_id) DO UPDATE SET endpoint_id = excluded.endpoint_id, request_body = excluded.request_body, headers = excluded.headers, save_response = excluded.save_response, response_body = excluded.response_body, response_headers = excluded.response_headers, raw_request = excluded.raw_request, updated_at = CURRENT_TIMESTAMP",
+        "INSERT INTO wsdl_operation_state (operation_id, endpoint_id, request_body, headers, save_response, response_body, response_headers, raw_request, response_status_line, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, CURRENT_TIMESTAMP) ON CONFLICT(operation_id) DO UPDATE SET endpoint_id = excluded.endpoint_id, request_body = excluded.request_body, headers = excluded.headers, save_response = excluded.save_response, response_body = excluded.response_body, response_headers = excluded.response_headers, raw_request = excluded.raw_request, response_status_line = excluded.response_status_line, updated_at = CURRENT_TIMESTAMP",
         params![
             operation_id,
             state.endpoint_id,
@@ -885,7 +904,8 @@ fn write_state(conn: &Connection, operation_id: &str, state: &WsdlState) -> Resu
             state.save_response,
             state.response_body,
             response_headers,
-            state.raw_request
+            state.raw_request,
+            optional_status_line(&state.response_status_line)
         ],
     )
     .map_err(|error| error.to_string())?;
@@ -902,6 +922,7 @@ fn empty_state() -> WsdlState {
         response_body: String::new(),
         response_headers: Vec::new(),
         raw_request: String::new(),
+        response_status_line: String::new(),
     }
 }
 
@@ -1039,6 +1060,7 @@ fn store_response(
     body: &str,
     headers: &[RestProperty],
     raw_request: &str,
+    status_line: &str,
 ) -> Result<(), String> {
     operation_keys(conn, operation_id)?;
     let stored = read_state(conn, operation_id)?.unwrap_or_else(empty_state);
@@ -1047,6 +1069,7 @@ fn store_response(
         response_body: body.to_string(),
         response_headers: headers.to_vec(),
         raw_request: raw_request.to_string(),
+        response_status_line: status_line.to_string(),
         ..stored
     };
     write_state(conn, operation_id, &state)
@@ -1061,6 +1084,7 @@ fn drop_response(conn: &Connection, operation_id: &str) -> Result<(), String> {
         response_body: String::new(),
         response_headers: Vec::new(),
         raw_request: String::new(),
+        response_status_line: String::new(),
         ..stored
     };
     write_state(conn, operation_id, &state)
@@ -1529,6 +1553,7 @@ mod tests {
             "<fault/>",
             &[row("Content-Type", "text/xml; charset=utf-8")],
             "POST /soap HTTP/1.1",
+            "HTTP/1.1 500 Internal Server Error",
         )
         .expect("response");
 
@@ -1539,6 +1564,7 @@ mod tests {
         assert_eq!(stored.response_body, "<fault/>");
         assert_eq!(stored.raw_request, "POST /soap HTTP/1.1");
         assert_eq!(stored.response_headers.len(), 1);
+        assert_eq!(stored.response_status_line, "HTTP/1.1 500 Internal Server Error");
 
         // The request stays when the response is cleared, and the other way round.
         drop_response(&conn, &operation_id).expect("clear");
@@ -1548,6 +1574,7 @@ mod tests {
         assert_eq!(cleared.response_body, "");
         assert!(cleared.response_headers.is_empty());
         assert_eq!(cleared.raw_request, "");
+        assert_eq!(cleared.response_status_line, "");
         assert_eq!(cleared.request_body, "<request/>");
 
         persist_state(

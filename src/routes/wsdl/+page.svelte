@@ -45,6 +45,7 @@
 	} from '$lib/services/wsdl';
 	import {
 		byteLength,
+		buildRawResponse,
 		detectLanguageFromHeaders,
 		filenameFromDisposition,
 		formatRestSize,
@@ -65,6 +66,7 @@
 		describeErrorText,
 		describeWarningText,
 		editableForSave,
+		formatRawResponseDump,
 		lockedHeadersFor,
 		mergeLockedHeaders,
 		normalizeHeaderRows,
@@ -198,9 +200,33 @@
 		return lockedNames.includes(row.name.trim().toLowerCase());
 	}
 
-	// The bytes exactly as they arrived. The XML tab shows the editable mirror
-	// instead, so `Format` rewrites the visible text and this stays comparable.
-	const rawResponseText = $derived(response ? response.body : savedResponseBody);
+	/** The payload the tabs read: the live answer, or the one stored for this operation. */
+	const responseBody = $derived(response ? response.body : savedResponseBody);
+	/** The first line of the exchange; a stored answer from an older database has none. */
+	const responseStatusLine = $derived(
+		response?.status_line ?? detail?.state.response_status_line ?? ''
+	);
+	// The whole exchange: the status line the server answered with, one header per line,
+	// the blank line that separates them, and the body exactly as it arrived.
+	const rawResponseDump = $derived(
+		buildRawResponse(responseStatusLine, responseHeaders, responseBody)
+	);
+
+	/**
+	 * A markup answer stays markup inside the dump, so the tab highlights it as XML and
+	 * offers `Format`; anything else is plain text with no format action.
+	 */
+	const rawResponseLanguage = $derived(responseLanguage === 'xml' ? 'xml' : 'text');
+	const canFormatRawResponse = $derived(responseLanguage === 'xml' && responseBody.length > 0);
+
+	// A mirror of the dump: `Format` rewrites only what this tab shows, so neither the
+	// stored bytes nor the `XML` tab's own mirror change. The XML tab shows the editable
+	// mirror instead, and this one keeps the framing the exchange really had.
+	let rawResponseText = $state('');
+
+	$effect(() => {
+		rawResponseText = rawResponseDump;
+	});
 
 	/** What Send and the download button put on the wire: the envelope plus all headers. */
 	const soapInput = $derived<RestExecutionInput | null>(
@@ -273,6 +299,19 @@
 		if (rawResponseText) await copyText(rawResponseText);
 	}
 
+	/**
+	 * `Format` on the `Raw` tab re-indents only the payload. The status line and the
+	 * header block above it stay exactly as they arrived, and the stored bytes are
+	 * not touched — this rewrites the tab's mirror alone.
+	 */
+	function formatRawResponse(): void {
+		try {
+			rawResponseText = formatRawResponseDump(responseStatusLine, responseHeaders, responseBody);
+		} catch {
+			notify($t('formatter.invalid'), 'error');
+		}
+	}
+
 	/** A binary answer is only savable as a file; a SOAP fault with a body is text. */
 	function isSavableResponse(result: RestResponse): boolean {
 		return !result.is_attachment && !result.is_binary && result.language !== null;
@@ -280,11 +319,18 @@
 
 	async function persistResponse(operationId: string, result: RestResponse): Promise<void> {
 		try {
-			await saveWsdlResponse(operationId, result.body, result.headers, result.raw_request);
+			await saveWsdlResponse(
+				operationId,
+				result.body,
+				result.headers,
+				result.raw_request,
+				result.status_line
+			);
 			if (detail?.id === operationId) {
 				detail.state.response_body = result.body;
 				detail.state.response_headers = result.headers;
 				detail.state.raw_request = result.raw_request;
+				detail.state.response_status_line = result.status_line;
 			}
 		} catch (error) {
 			notifyError(error, $t('common.error'));
@@ -308,6 +354,7 @@
 				target.state.response_body = '';
 				target.state.response_headers = [];
 				target.state.raw_request = '';
+				target.state.response_status_line = '';
 			}
 			// An answer of the current call stays on screen; only the stored one goes away.
 			if (!response) responseText = '';
@@ -1222,6 +1269,17 @@
 						{:else}
 							<div class="flex min-h-0 flex-1 flex-col">
 								<div class="flex shrink-0 items-center gap-2 px-3 py-2">
+									{#if canFormatRawResponse}
+										<button
+											type="button"
+											onclick={formatRawResponse}
+											class="flex h-8 w-8 items-center justify-center rounded-md text-[var(--text-muted)] transition-all duration-150 hover:scale-110 hover:bg-white/5 hover:text-[var(--text)] active:scale-95"
+											title={$t('common.format')}
+											aria-label={$t('common.format')}
+										>
+											<Icon name="alignLeft" size={18} strokeWidth={1.9} />
+										</button>
+									{/if}
 									<button
 										type="button"
 										onclick={copyRawResponse}
@@ -1236,7 +1294,7 @@
 								<div class="min-h-0 flex-1">
 									<CodeMirrorEditor
 										value={rawResponseText}
-										language="text"
+										language={rawResponseLanguage}
 										dark={dark}
 										readonly={true}
 										ariaLabel={$t('wsdl.tabRaw')}

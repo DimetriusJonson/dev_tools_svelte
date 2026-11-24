@@ -1,4 +1,5 @@
-import { buildRawRequestPreview, type RestProperty } from './rest';
+import { buildRawRequestPreview, buildRawResponse, type RestProperty } from './rest';
+import { formatContent } from './formatters';
 
 /** A SOAP call is always a POST to the file's endpoint. */
 export const SOAP_METHOD = 'POST';
@@ -186,6 +187,22 @@ export function buildSoapRawRequest(
 		// type, so this only feeds the preview's other defaults.
 		'xml'
 	);
+}
+
+/**
+ * The `Raw` tab's `Format`: the payload of a response dump is re-indented while the
+ * status line and the header block above it are copied untouched, so the framing of
+ * the exchange stays exactly as it arrived. A body with no markup throws, like every
+ * other XML format here.
+ */
+export function formatRawResponseDump(
+	statusLine: string,
+	headers: RestProperty[],
+	body: string,
+	indent = 4
+): string {
+	const formatted = formatContent('xml', body, { indent, doFormat: true, doUnescape: false });
+	return buildRawResponse(statusLine, headers, formatted);
 }
 
 /** An i18n key plus the detail to interpolate into it. */

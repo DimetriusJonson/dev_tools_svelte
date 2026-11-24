@@ -107,6 +107,11 @@ pub struct WsdlState {
     pub response_body: String,
     pub response_headers: Vec<RestProperty>,
     pub raw_request: String,
+    /// The status line the server answered with (`HTTP/1.1 200 OK`). The Raw response
+    /// tab rebuilds the whole exchange from it; a row written before this column or an
+    /// answer with no status known holds the empty string.
+    #[serde(default)]
+    pub response_status_line: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -294,8 +299,9 @@ pub fn cmd_save_wsdl_response(
     body: String,
     headers: Vec<RestProperty>,
     raw_request: String,
+    status_line: Option<String>,
 ) -> Result<(), String> {
-    store::save_response(db, operation_id, body, headers, raw_request)
+    store::save_response(db, operation_id, body, headers, raw_request, status_line)
 }
 
 #[tauri::command(rename = "clear_wsdl_response", rename_all = "snake_case")]

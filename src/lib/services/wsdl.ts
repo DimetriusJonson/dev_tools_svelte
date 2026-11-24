@@ -62,6 +62,8 @@ export interface WsdlState {
 	response_body: string;
 	response_headers: RestProperty[];
 	raw_request: string;
+	/** The status line of the stored answer; `''` means the dump has no first line. */
+	response_status_line: string;
 }
 
 export interface WsdlOperationDetail {
@@ -139,7 +141,9 @@ function mapState(state: WsdlState): WsdlState {
 	return {
 		...state,
 		headers: rows(state.headers),
-		response_headers: rows(state.response_headers)
+		response_headers: rows(state.response_headers),
+		// A state row written before the status line column simply has no first line.
+		response_status_line: state.response_status_line ?? ''
 	};
 }
 
@@ -210,18 +214,25 @@ export async function saveWsdlOperationState(input: WsdlOperationInput): Promise
 	});
 }
 
+/**
+ * Stores the answer together with the status line, so the `Raw` tab can rebuild the
+ * whole exchange later. An empty line is sent as `null`: "no status known" is the
+ * absence of a first line, not a blank one.
+ */
 export async function saveWsdlResponse(
 	operationId: string,
 	body: string,
 	headers: RestProperty[],
-	rawRequest: string
+	rawRequest: string,
+	statusLine: string
 ): Promise<void> {
 	if (!isWsdlSupported()) throw new Error(DESKTOP_ONLY);
 	await invokeCommand('save_wsdl_response', {
 		operation_id: operationId,
 		body,
 		headers: headers.map((row) => ({ ...row })),
-		raw_request: rawRequest
+		raw_request: rawRequest,
+		status_line: statusLine.trim() ? statusLine.trim() : null
 	});
 }
 

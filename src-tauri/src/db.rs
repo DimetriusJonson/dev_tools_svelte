@@ -181,6 +181,7 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 			response_body TEXT,
 			response_headers TEXT NOT NULL DEFAULT '[]',
 			raw_request TEXT,
+			response_status_line TEXT,
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		);
 
@@ -203,8 +204,10 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     // Databases created before the retention selector have no expiry column.
     ensure_column(conn, "shared_uploads", "expires_at", "DATETIME")?;
     // Databases created before the Raw response tab have no stored status line, so a
-    // saved answer from an older app would rebuild a dump without its first line.
-    ensure_column(conn, "rest_requests", "response_status_line", "TEXT")
+    // saved answer from an older app would rebuild a dump without its first line. The
+    // WSDL state row needs the same column for the same reason.
+    ensure_column(conn, "rest_requests", "response_status_line", "TEXT")?;
+    ensure_column(conn, "wsdl_operation_state", "response_status_line", "TEXT")
 }
 
 /// Adds a column to an existing table. `CREATE TABLE IF NOT EXISTS` never alters a
@@ -601,6 +604,30 @@ mod tests {
             .query_row([], |row| row.get(0))
             .expect("legacy row");
         assert_eq!(line, None, "the saved row keeps its body and gains no line");
+    }
+
+    #[test]
+    fn adds_the_status_line_column_to_an_older_wsdl_state() {
+        let connection = Connection::open_in_memory().expect("database");
+        // A WSDL state row written before the Raw response tab held the whole exchange
+        // has no status line; the stored answer survives and rebuilds without a first line.
+        connection
+            .execute_batch(
+                "CREATE TABLE wsdl_operation_state (operation_id TEXT PRIMARY KEY, endpoint_id TEXT, request_body TEXT NOT NULL DEFAULT '', headers TEXT NOT NULL DEFAULT '[]', save_response INTEGER NOT NULL DEFAULT 0, response_body TEXT, response_headers TEXT NOT NULL DEFAULT '[]', raw_request TEXT, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+                 INSERT INTO wsdl_operation_state (operation_id, response_body, response_headers) VALUES ('op', '<reply/>', '[]');",
+            )
+            .expect("legacy table");
+
+        init_schema(&connection).expect("migrate");
+        init_schema(&connection).expect("migrate again");
+
+        let mut statement = connection
+            .prepare("SELECT response_status_line FROM wsdl_operation_state WHERE operation_id = 'op'")
+            .expect("migrated column");
+        let line: Option<String> = statement
+            .query_row([], |row| row.get(0))
+            .expect("legacy row");
+        assert_eq!(line, None, "the stored SOAP answer survives without a status line");
     }
 
     #[test]
