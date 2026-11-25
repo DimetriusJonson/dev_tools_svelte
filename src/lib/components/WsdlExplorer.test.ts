@@ -151,6 +151,16 @@ function projectInput(): HTMLInputElement | null {
 	return document.querySelector<HTMLInputElement>('input[aria-label="Project name"]');
 }
 
+function filterInput(): HTMLInputElement {
+	const input = document.querySelector<HTMLInputElement>('input[aria-label="Filter operations by name"]');
+	expect(input, 'the filter input is rendered').toBeTruthy();
+	return input as HTMLInputElement;
+}
+
+function filterClearButton(): HTMLButtonElement | null {
+	return document.querySelector<HTMLButtonElement>('[aria-label="Clear filter"]');
+}
+
 function typeText(input: HTMLInputElement, value: string): void {
 	input.value = value;
 	input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -431,6 +441,97 @@ describe('WsdlExplorer tree', () => {
 		expect(document.body.textContent).toContain('No WSDL files yet');
 		expect(document.body.textContent).toContain('Create a project and import a WSDL file');
 		expect(document.body.textContent).not.toContain('Loading WSDL files…');
+	});
+});
+
+describe('WsdlExplorer operation filter', () => {
+	it('keeps the matching operations with their service and file rows', () => {
+		render({ files: [file, stockFile], activeOperationId: operation.id });
+
+		click(fileRow(stockFile.source_url));
+		click(serviceRow('StockService'));
+		expect(operationRow('CloseSession')).toBeTruthy();
+		expect(operationRow('GetOrders')).toBeTruthy();
+
+		typeText(filterInput(), 'order');
+
+		expect(operationRow('GetOrders')).toBeTruthy();
+		expect(operationRow('CloseSession')).toBeNull();
+		expect(serviceRow('StockService')).toBeTruthy();
+		expect(serviceRow('AviaService')).toBeNull();
+		expect(fileRow(file.source_url)).toBeNull();
+		expect(fileRow(stockFile.source_url)).toBeTruthy();
+	});
+
+	it('matches case-insensitively and ignores the surrounding spaces', () => {
+		render({ files: [file, stockFile] });
+
+		typeText(filterInput(), '  ORD  ');
+		expect(operationRow('GetOrders')).toBeTruthy();
+		expect(operationRow('CloseSession')).toBeNull();
+	});
+
+	it('reveals matches inside a manually collapsed branch without touching the toggle', () => {
+		render({ files: [file] });
+
+		click(fileRow(file.source_url));
+		expect(operationRow('CloseSession')).toBeNull();
+
+		typeText(filterInput(), 'close');
+		expect(operationRow('CloseSession')).toBeTruthy();
+		expect(fileRow(file.source_url)?.getAttribute('aria-expanded')).toBe('true');
+
+		// The manual collapse belongs to the unfiltered view, so it survives the filter.
+		typeText(filterInput(), '');
+		expect(operationRow('CloseSession')).toBeNull();
+		expect(fileRow(file.source_url)?.getAttribute('aria-expanded')).toBe('false');
+	});
+
+	it('says when no operation matches', () => {
+		render({ files: [file, stockFile], activeOperationId: operation.id });
+
+		typeText(filterInput(), 'zzz');
+
+		expect(document.body.textContent).toContain('No operation matches the filter');
+		expect(document.body.textContent).not.toContain('No WSDL files yet');
+		expect(operationRow('CloseSession')).toBeNull();
+		expect(fileRow(file.source_url)).toBeNull();
+	});
+
+	it('clears through the button and Escape, and drops the file actions meanwhile', () => {
+		render({ files: [file, stockFile], activeOperationId: operation.id });
+
+		click(fileRow(stockFile.source_url));
+		click(serviceRow('StockService'));
+		expect(operationRow('GetOrders')).toBeTruthy();
+		expect(document.querySelectorAll('[aria-label="File actions"]')).toHaveLength(1);
+		expect(filterClearButton()).toBeNull();
+
+		typeText(filterInput(), 'order');
+		expect(operationRow('CloseSession')).toBeNull();
+		// The selected operation is filtered out, so no row owns it any more.
+		expect(document.querySelectorAll('[aria-label="File actions"]')).toHaveLength(0);
+		click(filterClearButton());
+		expect(filterInput().value).toBe('');
+		expect(operationRow('CloseSession')).toBeTruthy();
+		expect(document.querySelectorAll('[aria-label="File actions"]')).toHaveLength(1);
+
+		typeText(filterInput(), 'close');
+		expect(operationRow('GetOrders')).toBeNull();
+		pressKey(filterInput(), 'Escape');
+		expect(filterInput().value).toBe('');
+		expect(operationRow('GetOrders')).toBeTruthy();
+	});
+
+	it('renders the localized label and empty state in Russian', () => {
+		setLocale('ru');
+		render({ files: [file] });
+
+		const input = document.querySelector('input[aria-label="Фильтр операций по названию"]');
+		expect(input?.getAttribute('placeholder')).toBe('Фильтр операций…');
+
+		typeText(input as HTMLInputElement, 'нет');
+		expect(document.body.textContent).toContain('Ни одна операция не подходит под фильтр');
 	});
 });
 

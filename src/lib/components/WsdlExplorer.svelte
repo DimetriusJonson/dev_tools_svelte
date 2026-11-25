@@ -2,7 +2,7 @@
 	import { tick } from 'svelte';
 	import Icon from '$lib/components/Icon.svelte';
 	import { t } from '$lib/stores/i18n';
-	import type { WsdlFileSummary, WsdlProject } from '$lib/services/wsdl';
+	import type { WsdlFileSummary, WsdlProject, WsdlService } from '$lib/services/wsdl';
 	import { describeWarningText } from '$lib/utils/wsdl';
 
 	let {
@@ -54,14 +54,37 @@
 
 	/** Manual expansion wins over the auto-open of the selected operation's branch. */
 	let expanded = $state<Record<string, boolean>>({});
+	/** Case-insensitive substring applied to operation names; empty shows the whole tree. */
+	let filterText = $state('');
 
 	const activeProject = $derived(projects.find((project) => project.id === activeProjectId) ?? null);
+	const filterTerm = $derived(filterText.trim().toLowerCase());
+
+	/** One operation name is enough to keep its service and file rows. */
+	function matches(name: string): boolean {
+		return name.toLowerCase().includes(filterTerm);
+	}
+
+	const filteredFiles = $derived.by(() => {
+		if (!filterTerm) return files;
+		const result: WsdlFileSummary[] = [];
+		for (const file of files) {
+			const services: WsdlService[] = file.services
+				.map((service) => ({
+					...service,
+					operations: service.operations.filter((operation) => matches(operation.name))
+				}))
+				.filter((service) => service.operations.length > 0);
+			if (services.length > 0) result.push({ ...file, services });
+		}
+		return result;
+	});
 
 	// The branch that holds the selected operation opens itself, so a restored
 	// selection is visible without the user hunting for it in a collapsed tree.
 	const activePath = $derived.by(() => {
 		if (!activeOperationId) return null;
-		for (const file of files) {
+		for (const file of filteredFiles) {
 			for (const service of file.services) {
 				if (service.operations.some((operation) => operation.id === activeOperationId)) {
 					return { fileId: file.id, serviceId: service.id };
@@ -73,11 +96,15 @@
 	const activeFileId = $derived(activePath?.fileId ?? null);
 
 	function isOpen(id: string): boolean {
+		// A filter result is short and partial, so its branches are always open and
+		// the manual toggles below stay untouched for the unfiltered view.
+		if (filterTerm) return true;
 		if (id in expanded) return Boolean(expanded[id]);
 		return activePath?.fileId === id || activePath?.serviceId === id;
 	}
 
 	function toggle(id: string): void {
+		if (filterTerm) return;
 		expanded[id] = !isOpen(id);
 	}
 
@@ -350,6 +377,35 @@
 		</button>
 	</div>
 
+	<div class="relative mb-2">
+		<span class="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)]">
+			<Icon name="search" size={14} />
+		</span>
+		<input
+			type="text"
+			bind:value={filterText}
+			onkeydown={(event) => {
+				if (event.key === 'Escape') filterText = '';
+			}}
+			class="h-9 w-full rounded-lg border border-[var(--border)] bg-[var(--bg)] pl-8 pr-9 text-[13px] font-medium text-[var(--text)] outline-none transition-colors focus:border-[var(--accent)]"
+			placeholder={$t('wsdl.filterPlaceholder')}
+			aria-label={$t('wsdl.filter')}
+			autocomplete="off"
+			spellcheck="false"
+		/>
+		{#if filterText}
+			<button
+				type="button"
+				onclick={() => (filterText = '')}
+				class="absolute right-1.5 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md text-[var(--text-muted)] transition-all duration-150 hover:scale-110 hover:text-[var(--text)] active:scale-95"
+				title={$t('wsdl.filterClear')}
+				aria-label={$t('wsdl.filterClear')}
+			>
+				<Icon name="close" size={13} />
+			</button>
+		{/if}
+	</div>
+
 	<div class="min-h-0 flex-1 overflow-y-auto">
 		{#if loading}
 			<p class="px-1 py-6 text-center text-xs font-semibold text-[var(--text-muted)]">
@@ -360,9 +416,13 @@
 				<p class="text-xs font-semibold text-[var(--text-muted)]">{$t('wsdl.noFiles')}</p>
 				<p class="text-[11px] leading-snug text-[var(--text-muted)]">{$t('wsdl.emptyHint')}</p>
 			</div>
+		{:else if filteredFiles.length === 0}
+			<p class="px-1 py-6 text-center text-xs font-semibold text-[var(--text-muted)]">
+				{$t('wsdl.filterEmpty')}
+			</p>
 		{:else}
 			<ul class="flex flex-col gap-0.5">
-				{#each files as file (file.id)}
+				{#each filteredFiles as file (file.id)}
 					{@const open = isOpen(file.id)}
 					{@const activeFile = file.id === activeFileId}
 					<li>
