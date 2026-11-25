@@ -662,14 +662,19 @@ export function encodeUrl(input: string): string {
 }
 
 /**
- * Decodes every percent-escape, including the reserved characters, which is
- * the exact inverse of `encodeUrl`. `decodeURI` cannot recover them, so a
- * link copied from another tool would stay `http%3A%2F%2Fhost%3A3030`.
+ * Decodes the text in two steps, the order a link copied out of HTML arrives in:
+ * markup entities first (`&amp;` → `&`), then percent-escapes (`%5C` → `\`).
+ * Percent-escapes go second and entities are decoded once, so an entity that is
+ * itself percent-encoded (`%26amp%3B`) stays the literal text `&amp;` — that is
+ * what keeps this the exact inverse of `encodeUrl`. `decodeURI` cannot recover
+ * the reserved characters, so a link copied from another tool would stay
+ * `http%3A%2F%2Fhost%3A3030`.
  */
 export function decodeUrl(input: string): string {
+	const entities = decodeXmlEntities(input);
 	try {
-		return decodeURIComponent(input);
+		return decodeURIComponent(entities);
 	} catch {
-		return input;
+		return entities;
 	}
 }

@@ -207,11 +207,36 @@ describe('URL encoding', () => {
 		);
 	});
 
+	it('round-trips text that already holds entity text', () => {
+		const source = 'https://example.com/?a=&amp;b=%5C';
+		expect(decodeUrl(encodeUrl(source))).toBe(source);
+	});
+
 	it('decodes reserved characters', () => {
 		expect(decodeUrl('http%3A%2F%2F10.7.6.86%3A3030&id=8f82124b-cd30-42ed-84a6-1b8567810614')).toBe(
 			'http://10.7.6.86:3030&id=8f82124b-cd30-42ed-84a6-1b8567810614'
 		);
 		expect(decodeUrl('a%20b%2Fc%3Fd%3De')).toBe('a b/c?d=e');
+	});
+
+	it('unescapes markup entities before percent-escapes', () => {
+		const htmlUrl =
+			'https://example.com/workplace/result?format=pdf&amp;is_empty=1&amp;report=Agreement.fr3&amp;Agreement_ID=0&amp;Agency_ID=11472&amp;Contract_Season_Name=2026&amp;Contract_Number=11472%5C2026%5C1&amp;filename=StatementOfAcceptance.pdf';
+		expect(decodeUrl(htmlUrl)).toBe(
+			'https://example.com/workplace/result?format=pdf&is_empty=1&report=Agreement.fr3&Agreement_ID=0&Agency_ID=11472&Contract_Season_Name=2026&Contract_Number=11472\\2026\\1&filename=StatementOfAcceptance.pdf'
+		);
+		expect(decodeUrl('a%3D1&amp;b=%5C2')).toBe('a=1&b=\\2');
+		expect(decodeUrl('&lt;p&gt;%5Cn')).toBe('<p>\\n');
+	});
+
+	it('keeps a percent-encoded entity as the literal text it encodes', () => {
+		expect(decodeUrl('%26amp%3B')).toBe('&amp;');
+		expect(decodeUrl('x=%26nbsp%3B')).toBe('x=&nbsp;');
+		expect(decodeUrl('&amp;#92;')).toBe('&#92;');
+	});
+
+	it('keeps decoded entities when the percent sequence is malformed', () => {
+		expect(decodeUrl('&amp;100%')).toBe('&100%');
 	});
 
 	it('returns input unchanged for malformed sequences', () => {
