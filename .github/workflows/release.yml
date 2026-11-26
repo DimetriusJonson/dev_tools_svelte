@@ -2,7 +2,7 @@ name: Release
 
 # A release is cut by pushing a tag that equals the app version:
 #
-#   git tag v0.1.0 && git push origin v0.1.0
+#   git tag v0.2.0 && git push origin v0.2.0
 #
 # A push to `main` runs only `preflight` (checks, no bundles, no release), and
 # `workflow_dispatch` builds the bundles and uploads them as workflow artifacts

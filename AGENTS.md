@@ -41,7 +41,7 @@ npm run test:watch
 npm run tauri build -- --no-bundle
 npx tauri signer generate -w ~/.tauri/webdev-useful-tools.key --ci
 TAURI_SIGNING_PRIVATE_KEY=~/.tauri/webdev-useful-tools.key npm run tauri build
-git tag v0.1.0 && git push origin v0.1.0   # cuts the GitHub Release via .github/workflows/release.yml
+git tag v0.2.0 && git push origin v0.2.0   # cuts the GitHub Release via .github/workflows/release.yml
 ```
 
 - `npm run dev` runs Vite on `http://localhost:1420` with `strictPort: true`.
