@@ -12,6 +12,7 @@ import {
 	detectLanguageFromContentType,
 	detectLanguageFromHeaders,
 	filenameFromDisposition,
+	isAttachmentDisposition,
 	encodeForm,
 	formatRestSize,
 	formatRestTime,
@@ -1105,5 +1106,26 @@ describe('content-disposition file name', () => {
 		expect(filenameFromDisposition('attachment; filename=""')).toBeNull();
 		expect(filenameFromDisposition('attachment; filename*=UTF-8\'\'')).toBeNull();
 		expect(filenameFromDisposition('')).toBeNull();
+	});
+
+	it('keeps a semicolon inside a quoted name instead of ending at it', () => {
+		expect(filenameFromDisposition('attachment; filename="a;b.txt"')).toBe('a;b.txt');
+		expect(filenameFromDisposition("attachment; filename*=UTF-8''a%3Bb.txt")).toBe('a;b.txt');
+	});
+
+	it('does not fall back to the plain name when the extended one is broken', () => {
+		expect(
+			filenameFromDisposition('attachment; filename="fallback.txt"; filename*=UTF-8\'\'caf%E9.txt')
+		).toBe('caf%E9.txt');
+	});
+});
+
+describe('attachment disposition', () => {
+	it('reads only the disposition type', () => {
+		expect(isAttachmentDisposition('attachment')).toBe(true);
+		expect(isAttachmentDisposition('ATTACHMENT; filename="report.csv"')).toBe(true);
+		// A filename that happens to contain the word is not the disposition type.
+		expect(isAttachmentDisposition('inline; filename="attachment.pdf"')).toBe(false);
+		expect(isAttachmentDisposition('')).toBe(false);
 	});
 });

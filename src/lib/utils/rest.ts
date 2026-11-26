@@ -90,6 +90,47 @@ export function getHeader(headers: RestProperty[], name: string): string {
 }
 
 /**
+ * Value of one `Content-Disposition` parameter, honouring a quoted string so a `;`
+ * inside `filename="a;b.txt"` does not end the value. The surrounding quotes are
+ * removed; nothing is unescaped, matching `disposition_parameter` in `rest.rs`.
+ */
+function dispositionParameter(value: string, name: string): string | null {
+	let index = 0;
+	while (index < value.length) {
+		// Skip the separators between parameters.
+		while (index < value.length && (value[index] === ';' || /\s/.test(value[index]))) index++;
+		const keyStart = index;
+		while (index < value.length && value[index] !== '=' && value[index] !== ';') index++;
+		const key = value.slice(keyStart, index).trim();
+		if (index >= value.length || value[index] === ';') {
+			// A bare disposition type (`attachment`) or a parameter without a value.
+			continue;
+		}
+		index++; // '='
+		while (index < value.length && /\s/.test(value[index])) index++;
+		if (value[index] === '"') {
+			index++;
+			const valueStart = index;
+			let escaped = false;
+			while (index < value.length) {
+				const char = value[index];
+				if (escaped) escaped = false;
+				else if (char === '\\') escaped = true;
+				else if (char === '"') break;
+				index++;
+			}
+			if (key.toLowerCase() === name.toLowerCase()) return value.slice(valueStart, index);
+			if (index < value.length) index++; // the closing quote
+		} else {
+			const valueStart = index;
+			while (index < value.length && value[index] !== ';') index++;
+			if (key.toLowerCase() === name.toLowerCase()) return value.slice(valueStart, index).trim();
+		}
+	}
+	return null;
+}
+
+/**
  * Reads a file name out of a `Content-Disposition` value: the RFC 5987 extended
  * form wins over the plain one, quotes are stripped, and a broken percent
  * escape is kept as its own text rather than dropped. An empty parameter answers
@@ -97,18 +138,27 @@ export function getHeader(headers: RestProperty[], name: string): string {
  */
 export function filenameFromDisposition(value: string): string | null {
 	if (!value) return null;
-	const star = value.match(/filename\*=([^;]+)/i);
-	if (star) {
-		const raw = star[1].trim().replace(/^UTF-8''/i, '').replace(/^"|"$/g, '');
+	const extended = dispositionParameter(value, 'filename*');
+	if (extended !== null) {
+		const raw = extended.trim().replace(/^UTF-8''/i, '');
 		try {
 			return decodeURIComponent(raw) || null;
 		} catch {
 			return raw || null;
 		}
 	}
-	const plain = value.match(/filename=([^;]+)/i);
-	if (plain) return plain[1].trim().replace(/^"|"$/g, '') || null;
+	const plain = dispositionParameter(value, 'filename');
+	if (plain !== null) return plain.trim().replace(/^"|"$/g, '') || null;
 	return null;
+}
+
+/**
+ * True when the disposition type is `attachment`. Only the token before the first
+ * `;` counts, so `inline; filename="attachment.pdf"` is not an attachment. Mirrors
+ * `is_attachment_disposition` in `rest.rs`.
+ */
+export function isAttachmentDisposition(value: string): boolean {
+	return value.split(';')[0].trim().toLowerCase() === 'attachment';
 }
 
 export function parseCookies(headers: RestProperty[]): RestProperty[] {

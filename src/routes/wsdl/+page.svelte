@@ -51,6 +51,7 @@
 		formatRestSize,
 		formatRestTime,
 		getHeader,
+		isAttachmentDisposition,
 		validateProperties,
 		type RestProperty
 	} from '$lib/utils/rest';
@@ -163,7 +164,7 @@
 		response?.filename ?? filenameFromDisposition(attachmentHeader)
 	);
 	const isAttachment = $derived(
-		Boolean(response?.is_attachment) || attachmentHeader.toLowerCase().includes('attachment')
+		Boolean(response?.is_attachment) || isAttachmentDisposition(attachmentHeader)
 	);
 	const isBinary = $derived(
 		Boolean(response?.is_binary) ||

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -117,31 +118,50 @@ pub struct RestResponse {
 
 #[derive(Clone, Default)]
 pub struct RestCancelState {
-    sender: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    inner: Arc<Mutex<CancelRegistry>>,
+}
+
+#[derive(Default)]
+struct CancelRegistry {
+    next_id: u64,
+    running: HashMap<u64, oneshot::Sender<()>>,
 }
 
 impl RestCancelState {
-    fn begin(&self) -> oneshot::Receiver<()> {
+    /// Registers a call and answers its id plus the signal to await. Every call owns a
+    /// slot of its own: starting a second request must not drop the first request's
+    /// sender, because a dropped sender wakes the first request as "aborted".
+    fn begin(&self) -> (u64, oneshot::Receiver<()>) {
         let (sender, receiver) = oneshot::channel();
-        if let Ok(mut slot) = self.sender.lock() {
-            *slot = Some(sender);
-        }
-        receiver
+        let mut registry = self.registry();
+        let id = registry.next_id;
+        registry.next_id = registry.next_id.wrapping_add(1);
+        registry.running.insert(id, sender);
+        (id, receiver)
     }
 
-    fn clear(&self) {
-        if let Ok(mut slot) = self.sender.lock() {
-            *slot = None;
-        }
+    /// Drops only the slot of the call that created it, so a request that finishes
+    /// never aborts a call started after it.
+    fn clear(&self, id: u64) {
+        self.registry().running.remove(&id);
     }
 
+    /// Aborts every call still in flight and reports whether anything was running.
     fn cancel(&self) -> bool {
-        self.sender
-            .lock()
-            .ok()
-            .and_then(|mut slot| slot.take())
+        let senders = {
+            let mut registry = self.registry();
+            std::mem::take(&mut registry.running)
+        };
+        senders
+            .into_values()
             .map(|sender| sender.send(()).is_ok())
-            .unwrap_or(false)
+            .fold(false, |cancelled, sent| cancelled || sent)
+    }
+
+    fn registry(&self) -> std::sync::MutexGuard<'_, CancelRegistry> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -413,13 +433,19 @@ pub fn rename_rest_project(conn: &Connection, id: &str, name: &str) -> Result<()
 }
 
 pub fn delete_rest_project(conn: &Connection, id: &str) -> Result<(), String> {
-    conn.execute(
-        "UPDATE rest_requests SET project_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE project_id = ?1",
-        params![id],
-    )
-    .map_err(|error| error.to_string())?;
-    conn.execute("DELETE FROM rest_projects WHERE id = ?1", params![id])
+    let transaction = conn
+        .unchecked_transaction()
         .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "UPDATE rest_requests SET project_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE project_id = ?1",
+            params![id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute("DELETE FROM rest_projects WHERE id = ?1", params![id])
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -448,29 +474,35 @@ pub fn create_rest_request(
 ) -> Result<RestRequest, String> {
     let id = Uuid::new_v4().to_string();
     let sort_order = next_sort_order(conn, "rest_requests").map_err(|error| error.to_string())?;
-    conn.execute(
-        r#"
+    let transaction = conn
+        .unchecked_transaction()
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            r#"
 		INSERT INTO rest_requests
 			(id, project_id, name, method, url, body, body_type, save_response, sort_order)
 		VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
 		"#,
-        params![
-            id,
-            draft.project_id,
-            draft.name,
-            draft.method,
-            draft.url,
-            draft.body,
-            draft.body_type,
-            i64::from(draft.save_response),
-            sort_order
-        ],
-    )
-    .map_err(|error| error.to_string())?;
-    write_properties(conn, &id, "header", &draft.headers).map_err(|error| error.to_string())?;
-    write_form(conn, &id, &draft.form).map_err(|error| error.to_string())?;
-    write_multipart(conn, &id, &draft.multipart).map_err(|error| error.to_string())?;
-    write_files(conn, &id, &draft.files).map_err(|error| error.to_string())?;
+            params![
+                id,
+                draft.project_id,
+                draft.name,
+                draft.method,
+                draft.url,
+                draft.body,
+                draft.body_type,
+                i64::from(draft.save_response),
+                sort_order
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    write_properties(&transaction, &id, "header", &draft.headers)
+        .map_err(|error| error.to_string())?;
+    write_form(&transaction, &id, &draft.form).map_err(|error| error.to_string())?;
+    write_multipart(&transaction, &id, &draft.multipart).map_err(|error| error.to_string())?;
+    write_files(&transaction, &id, &draft.files).map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
 
     read_rest_request(conn, &id)
         .map_err(|error| error.to_string())?
@@ -478,8 +510,12 @@ pub fn create_rest_request(
 }
 
 pub fn update_rest_request(conn: &Connection, update: &RestRequestUpdate) -> Result<(), String> {
-    conn.execute(
-        r#"
+    let transaction = conn
+        .unchecked_transaction()
+        .map_err(|error| error.to_string())?;
+    let updated = transaction
+        .execute(
+            r#"
 		UPDATE rest_requests SET
 			project_id = ?2,
 			name = ?3,
@@ -491,23 +527,30 @@ pub fn update_rest_request(conn: &Connection, update: &RestRequestUpdate) -> Res
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?1
 		"#,
-        params![
-            update.id,
-            update.project_id,
-            update.name,
-            update.method,
-            update.url,
-            update.body,
-            update.body_type,
-            i64::from(update.save_response)
-        ],
-    )
-    .map_err(|error| error.to_string())?;
-    write_properties(conn, &update.id, "header", &update.headers)
+            params![
+                update.id,
+                update.project_id,
+                update.name,
+                update.method,
+                update.url,
+                update.body,
+                update.body_type,
+                i64::from(update.save_response)
+            ],
+        )
         .map_err(|error| error.to_string())?;
-    write_form(conn, &update.id, &update.form).map_err(|error| error.to_string())?;
-    write_multipart(conn, &update.id, &update.multipart).map_err(|error| error.to_string())?;
-    write_files(conn, &update.id, &update.files).map_err(|error| error.to_string())?;
+    // Child rows belong to a request that exists: writing them for an unknown id would
+    // leave rows nothing can read or delete.
+    if updated == 0 {
+        return Err("Request not found".to_string());
+    }
+    write_properties(&transaction, &update.id, "header", &update.headers)
+        .map_err(|error| error.to_string())?;
+    write_form(&transaction, &update.id, &update.form).map_err(|error| error.to_string())?;
+    write_multipart(&transaction, &update.id, &update.multipart)
+        .map_err(|error| error.to_string())?;
+    write_files(&transaction, &update.id, &update.files).map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -521,28 +564,37 @@ pub fn rename_rest_request(conn: &Connection, id: &str, name: &str) -> Result<()
 }
 
 pub fn delete_rest_request(conn: &Connection, id: &str) -> Result<(), String> {
-    conn.execute(
-        "DELETE FROM rest_request_properties WHERE request_id = ?1",
-        params![id],
-    )
-    .map_err(|error| error.to_string())?;
-    conn.execute(
-        "DELETE FROM rest_request_form WHERE request_id = ?1",
-        params![id],
-    )
-    .map_err(|error| error.to_string())?;
-    conn.execute(
-        "DELETE FROM rest_request_multipart WHERE request_id = ?1",
-        params![id],
-    )
-    .map_err(|error| error.to_string())?;
-    conn.execute(
-        "DELETE FROM rest_request_files WHERE request_id = ?1",
-        params![id],
-    )
-    .map_err(|error| error.to_string())?;
-    conn.execute("DELETE FROM rest_requests WHERE id = ?1", params![id])
+    let transaction = conn
+        .unchecked_transaction()
         .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "DELETE FROM rest_request_properties WHERE request_id = ?1",
+            params![id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "DELETE FROM rest_request_form WHERE request_id = ?1",
+            params![id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "DELETE FROM rest_request_multipart WHERE request_id = ?1",
+            params![id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "DELETE FROM rest_request_files WHERE request_id = ?1",
+            params![id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute("DELETE FROM rest_requests WHERE id = ?1", params![id])
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -619,12 +671,35 @@ pub fn clear_rest_response(conn: &Connection, id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// True when the text starts with `scheme://`, the same rule as
+/// `services/rest.ts::normalizeUrl`. A plain `contains("://")` search would also match
+/// a query value such as `?next=http://y` and hand `Url::parse` a bare host, which it
+/// rejects as a relative URL.
+fn has_url_scheme(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if !matches!(bytes.first(), Some(byte) if byte.is_ascii_alphabetic()) {
+        return false;
+    }
+    let mut index = 1;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b':' {
+            return bytes.get(index + 1) == Some(&b'/') && bytes.get(index + 2) == Some(&b'/');
+        }
+        if !(byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.')) {
+            return false;
+        }
+        index += 1;
+    }
+    false
+}
+
 pub fn normalize_rest_url(raw: &str) -> Result<Url, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err("Enter a request URL".to_string());
     }
-    let candidate = if trimmed.contains("://") {
+    let candidate = if has_url_scheme(trimmed) {
         trimmed.to_string()
     } else {
         format!("http://{trimmed}")
@@ -698,32 +773,106 @@ pub fn is_text_content_type(content_type: &str) -> bool {
     language_for_content_type(content_type).is_some()
 }
 
-pub fn filename_from_content_disposition(value: &str) -> Option<String> {
-    let lower = value.to_ascii_lowercase();
-    if let Some(index) = lower.find("filename*=") {
-        let raw = value[index + "filename*=".len()..].trim();
-        let raw = raw
-            .split(';')
-            .next()
-            .unwrap_or(raw)
-            .trim()
-            .trim_matches('"');
-        let encoded = raw.split("''").nth(1).unwrap_or(raw);
-        if let Ok(decoded) = percent_decode(encoded) {
-            if !decoded.is_empty() {
-                return Some(decoded);
+/// Value of one `Content-Disposition` parameter, honouring a quoted string so a `;`
+/// inside `filename="a;b.txt"` does not end the value. The surrounding quotes are
+/// removed; nothing is unescaped, matching `dispositionParameter` in
+/// `src/lib/utils/rest.ts`.
+fn disposition_parameter<'a>(value: &'a str, name: &str) -> Option<&'a str> {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        // Skip the separators between parameters.
+        while index < bytes.len() && (bytes[index].is_ascii_whitespace() || bytes[index] == b';') {
+            index += 1;
+        }
+        let key_start = index;
+        while index < bytes.len() && bytes[index] != b'=' && bytes[index] != b';' {
+            index += 1;
+        }
+        let key = value[key_start..index].trim();
+        if index >= bytes.len() || bytes[index] == b';' {
+            // A bare disposition type (`attachment`) or a parameter without a value.
+            continue;
+        }
+        index += 1; // '='
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index < bytes.len() && bytes[index] == b'"' {
+            index += 1;
+            let value_start = index;
+            let mut escaped = false;
+            while index < bytes.len() {
+                let byte = bytes[index];
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == b'"' {
+                    break;
+                }
+                index += 1;
+            }
+            if key.eq_ignore_ascii_case(name) {
+                return Some(&value[value_start..index]);
+            }
+            if index < bytes.len() {
+                index += 1; // the closing quote
+            }
+        } else {
+            let value_start = index;
+            while index < bytes.len() && bytes[index] != b';' {
+                index += 1;
+            }
+            if key.eq_ignore_ascii_case(name) {
+                return Some(value[value_start..index].trim());
             }
         }
     }
-    if let Some(index) = lower.find("filename=") {
-        let raw = value[index + "filename=".len()..].trim();
-        let raw = raw.split(';').next().unwrap_or(raw).trim();
-        let name = raw.trim_matches('"').trim_matches('\'').trim();
+    None
+}
+
+/// Strips the `UTF-8''` charset prefix of an RFC 5987 value, exactly like
+/// `filenameFromDisposition` in `src/lib/utils/rest.ts`; any other charset stays part
+/// of the text, so both sides answer the same for a value neither can decode.
+fn strip_utf8_charset(value: &str) -> &str {
+    match value.get(..7) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("UTF-8''") => &value[7..],
+        _ => value,
+    }
+}
+
+pub fn filename_from_content_disposition(value: &str) -> Option<String> {
+    if let Some(raw) = disposition_parameter(value, "filename*") {
+        let encoded = strip_utf8_charset(raw.trim());
+        // Mirrors `filenameFromDisposition`: a broken extended value keeps the text
+        // the server sent instead of falling back to the plain parameter.
+        return match percent_decode(encoded) {
+            Ok(decoded) if !decoded.is_empty() => Some(decoded),
+            Ok(_) => None,
+            Err(_) if encoded.is_empty() => None,
+            Err(_) => Some(encoded.to_string()),
+        };
+    }
+    if let Some(raw) = disposition_parameter(value, "filename") {
+        let name = raw.trim().trim_matches('"').trim_matches('\'').trim();
         if !name.is_empty() {
             return Some(name.to_string());
         }
     }
     None
+}
+
+/// True when the disposition type is `attachment`. Only the token before the first
+/// `;` counts, so `inline; filename="attachment.pdf"` is not an attachment. Mirrors
+/// `isAttachmentDisposition` in `src/lib/utils/rest.ts`.
+fn is_attachment_disposition(value: &str) -> bool {
+    value
+        .split(';')
+        .next()
+        .unwrap_or(value)
+        .trim()
+        .eq_ignore_ascii_case("attachment")
 }
 
 fn percent_decode(value: &str) -> Result<String, ()> {
@@ -1370,7 +1519,7 @@ pub async fn cmd_execute_rest_request(
         &files.unwrap_or_default(),
     )?;
     let client = build_client()?;
-    let receiver = cancel.begin();
+    let (cancel_id, receiver) = cancel.begin();
 
     let mut builder = client.request(method, url);
     for (name, value) in &headers {
@@ -1392,7 +1541,7 @@ pub async fn cmd_execute_rest_request(
         let headers = response_headers(&response);
         let content_type = header_value(&headers, "content-type");
         let disposition = header_value(&headers, "content-disposition");
-        let is_attachment = disposition.to_ascii_lowercase().contains("attachment");
+        let is_attachment = is_attachment_disposition(&disposition);
         let filename = filename_from_content_disposition(&disposition);
         let content_length = response.content_length();
 
@@ -1448,7 +1597,7 @@ pub async fn cmd_execute_rest_request(
         result = operation => result,
         _ = receiver => Err("Request aborted".to_string()),
     };
-    cancel.clear();
+    cancel.clear(cancel_id);
     result
 }
 
@@ -1549,6 +1698,26 @@ mod tests {
                 .as_str(),
             "https://example.com/a?b=1"
         );
+        // A `://` inside the query must not be mistaken for a scheme: the bare host
+        // still needs its `http://` prefix, exactly like `services/rest.ts`.
+        assert_eq!(
+            normalize_rest_url("example.com/?next=http://y")
+                .expect("url")
+                .as_str(),
+            "http://example.com/?next=http://y"
+        );
+        assert_eq!(
+            normalize_rest_url("example.com:8080/x")
+                .expect("url")
+                .as_str(),
+            "http://example.com:8080/x"
+        );
+        assert_eq!(
+            normalize_rest_url("HTTP://Example.COM/Path")
+                .expect("url")
+                .as_str(),
+            "http://example.com/Path"
+        );
         assert!(normalize_rest_url("").is_err());
         assert!(normalize_rest_url("ftp://example.com").is_err());
     }
@@ -1625,7 +1794,41 @@ mod tests {
             filename_from_content_disposition("attachment; filename*=UTF-8''my%20file.txt"),
             Some("my file.txt".to_string())
         );
+        // A quoted value keeps its semicolon instead of ending at the first one.
+        assert_eq!(
+            filename_from_content_disposition("attachment; filename=\"a;b.txt\""),
+            Some("a;b.txt".to_string())
+        );
+        assert_eq!(
+            filename_from_content_disposition("attachment; filename*=UTF-8''a%3Bb.txt"),
+            Some("a;b.txt".to_string())
+        );
+        // The extended parameter wins over the plain one, whatever their order.
+        assert_eq!(
+            filename_from_content_disposition(
+                "attachment; filename=\"fallback.txt\"; filename*=UTF-8''my%20file.txt"
+            ),
+            Some("my file.txt".to_string())
+        );
+        // A broken extended value keeps the text the server sent, like the browser.
+        assert_eq!(
+            filename_from_content_disposition("attachment; filename*=UTF-8''caf%E9.txt"),
+            Some("caf%E9.txt".to_string())
+        );
         assert_eq!(filename_from_content_disposition("inline"), None);
+    }
+
+    #[test]
+    fn only_the_disposition_type_marks_an_attachment() {
+        assert!(is_attachment_disposition("attachment"));
+        assert!(is_attachment_disposition(
+            "ATTACHMENT; filename=\"report.csv\""
+        ));
+        // A filename that happens to contain the word is not the disposition type.
+        assert!(!is_attachment_disposition(
+            "inline; filename=\"attachment.pdf\""
+        ));
+        assert!(!is_attachment_disposition(""));
     }
 
     #[test]
@@ -2032,6 +2235,37 @@ mod tests {
     }
 
     #[test]
+    fn updating_an_unknown_request_writes_nothing() {
+        let connection = memory_db();
+        let update = RestRequestUpdate {
+            id: "missing".to_string(),
+            project_id: None,
+            name: "Ghost".to_string(),
+            method: "POST".to_string(),
+            url: "https://example.com".to_string(),
+            body: String::new(),
+            body_type: "multipart".to_string(),
+            save_response: false,
+            headers: vec![property("Accept", "*/*")],
+            form: vec![property("encoded", "1")],
+            multipart: vec![property("comment", "hello")],
+            files: vec![file_row("document", "/tmp/report.txt", "report.txt")],
+        };
+        assert!(update_rest_request(&connection, &update).is_err());
+        // Child rows belong to a request that exists, so an unknown id leaves nothing
+        // behind that no request can read or delete.
+        assert_eq!(row_counts(&connection), (0, 0));
+        for table in ["rest_request_properties", "rest_request_form"] {
+            let count: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("row count");
+            assert_eq!(count, 0, "{table}");
+        }
+    }
+
+    #[test]
     fn duplicates_and_deletes_requests() {
         let connection = memory_db();
         let project = create_rest_project(&connection, "P").expect("project");
@@ -2118,7 +2352,7 @@ mod tests {
             "nothing runs, so there is nothing to abort"
         );
 
-        let receiver = cancel.begin();
+        let (id, receiver) = cancel.begin();
         assert!(cancel.cancel(), "the running request is aborted");
         receiver
             .await
@@ -2126,7 +2360,27 @@ mod tests {
 
         // The first cancel took the slot, so a second one finds nothing.
         assert!(!cancel.cancel(), "the slot was already taken");
-        cancel.clear();
+        cancel.clear(id);
         assert!(!cancel.cancel(), "clearing leaves nothing behind");
+    }
+
+    #[tokio::test]
+    async fn concurrent_requests_do_not_abort_each_other() {
+        use tokio::sync::oneshot::error::TryRecvError;
+
+        let cancel = RestCancelState::default();
+        let (first_id, mut first) = cancel.begin();
+        let (_second_id, mut second) = cancel.begin();
+
+        // Starting a second call keeps the first sender alive, so the first receiver
+        // is still waiting rather than answering `Closed`.
+        assert!(matches!(first.try_recv(), Err(TryRecvError::Empty)));
+
+        // A call that finished must not abort a call started after it.
+        cancel.clear(first_id);
+        assert!(matches!(second.try_recv(), Err(TryRecvError::Empty)));
+
+        assert!(cancel.cancel(), "the second call is still cancellable");
+        assert!(second.try_recv().is_ok(), "and receives the abort signal");
     }
 }

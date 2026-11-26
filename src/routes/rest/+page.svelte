@@ -46,6 +46,7 @@
 		formatRestSize,
 		formatRestTime,
 		getHeader,
+		isAttachmentDisposition,
 		multipartBoundary,
 		parseCookies,
 		parseCurl,
@@ -131,7 +132,7 @@
 		response?.filename ?? filenameFromDisposition(attachmentHeader)
 	);
 	const isAttachment = $derived(
-		Boolean(response?.is_attachment) || attachmentHeader.toLowerCase().includes('attachment')
+		Boolean(response?.is_attachment) || isAttachmentDisposition(attachmentHeader)
 	);
 	const isBinary = $derived(
 		Boolean(response?.is_binary) ||
@@ -666,7 +667,9 @@
 	}
 
 	async function deleteRequest(id: string): Promise<void> {
-		if (active?.id === id) void flushSave(active);
+		// The pending autosave must land before the row goes away: `update_rest_request`
+		// refuses an unknown id, so a racing save would surface as a failed update.
+		if (active?.id === id) await flushSave(active);
 		try {
 			await deleteRestRequest(id);
 			const remaining = requests.filter((request) => request.id !== id);

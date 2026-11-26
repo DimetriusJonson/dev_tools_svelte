@@ -7,6 +7,7 @@ import {
 	detectLanguageFromContentType,
 	detectLanguageFromHeaders,
 	filenameFromDisposition,
+	isAttachmentDisposition,
 	multipartBoundary,
 	resolveRequestBody,
 	type BodyType,
@@ -561,7 +562,7 @@ async function browserExecute(input: RestExecutionInput): Promise<RestResponse> 
 		const headers = headersFromResponse(response);
 		const contentType = response.headers.get('content-type') ?? '';
 		const disposition = response.headers.get('content-disposition') ?? '';
-		const isAttachment = disposition.toLowerCase().includes('attachment');
+		const isAttachment = isAttachmentDisposition(disposition);
 		const filename = filenameFromDisposition(disposition);
 		const declaredLength = Number.parseInt(response.headers.get('content-length') ?? '', 10);
 
