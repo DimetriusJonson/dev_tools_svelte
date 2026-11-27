@@ -1092,11 +1092,40 @@ fn file_disposition(name: &str, filename: &str) -> String {
     line
 }
 
-/// A field value that carries a line break would open a new part in the body, so a
-/// substituted secret cannot smuggle one in. Mirrors `validateMultipartValue`.
-fn check_multipart_value(name: &str, value: &str) -> Result<(), String> {
-    if value.contains('\r') || value.contains('\n') {
-        return Err(format!("Field {name} cannot contain a line break"));
+/// A value that carries a control character stops being one line, so a substituted
+/// secret could open a new part in the body or a second header on the wire. The client
+/// validates the template text, never the value behind it, so this runs on resolved text.
+/// HTAB stays legal, exactly as `utils/rest.ts::CONTROL_CHARACTER` and
+/// `http::HeaderValue` allow it.
+fn check_resolved_value(field: &str, value: &str) -> Result<(), String> {
+    let character = value
+        .chars()
+        .find(|candidate| *candidate != '\t' && candidate.is_ascii_control());
+    match character {
+        Some(found) => Err(format!(
+            "invalid-value:{field}={}",
+            describe_control_character(found)
+        )),
+        None => Ok(()),
+    }
+}
+
+/// The printable text of a control character, so an error names what was found. Uses the
+/// same glyphs as `utils/rest.ts::describeCharacter`; HTAB and SP never reach here because
+/// both are allowed on the wire.
+fn describe_control_character(character: char) -> String {
+    match character {
+        '\r' => "␍".to_string(),
+        '\n' => "␊".to_string(),
+        other => format!("U+{:04X}", character as u32),
+    }
+}
+
+/// Header rows are resolved before `http::HeaderValue` sees them: that type also refuses
+/// a line break, but with a text no error mapping knows.
+fn check_resolved_headers(headers: &[RestProperty]) -> Result<(), String> {
+    for header in headers {
+        check_resolved_value(header.name.trim(), &header.value)?;
     }
     Ok(())
 }
@@ -1114,7 +1143,7 @@ pub fn encode_multipart(
         if field.name.trim().is_empty() {
             continue;
         }
-        check_multipart_value(field.name.trim(), &field.value)?;
+        check_resolved_value(field.name.trim(), &field.value)?;
         out.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
         out.extend_from_slice(
             format!(
@@ -1409,6 +1438,20 @@ fn substitute_rows(
         .collect()
 }
 
+/// The JSON/XML/Text buffer is only part of the wire body when that tab is the one being
+/// sent. Substituting a buffer the selected tab ignores would make a template nobody sends
+/// block the request, which is the opposite of what `referenced_var_names` reports.
+fn substitute_body(
+    body: &str,
+    body_type: &str,
+    values: &HashMap<String, String>,
+) -> Result<String, String> {
+    if body_type == "form" || body_type == "multipart" {
+        return Ok(body.to_string());
+    }
+    vars::substitute(body, values)
+}
+
 /// Names the variables that a request actually mentions. Query values are read decoded
 /// because the client writes `{{ token }}` into the URL as `%7B%7Btoken%7D%7D`, and only
 /// the body the selected tab produces is scanned, so an unused buffer with a broken
@@ -1454,10 +1497,13 @@ fn referenced_var_names(
 
 /// A template in a place the resolver never touches would go on the wire as the literal
 /// `{{ name }}`, so it is reported instead of silently sent. Part names and file rows are
-/// written into the body verbatim, which is why they are checked here too.
+/// written into the body verbatim, which is why they are checked too — but only when the
+/// Form tab is what goes on the wire, because a leftover file row of another body type is
+/// never sent and must not block the request.
 fn reject_unsupported_templates(
     url: &Url,
     headers: &[RestProperty],
+    body_type: &str,
     multipart: &[RestProperty],
     files: &[RestFileRow],
 ) -> Result<(), String> {
@@ -1468,6 +1514,9 @@ fn reject_unsupported_templates(
         if let Some(name) = vars::first_template_name(&header.name) {
             return Err(format!("unresolved-template:{name}"));
         }
+    }
+    if body_type != "multipart" {
+        return Ok(());
     }
     for row in multipart {
         if let Some(name) = vars::first_template_name(&row.name) {
@@ -1528,7 +1577,7 @@ fn prepare_call(
     values: &VarValues,
 ) -> Result<PreparedCall, String> {
     let parsed = normalize_rest_url(url)?;
-    reject_unsupported_templates(&parsed, headers, multipart, files)?;
+    reject_unsupported_templates(&parsed, headers, body_type, multipart, files)?;
     let method = Method::from_bytes(method.trim().to_ascii_uppercase().as_bytes())
         .map_err(|_| format!("Invalid HTTP method: {method}"))?;
     let boundary = match body_type {
@@ -1544,9 +1593,10 @@ fn prepare_call(
     let real_url = vars::substitute_url(&parsed, &values.real)?;
     let masked_url = vars::substitute_url(&parsed, &values.masked)?;
     let real_headers = substitute_rows(headers, &values.real)?;
+    check_resolved_headers(&real_headers)?;
     let masked_headers = substitute_rows(headers, &values.masked)?;
-    let real_body = vars::substitute(body, &values.real)?;
-    let masked_body = vars::substitute(body, &values.masked)?;
+    let real_body = substitute_body(body, body_type, &values.real)?;
+    let masked_body = substitute_body(body, body_type, &values.masked)?;
     let real_form = substitute_rows(form, &values.real)?;
     let masked_form = substitute_rows(form, &values.masked)?;
     let real_multipart = substitute_rows(multipart, &values.real)?;
@@ -1560,8 +1610,9 @@ fn prepare_call(
         files,
         boundary_for_body,
     )?;
-    // Same boundary and the real `Content-Length`, only the field values are masked, so
-    // the dump keeps the framing of the bytes that are actually sent.
+    // Same boundary, only the values are masked. The dump is a redacted artifact, so its
+    // own `Content-Length` describes the text it shows: the real body length would be a
+    // fact about the secret that ends up in SQLite.
     let masked_resolved = resolve_body(
         body_type,
         &masked_body,
@@ -1571,7 +1622,8 @@ fn prepare_call(
         boundary_for_body,
     )?;
     let prepared = prepare_headers(&real_url, &real_headers, &resolved, body_type, boundary.as_deref());
-    let dump_headers = prepare_headers(&masked_url, &masked_headers, &resolved, body_type, boundary.as_deref());
+    let dump_headers =
+        prepare_headers(&masked_url, &masked_headers, &masked_resolved, body_type, boundary.as_deref());
     let wire_headers = prepared
         .iter()
         .filter(|header| {
@@ -2921,7 +2973,8 @@ mod tests {
         )
         .expect("multipart call");
 
-        // The masked dump keeps the framing and the real length of the wire body.
+        // The masked dump keeps the framing of the wire body and the length of the text it
+        // shows, and never the file payload.
         assert!(call.raw_request.contains("content-length: "));
         assert!(call
             .raw_request
@@ -2949,6 +3002,145 @@ mod tests {
             &values,
         )
         .unwrap_err();
-        assert!(error.contains("cannot contain a line break"));
+        assert_eq!(error, "invalid-value:field=␍");
+    }
+
+    #[test]
+    fn a_substituted_line_break_is_not_allowed_in_a_header_value() {
+        // The client validates the template text, so a secret that carries a line break is
+        // only visible here: `http::HeaderValue` would refuse it with an unmapped text.
+        let values = plain_values(&[("token", "a\r\nX-Injected: 1")]);
+        let error = prepare_call(
+            "POST",
+            "https://example.com/p",
+            &[property("Authorization", "Bearer {{token}}")],
+            "",
+            "json",
+            &[],
+            &[],
+            &[],
+            &values,
+        )
+        .unwrap_err();
+        assert_eq!(error, "invalid-value:Authorization=␍");
+    }
+
+    #[test]
+    fn a_tab_stays_allowed_in_a_substituted_value() {
+        let values = plain_values(&[("token", "a\tb")]);
+        let call = prepare_call(
+            "POST",
+            "https://example.com/p",
+            &[property("Authorization", "Bearer {{token}}")],
+            "",
+            "multipart",
+            &[],
+            &[property("field", "{{token}}")],
+            &[],
+            &values,
+        )
+        .expect("prepared call");
+        assert!(call
+            .headers
+            .iter()
+            .any(|(_, value)| value == "Bearer a\tb"));
+    }
+
+    #[test]
+    fn an_unused_body_does_not_block_a_form_or_multipart_send() {
+        let values = plain_values(&[("name", "value")]);
+        // The buffer belongs to the JSON tab and never goes on the wire, so the template
+        // in it names nothing that has to be resolved.
+        let form = prepare_call(
+            "POST",
+            "https://example.com/p",
+            &[],
+            "{\"stale\":\"{{unused}}\"}",
+            "form",
+            &[property("field", "{{name}}")],
+            &[],
+            &[],
+            &values,
+        )
+        .expect("form call");
+        assert_eq!(form.body, b"field=value".to_vec());
+        assert!(!form.raw_request.contains("stale"));
+
+        let multipart = prepare_call(
+            "POST",
+            "https://example.com/p",
+            &[],
+            "{\"stale\":\"{{unused}}\"}",
+            "multipart",
+            &[],
+            &[property("field", "{{name}}")],
+            &[],
+            &values,
+        )
+        .expect("multipart call");
+        assert!(!multipart.raw_request.contains("unused"));
+    }
+
+    #[test]
+    fn a_leftover_file_row_does_not_block_a_json_send() {
+        let values = plain_values(&[("dir", "/tmp")]);
+        // The Form tables are only read when the Form tab is being sent, so a row kept
+        // from an earlier multipart request cannot refuse a JSON body.
+        let call = prepare_call(
+            "POST",
+            "https://example.com/p",
+            &[],
+            "{\"a\":1}",
+            "json",
+            &[],
+            &[],
+            &[file_row("document", "{{dir}}/note.txt", "note.txt")],
+            &values,
+        )
+        .expect("json call");
+        assert_eq!(call.body, b"{\"a\":1}".to_vec());
+        assert!(!call.raw_request.contains("note.txt"));
+
+        // The same row does refuse the multipart send that would write it verbatim.
+        let error = prepare_call(
+            "POST",
+            "https://example.com/p",
+            &[],
+            "",
+            "multipart",
+            &[],
+            &[],
+            &[file_row("document", "{{dir}}/note.txt", "note.txt")],
+            &values,
+        )
+        .unwrap_err();
+        assert_eq!(error, "unresolved-template:dir");
+    }
+
+    #[test]
+    fn the_masked_dump_reports_its_own_length() {
+        let values = values_with_a_secret(&["token"]);
+        let call = prepare_call(
+            "POST",
+            "https://example.com/api",
+            &[],
+            "{\"token\":\"{{token}}\"}",
+            "json",
+            &[],
+            &[],
+            &[],
+            &values,
+        )
+        .expect("prepared call");
+        // The dump is a redacted artifact: a length of the real body would say how long
+        // the secret is, and it would not match the masked text printed below it.
+        let masked = format!("{{\"token\":\"{}\"}}", vars::SECRET_MASK);
+        assert!(call
+            .raw_request
+            .contains(&format!("content-length: {}", masked.len())));
+        assert!(!call
+            .raw_request
+            .contains(&format!("content-length: {}", call.body.len())));
+        assert!(call.raw_request.ends_with(&masked));
     }
 }

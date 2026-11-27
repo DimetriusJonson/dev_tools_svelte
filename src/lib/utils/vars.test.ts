@@ -114,6 +114,39 @@ describe('where a request can carry a template', () => {
 		).toBe(false);
 	});
 
+	it('reads the body buffer only when that tab is what goes on the wire', () => {
+		// A JSON or XML buffer left over from another tab is never sent, so it must not
+		// block a Form-encode request that references nothing.
+		expect(
+			requestHasTemplates(request({ body_type: 'form', body: '{"id": "{{id}}"}' }))
+		).toBe(false);
+		expect(
+			requestHasTemplates(request({ body_type: 'multipart', body: '{"id": "{{id}}"}' }))
+		).toBe(false);
+		expect(requestHasTemplates(request({ body_type: 'xml', body: '<i>{{id}}</i>' }))).toBe(true);
+		expect(requestHasTemplates(request({ body_type: 'text', body: '{{id}}' }))).toBe(true);
+	});
+
+	it('refuses a template in the URL path, a query name and the host, like the backend does', () => {
+		// `Url::parse` percent-encodes the braces of a path or a host, and a query name is
+		// never substituted, so all three reach `unresolved-template:` on the desktop.
+		expect(requestHasTemplates(request({ url: 'https://example.com/{{seg}}' }))).toBe(true);
+		expect(requestHasTemplates(request({ url: 'https://example.com/p?{{flag}}=1' }))).toBe(true);
+		expect(requestHasTemplates(request({ url: 'https://{{host}}/p' }))).toBe(true);
+		expect(
+			requestHasTemplates(request({ url: 'https://example.com/p?%7B%7Bflag%7D%7D=1' }))
+		).toBe(true);
+		// A template in the port is not a name the resolver can apply either.
+		const portUrl = request({ url: 'https://example.com:{{port}}/p' });
+		expect(requestHasTemplates(portUrl)).toBe(true);
+		expect(referencedVarNames(portUrl)).toEqual(['port']);
+	});
+
+	it('counts a template in a header name, which the backend refuses too', () => {
+		const source = request({ headers: [{ name: '{{name}}', value: 'v' }] });
+		expect(requestHasTemplates(source)).toBe(true);
+	});
+
 	it('names every variable once, across all the places at once', () => {
 		const source = request({
 			url: 'https://example.com/p?id={{id}}',
@@ -160,6 +193,13 @@ describe('backend error texts', () => {
 		expect(describeVarError('invalid-name:a b', say)).toBe(say('vars.nameInvalid', { name: 'a b' }));
 		expect(describeVarError('unresolved-template:host', say)).toBe(
 			say('vars.unsupportedTemplate', { name: 'host' })
+		);
+		// `<field>=<char>`: a control character a variable produced, which client
+		// validation could not see because the cell holds the template text. The glyph is
+		// the one `utils/rest.ts::describeCharacter` prints, so a bad value reads like a
+		// bad cell.
+		expect(describeVarError('invalid-value:Authorization=␍', say)).toBe(
+			say('vars.invalidValue', { field: 'Authorization', char: '␍' })
 		);
 	});
 

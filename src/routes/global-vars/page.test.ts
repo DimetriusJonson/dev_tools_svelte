@@ -1,7 +1,9 @@
 import { flushSync, mount, unmount } from 'svelte';
+import { get } from 'svelte/store';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import VariablesPage from './+page.svelte';
 import { setLocale } from '$lib/stores/i18n';
+import { toasts } from '$lib/stores/toast';
 import { REVEAL_MS } from '$lib/utils/vars';
 
 interface Row {
@@ -11,6 +13,8 @@ interface Row {
 	value: string | null;
 	created_at: string;
 	updated_at: string;
+	/** The credential-store entry of a safe row; never part of the list response. */
+	secret?: string;
 }
 
 const plain: Row = {
@@ -27,13 +31,21 @@ const safe: Row = {
 	name: 'token',
 	secure: true,
 	value: null,
+	secret: 's3cret',
 	created_at: '2026-01-01 00:00:00',
 	updated_at: '2026-01-01 00:00:00'
 };
 
 let stored: Row[];
+let secrets: Record<string, string>;
+let storeBroken = false;
 let calls: Array<[string, Record<string, unknown>]>;
 let component: ReturnType<typeof mount> | undefined;
+
+/** A Rust command rejects with its error **string**, not an `Error`, so neither is wrapped. */
+function failBackend(text: string): never {
+	throw text;
+}
 
 /**
 * `isTauriRuntime()` only looks for this key and the Tauri API forwards every command to it, so one
@@ -42,12 +54,20 @@ let component: ReturnType<typeof mount> | undefined;
 */
 function desktopBuild(rows: Row[]): void {
 	stored = rows.map((row) => ({ ...row }));
+	secrets = {};
+	for (const row of stored) {
+		if (row.secure && row.secret) secrets[row.id] = row.secret;
+	}
+	storeBroken = false;
 	calls = [];
 	(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {
 		invoke: async (command: string, args: Record<string, unknown> = {}) => {
 			calls.push([command, args]);
-			if (command === 'list_global_vars') return stored;
+			if (command === 'list_global_vars') {
+				return stored.map(({ secret: _secret, ...row }) => row);
+			}
 			if (command === 'create_global_var') {
+				if (storeBroken && args.secure) failBackend('secret-store:keyring unavailable');
 				const row: Row = {
 					id: `new-${stored.length + 1}`,
 					name: String(args.name),
@@ -56,34 +76,45 @@ function desktopBuild(rows: Row[]): void {
 					created_at: '2026-01-01 00:00:00',
 					updated_at: '2026-01-01 00:00:00'
 				};
+				if (row.secure && args.value) secrets[row.id] = String(args.value);
 				stored.push(row);
 				return row;
 			}
 			if (command === 'update_global_var') {
+				if (storeBroken && args.secure) failBackend('secret-store:keyring unavailable');
 				const row = stored.find((item) => item.id === args.id);
-				if (!row) throw new Error('Global variable not found');
+				if (!row) failBackend('Global variable not found');
 				const wasSecure = row.secure;
 				row.name = String(args.name);
 				row.secure = Boolean(args.secure);
 				if (row.secure) {
 					// A safe row keeps nothing in the column: `null` means "the
 					// credential store entry is untouched".
+					if (args.value !== null) {
+						if (args.value === '') delete secrets[row.id];
+						else secrets[row.id] = String(args.value);
+					}
 					row.value = null;
-				} else if (args.value === null) {
-					// Turning a safe row plain reads its secret out of the store.
-					row.value = wasSecure ? 's3cret' : (row.value ?? '');
 				} else {
-					row.value = String(args.value);
+					if (args.value === null) {
+						// Turning a safe row plain reads its secret out of the store.
+						row.value = wasSecure ? (secrets[row.id] ?? '') : (row.value ?? '');
+					} else {
+						row.value = String(args.value);
+					}
+					// The backend moves the secret out of the store either way.
+					if (wasSecure) delete secrets[row.id];
 				}
 				return row;
 			}
 			if (command === 'delete_global_var') {
 				stored = stored.filter((item) => item.id !== args.id);
+				delete secrets[String(args.id)];
 				return null;
 			}
 			if (command === 'reveal_global_var') {
 				const row = stored.find((item) => item.id === args.id);
-				return row?.secure ? 's3cret' : (row?.value ?? '');
+				return row?.secure ? (secrets[row.id] ?? '') : (row?.value ?? '');
 			}
 			return null;
 		}
@@ -168,8 +199,24 @@ function revealButton(): HTMLButtonElement | null {
 	return document.querySelector<HTMLButtonElement>('button[title="Reveal the value"]');
 }
 
+/** A safe row whose credential store holds nothing says so instead of showing dots. */
+function emptySecretButton(): HTMLButtonElement | null {
+	return document.querySelector<HTMLButtonElement>('button[title="No value stored yet"]');
+}
+
+/** The plain/safe toggle of one row, the only `aria-pressed` control inside it. */
+function typeToggle(row: HTMLElement): HTMLButtonElement {
+	return row.querySelector<HTMLButtonElement>('button[aria-pressed]')!;
+}
+
+/** What the fake credential store holds; the variable list never carries a secret. */
+function credentialOf(id: string): string | undefined {
+	return secrets[id];
+}
+
 beforeEach(() => {
 	setLocale('en');
+	toasts.set([]);
 });
 
 afterEach(() => {
@@ -361,5 +408,144 @@ describe('Global variables page', () => {
 		await until(() => expect(argsOf('update_global_var')).toHaveLength(1));
 		await until(() => expect(valueInput(rowOf('token')!)?.value).toBe('s3cret'));
 		expect(revealButton()).toBeNull();
+	});
+
+	it('moves the value typed moments before the lock into the credential store', async () => {
+		desktopBuild([plain]);
+		component = mount(VariablesPage, { target: document.body });
+		flushSync();
+		await loaded();
+
+		vi.useFakeTimers();
+		type(valueInput(rowOf('base')!)!, 'https://new.example.com');
+		// Inside the debounce window: the column still holds the older text, so the
+		// toggle has to flush the edit instead of securing what the row was before.
+		typeToggle(rowOf('base')!).click();
+		await vi.advanceTimersByTimeAsync(600);
+		flushSync();
+
+		expect(argsOf('update_global_var')).toEqual([
+			{ id: 'v1', name: 'base', secure: false, value: 'https://new.example.com' },
+			{ id: 'v1', name: 'base', secure: true, value: 'https://new.example.com' }
+		]);
+		expect(credentialOf('v1')).toBe('https://new.example.com');
+	});
+
+	it('writes a secret typed at the edge of the reveal window before hiding it', async () => {
+		desktopBuild([safe]);
+		component = mount(VariablesPage, { target: document.body });
+		flushSync();
+		await loaded();
+
+		vi.useFakeTimers();
+		revealButton()?.click();
+		await vi.advanceTimersByTimeAsync(50);
+		expect(valueInput(rowOf('token')!)?.value).toBe('s3cret');
+
+		// Typing 300 ms before the window closes leaves the 450 ms debounce pending:
+		// the expiry has to write the text, not drop it with the field.
+		await vi.advanceTimersByTimeAsync(REVEAL_MS - 300);
+		type(valueInput(rowOf('token')!)!, 'rotated');
+		await vi.advanceTimersByTimeAsync(REVEAL_MS + 200);
+		flushSync();
+
+		expect(argsOf('update_global_var')).toEqual([
+			{ id: 'v2', name: 'token', secure: true, value: 'rotated' }
+		]);
+		expect(credentialOf('v2')).toBe('rotated');
+		expect(rowOf('token')?.textContent).toContain('••••••');
+	});
+
+	it('keeps a refused secret on screen and in the store', async () => {
+		desktopBuild([safe]);
+		component = mount(VariablesPage, { target: document.body });
+		flushSync();
+		await loaded();
+
+		vi.useFakeTimers();
+		revealButton()?.click();
+		await vi.advanceTimersByTimeAsync(50);
+		storeBroken = true;
+
+		type(valueInput(rowOf('token')!)!, 'rotated');
+		await vi.advanceTimersByTimeAsync(500);
+		flushSync();
+
+		expect(argsOf('update_global_var')).toHaveLength(1);
+		// The localized reason names the credential store, and the text stays for retry.
+		expect(get(toasts).map((toast) => toast.message).join(' ')).toContain(
+			'Could not reach the credential store: keyring unavailable'
+		);
+		expect(valueInput(rowOf('token')!)?.value).toBe('rotated');
+		expect(credentialOf('v2')).toBe('s3cret');
+	});
+
+	it('moves a secret typed into the revealed field into the database, not the older entry', async () => {
+		desktopBuild([safe]);
+		component = mount(VariablesPage, { target: document.body });
+		flushSync();
+		await loaded();
+
+		vi.useFakeTimers();
+		revealButton()?.click();
+		await vi.advanceTimersByTimeAsync(50);
+		type(valueInput(rowOf('token')!)!, 'rotated');
+		await vi.advanceTimersByTimeAsync(500);
+		expect(credentialOf('v2')).toBe('rotated');
+
+		typeToggle(rowOf('token')!).click();
+		flushSync();
+		buttonByText('Move the value into the database')?.click();
+		await vi.advanceTimersByTimeAsync(50);
+		flushSync();
+
+		expect(argsOf('update_global_var').at(-1)).toEqual({
+			id: 'v2',
+			name: 'token',
+			secure: false,
+			value: 'rotated'
+		});
+		expect(valueInput(rowOf('token')!)?.value).toBe('rotated');
+		expect(credentialOf('v2')).toBeUndefined();
+	});
+
+	it('says a safe variable has no value yet instead of masking an empty one', async () => {
+		desktopBuild([]);
+		component = mount(VariablesPage, { target: document.body });
+		flushSync();
+		await loaded();
+
+		type(draftName(), 'token');
+		buttonByLabel('Keep this value in the application database')?.click();
+		flushSync();
+
+		buttonByLabel('Add variable')?.click();
+		await until(() => expect(argsOf('create_global_var')).toHaveLength(1));
+		expect(argsOf('create_global_var')[0]).toEqual({ name: 'token', secure: true, value: '' });
+
+		// The dots promise a hidden secret, which this row does not have.
+		expect(rowOf('token')?.textContent).toContain('No value stored yet');
+		expect(rowOf('token')?.textContent).not.toContain('••••••');
+		expect(emptySecretButton()).toBeTruthy();
+		expect(credentialOf('new-1')).toBeUndefined();
+	});
+
+	it('drops a queued write when the row is deleted', async () => {
+		desktopBuild([plain]);
+		component = mount(VariablesPage, { target: document.body });
+		flushSync();
+		await loaded();
+
+		vi.useFakeTimers();
+		type(valueInput(rowOf('base')!)!, 'https://changed.example.com');
+		buttonByLabel('base')?.click();
+		flushSync();
+		buttonByText('Delete')?.click();
+		await vi.advanceTimersByTimeAsync(1000);
+		flushSync();
+
+		expect(argsOf('delete_global_var')).toEqual([{ id: 'v1' }]);
+		expect(argsOf('update_global_var')).toHaveLength(0);
+		expect(nameInputs()).toHaveLength(0);
 	});
 });

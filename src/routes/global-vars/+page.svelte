@@ -35,9 +35,35 @@
 	let revealed = $state<Record<string, string>>({});
 	let confirmingId = $state('');
 	let confirmingSecureId = $state('');
+	/**
+	 * A safe row the user created without a value. `value` is `null` for every safe row, so
+	 * nothing in the list tells "hidden" from "empty" — this page-local note is what stops
+	 * the dots from promising a secret that does not exist.
+	 */
+	let secretless = $state<Record<string, boolean>>({});
 
 	const revealTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	const saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+	function startRevealTimer(id: string): void {
+		revealTimers.set(
+			id,
+			setTimeout(() => {
+				revealTimers.delete(id);
+				// A write still queued is flushed before the text leaves the screen: the hide
+				// timer outlives the save debounce, so dropping the edit here would discard
+				// what the user typed at the end of the reveal window. The field closes only
+				// once that write has been answered.
+				const row = vars.find((item) => item.id === id);
+				if (row && saveTimers.has(id)) {
+					cancelSave(id);
+					void commitRow(row).finally(() => clearReveal(id));
+					return;
+				}
+				delete revealed[id];
+			}, REVEAL_MS)
+		);
+	}
 
 	// `$t()` inside a template literal in an attribute renders the code verbatim.
 	function copyLabel(name: string): string {
@@ -65,13 +91,21 @@
 		const timer = revealTimers.get(id);
 		if (timer) clearTimeout(timer);
 		revealed[id] = value;
-		revealTimers.set(
-			id,
-			setTimeout(() => {
-				revealTimers.delete(id);
-				delete revealed[id];
-			}, REVEAL_MS)
-		);
+		secretless[id] = value === '';
+		startRevealTimer(id);
+	}
+
+	function cancelSave(id: string): void {
+		const timer = saveTimers.get(id);
+		if (timer) clearTimeout(timer);
+		saveTimers.delete(id);
+	}
+
+	/** Writes a queued edit at once, so a toggle cannot write over text typed moments ago. */
+	async function flushSave(row: GlobalVar): Promise<void> {
+		if (!saveTimers.has(row.id)) return;
+		cancelSave(row.id);
+		await commitRow(row);
 	}
 
 	function queueSave(row: GlobalVar): void {
@@ -109,6 +143,9 @@
 				value
 			});
 			replaceRow(updated);
+			if (row.secure && revealed[row.id] !== undefined) {
+				secretless[row.id] = revealed[row.id] === '';
+			}
 			// The reveal timer keeps the secret on screen for the time it was asked for,
 			// so a save does not hide the field the user is still typing in.
 		} catch (error) {
@@ -130,6 +167,7 @@
 				value: draft.value
 			});
 			vars = [...vars, created];
+			secretless[created.id] = created.secure && draft.value === '';
 			draft = { name: '', value: '', secure: draft.secure };
 			notify($t('vars.created'), 'success');
 		} catch (error) {
@@ -148,14 +186,24 @@
 			return;
 		}
 
+		const issue = validateVarName(row.name, vars, row.id);
+		if (issue) {
+			nameErrors[row.id] = nameMessage(row.name.trim(), issue);
+			return;
+		}
+		// The value typed inside the debounce window lives only in the row buffer, and the
+		// backend would otherwise move the older column value into the credential store.
+		await flushSave(row);
+
 		try {
 			const updated = await updateGlobalVar({
 				id: row.id,
-				name: row.name,
+				name: row.name.trim(),
 				secure: true,
-				value: null
+				value: row.value ?? null
 			});
 			replaceRow(updated);
+			secretless[row.id] = (row.value ?? '') === '';
 			notify($t('vars.updated'), 'success');
 		} catch (error) {
 			notifyError(describeVarError(error, $t) || $t('vars.saveFailed'));
@@ -164,14 +212,18 @@
 
 	async function confirmSecureToPlain(row: GlobalVar): Promise<void> {
 		confirmingSecureId = '';
+		// A secret typed into the revealed field has to reach the credential store before the
+		// row becomes plain, or the unsecuring copies the older entry into SQLite.
+		await flushSave(row);
 		try {
 			const updated = await updateGlobalVar({
 				id: row.id,
-				name: row.name,
+				name: row.name.trim(),
 				secure: false,
-				value: null
+				value: revealed[row.id] ?? null
 			});
 			replaceRow(updated);
+			delete secretless[row.id];
 			clearReveal(row.id);
 			notify($t('vars.updated'), 'success');
 		} catch (error) {
@@ -198,10 +250,13 @@
 			return;
 		}
 		confirmingId = '';
+		// A write still queued would target a row that is about to disappear.
+		cancelSave(row.id);
+		clearReveal(row.id);
 		try {
 			await deleteGlobalVar(row.id);
 			vars = vars.filter((item) => item.id !== row.id);
-			clearReveal(row.id);
+			delete secretless[row.id];
 			delete nameErrors[row.id];
 			notify($t('vars.deleted'), 'success');
 		} catch (error) {
@@ -319,11 +374,11 @@
 											type="button"
 											onclick={() => void showValue(row)}
 											class="flex h-10 items-center gap-2 rounded-md bg-[var(--panel-bg-alt)] px-3 text-sm font-semibold text-[var(--text-muted)] transition-all duration-150 hover:scale-105 active:scale-95"
-											title={$t('vars.reveal')}
+											title={secretless[row.id] ? $t('vars.emptySecret') : $t('vars.reveal')}
 											aria-label={row.name}
 										>
-											<Icon name="eye" size={18} />
-											<span>{SECRET_DOTS}</span>
+											<Icon name={secretless[row.id] ? 'warning' : 'eye'} size={18} />
+											<span>{secretless[row.id] ? $t('vars.emptySecret') : SECRET_DOTS}</span>
 										</button>
 									{:else}
 										<div class="flex min-w-0 items-center gap-1.5">

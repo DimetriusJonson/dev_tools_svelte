@@ -375,9 +375,12 @@ export const en: Dictionary = {
 	'vars.rawHint':
 		'Variables are substituted when the request is sent; safe values stay masked in this dump',
 	'vars.unknown': 'Unknown variable: {name}',
-	'vars.secretMissing': 'The safe value for {name} is missing from the credential store',
+	'vars.secretMissing':
+		'The value of {name} is not in the credential store. Type it again; if it stays empty, this system has no credential store — on Linux it needs GNOME Keyring or KWallet over D-Bus.',
 	'vars.secretStore': 'Could not reach the credential store: {message}',
 	'vars.secretTooLarge': 'A safe value cannot be longer than 2048 characters',
+	'vars.invalidValue': 'The value of {field} cannot contain the control character {char}',
+	'vars.emptySecret': 'No value stored yet',
 	'vars.unsupportedTemplate': '“{{ {name} }}” is not a place where a variable can be substituted',
 	'vars.loadFailed': 'Could not load global variables',
 	'vars.saveFailed': 'Could not save the variable',
@@ -765,9 +768,12 @@ export const ru: Dictionary = {
 	'vars.rawHint':
 		'Переменные подставляются при отправке запроса; безопасные значения в этом дампе скрыты',
 	'vars.unknown': 'Неизвестная переменная: {name}',
-	'vars.secretMissing': 'Безопасное значение для {name} отсутствует в хранилище секретов',
+	'vars.secretMissing':
+		'Значение {name} отсутствует в хранилище секретов. Введите его снова; если оно остаётся пустым, в системе нет хранилища секретов — в Linux нужны GNOME Keyring или KWallet поверх D-Bus.',
 	'vars.secretStore': 'Не удалось обратиться к хранилищу секретов: {message}',
 	'vars.secretTooLarge': 'Безопасное значение не может быть длиннее 2048 символов',
+	'vars.invalidValue': 'Значение {field} не может содержать управляющий символ {char}',
+	'vars.emptySecret': 'Значение ещё не сохранено',
 	'vars.unsupportedTemplate': '«{{ {name} }}» — место, где переменная не подставляется',
 	'vars.loadFailed': 'Не удалось загрузить глобальные переменные',
 	'vars.saveFailed': 'Не удалось сохранить переменную',

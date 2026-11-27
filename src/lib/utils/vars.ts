@@ -89,12 +89,39 @@ export function validateVarName(
 	return taken ? 'duplicate' : null;
 }
 
-/** Which places of a request can carry a template, and what they contain. */
+/**
+ * Only the braces are decoded, mirroring `vars.rs::decoded_braces`: `Url::parse` writes a
+ * literal `{`/`}` as `%7B`/`%7D`, so a template typed in the path or in a parameter name
+ * reaches the backend in that form, and the encoder may have written either case.
+ */
+export function decodedBraces(text: string): string {
+	return text
+		.replace(/%7B/g, '{')
+		.replace(/%7b/g, '{')
+		.replace(/%7D/g, '}')
+		.replace(/%7d/g, '}');
+}
+
+/**
+ * Which places of a request can carry a template, and what they contain. The list mirrors
+ * the backend: the host, path and query **names** are positions it refuses rather than
+ * substitutes, so they count as templates too — a browser build cannot resolve any of them.
+ */
 function templateTexts(source: TemplateSource): string[] {
-	const texts = [source.url, source.body, ...source.headers.map((header) => header.value)];
+	// One scan of the raw URL covers the host, the path, parameter names and parameter
+	// values, in the percent-encoded spelling `Url::parse` produces.
+	const texts = [decodedBraces(source.url), ...source.headers.map((header) => header.name)];
 	// A template typed into the Query table is written to the URL as `%7B%7Bname%7D%7D`,
 	// so the decoded rows are the text the backend actually substitutes.
-	for (const row of parseQuery(source.url)) texts.push(row.value);
+	for (const row of parseQuery(source.url)) {
+		texts.push(decodedBraces(row.name), decodedBraces(row.value));
+	}
+	texts.push(...source.headers.map((header) => header.value));
+	// Only the body the selected tab produces goes on the wire, so an unused buffer with a
+	// broken template must not block the send — the same rule as `referencedVarNames`.
+	if (source.body_type !== 'form' && source.body_type !== 'multipart') {
+		texts.push(source.body);
+	}
 	if (source.body_type === 'form') texts.push(...(source.form ?? []).map((row) => row.value));
 	if (source.body_type === 'multipart') {
 		texts.push(...(source.multipart ?? []).map((row) => row.value));
@@ -111,9 +138,9 @@ export function requestHasTemplates(source: TemplateSource): boolean {
 }
 
 /**
-* Names the request mentions, deduplicated. Query values are read decoded, because
-* the URL field stores `{{ token }}` as `%7B%7Btoken%7D%7D`.
-*/
+ * Names the request mentions, deduplicated. Query values are read decoded, because
+ * the URL field stores `{{ token }}` as `%7B%7Btoken%7D%7D`.
+ */
 export function referencedVarNames(source: TemplateSource): string[] {
 	const names: string[] = [];
 	for (const text of templateTexts(source)) {
@@ -146,6 +173,13 @@ export function describeVarError(error: unknown, t: Translate): string {
 
 	const invalid = /^invalid-name:(.*)$/.exec(text);
 	if (invalid) return t('vars.nameInvalid', { name: invalid[1] });
+
+	// `<field>=<char>`: the backend found a control character in the text a variable
+	// produced, which client validation could not see.
+	const invalidValue = /^invalid-value:([^=]*)=(.*)$/.exec(text);
+	if (invalidValue) {
+		return t('vars.invalidValue', { field: invalidValue[1], char: invalidValue[2] });
+	}
 
 	const unresolved = /^unresolved-template:(.*)$/.exec(text);
 	if (unresolved) return t('vars.unsupportedTemplate', { name: unresolved[1] });

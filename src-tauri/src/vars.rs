@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use reqwest::Url;
+use rusqlite::ffi;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -309,6 +310,18 @@ fn duplicate_name(conn: &Connection, name: &str, except_id: &str) -> Result<Opti
     Ok(taken)
 }
 
+/// The name check above is only a friendly early answer: two writes can pass it at the
+/// same time, and then the unique index is what refuses the row. Its error text names
+/// SQLite internals, so a constraint violation becomes the same code the check emits.
+fn duplicate_error(name: &str, error: rusqlite::Error) -> String {
+    if let rusqlite::Error::SqliteFailure(ffi::Error { code, .. }, _) = &error {
+        if *code == ffi::ErrorCode::ConstraintViolation {
+            return format!("duplicate-name:{name}");
+        }
+    }
+    error.to_string()
+}
+
 fn check_secret_size(value: &str) -> Result<(), String> {
     if value.len() > MAX_SECRET_BYTES {
         return Err("secret-too-large".to_string());
@@ -381,14 +394,14 @@ pub fn create(
         ) {
             // The keyring entry would otherwise outlive the row that names it.
             secrets.delete(&id).ok();
-            return Err(error.to_string());
+            return Err(duplicate_error(&name, error));
         }
     } else {
         conn.execute(
             "INSERT INTO global_vars (id, name, secure, value, sort_order) VALUES (?1, ?2, 0, ?3, ?4)",
             params![id, name, value, count_rows(conn)?],
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| duplicate_error(&name, error))?;
     }
 
     read_one(conn, &id)
@@ -457,7 +470,7 @@ pub fn update(
             "UPDATE global_vars SET name = ?1, secure = 1, value = '', updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
             params![name, id],
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| duplicate_error(&name, error))?;
         return read_one(conn, id);
     }
 
@@ -476,7 +489,7 @@ pub fn update(
             "UPDATE global_vars SET name = ?1, secure = 0, value = ?2, updated_at = CURRENT_TIMESTAMP WHERE id = ?3",
             params![name, value, id],
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| duplicate_error(&name, error))?;
         // The row is already plain, so a failed erase is not reported: a repeated
         // delete of the same account is idempotent.
         secrets.delete(id).ok();
@@ -495,7 +508,7 @@ pub fn update(
             params![name, id],
         ) {
             secrets.delete(id).ok();
-            return Err(error.to_string());
+            return Err(duplicate_error(&name, error));
         }
         return read_one(conn, id);
     }
@@ -505,7 +518,7 @@ pub fn update(
         "UPDATE global_vars SET name = ?1, secure = 0, value = ?2, updated_at = CURRENT_TIMESTAMP WHERE id = ?3",
         params![name, value, id],
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| duplicate_error(&name, error))?;
     read_one(conn, id)
 }
 
@@ -882,5 +895,120 @@ mod tests {
         let values = HashMap::new();
         let url = Url::parse("https://example.com/%7b%7btoken%7d%7d").expect("url");
         assert_eq!(substitute_url(&url, &values).unwrap_err(), "unresolved-template:token");
+    }
+
+    #[test]
+    fn decoded_braces_covers_every_spelling_the_encoder_picks() {
+        // Whether the encoder wrote uppercase or lowercase escapes depends on how the user
+        // typed the URL, so all four spellings have to become a brace.
+        assert_eq!(decoded_braces("%7B%7b%7D%7d"), "{{}}");
+        assert_eq!(decoded_braces("%7b%7B%7d%7D"), "{{}}");
+        assert_eq!(decoded_braces("a%7B%7Btoken%7D%7Db"), "a{{token}}b");
+    }
+
+    #[test]
+    fn updating_a_plain_variable_without_a_value_keeps_it() {
+        // A rename arrives with `value: null`, which means "do not touch the value".
+        let conn = memory_db();
+        let secrets = MemorySecrets::new();
+        let created = create(&conn, &secrets, &input("base", false, Some("first"))).expect("created");
+        let renamed = update(&conn, &secrets, &created.id, &input("baseUrl", false, None)).expect("renamed");
+        assert_eq!(renamed.name, "baseUrl");
+        assert_eq!(renamed.value.as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn updating_onto_a_name_another_row_owns_is_refused() {
+        let conn = memory_db();
+        let secrets = MemorySecrets::new();
+        create(&conn, &secrets, &input("Token", false, Some("a"))).expect("first");
+        let second = create(&conn, &secrets, &input("other", false, Some("b"))).expect("second");
+        // The name in the code is what the user typed, so the message names their row.
+        assert_eq!(
+            update(&conn, &secrets, &second.id, &input("TOKEN", false, None)).unwrap_err(),
+            "duplicate-name:TOKEN"
+        );
+    }
+
+    #[test]
+    fn a_constraint_violation_is_reported_as_a_duplicate_name() {
+        // The friendly check can be beaten by a concurrent write, so the unique index is
+        // the authority — and its text must still reach `vars.nameDuplicate`.
+        let error = rusqlite::Error::SqliteFailure(
+            ffi::Error {
+                code: ffi::ErrorCode::ConstraintViolation,
+                extended_code: 19,
+            },
+            Some("UNIQUE constraint failed: global_vars.name".to_string()),
+        );
+        assert_eq!(duplicate_error("Token", error), "duplicate-name:Token");
+
+        let other = rusqlite::Error::SqliteFailure(
+            ffi::Error {
+                code: ffi::ErrorCode::NotFound,
+                extended_code: 12,
+            },
+            Some("no such table".to_string()),
+        );
+        assert_eq!(duplicate_error("Token", other), "no such table");
+    }
+
+    #[test]
+    fn a_secure_variable_created_without_a_value_has_no_entry() {
+        let conn = memory_db();
+        let secrets = MemorySecrets::new();
+        let created = create(&conn, &secrets, &input("token", true, Some(""))).expect("created");
+        assert_eq!(secrets.len(), 0);
+        // Revealing an empty secret answers an empty field, which is what lets the user
+        // type one into it; a send is where the missing secret stops the request.
+        assert_eq!(reveal(&conn, &secrets, &created.id).expect("reveal"), "");
+        assert_eq!(
+            load_values(&conn, &secrets, &["token".to_string()]).unwrap_err(),
+            "secret-missing:token"
+        );
+    }
+
+    #[test]
+    fn clearing_a_revealed_secret_erases_the_entry() {
+        let conn = memory_db();
+        let secrets = MemorySecrets::new();
+        let created = create(&conn, &secrets, &input("token", true, Some("s3cret"))).expect("created");
+        let cleared = update(&conn, &secrets, &created.id, &input("token", true, Some(""))).expect("cleared");
+        assert!(cleared.secure);
+        assert_eq!(secrets.len(), 0);
+        assert_eq!(reveal(&conn, &secrets, &created.id).expect("reveal"), "");
+    }
+
+    #[test]
+    fn plain_to_secure_with_an_empty_value_writes_no_secret() {
+        let conn = memory_db();
+        let secrets = MemorySecrets::new();
+        let created = create(&conn, &secrets, &input("token", false, Some(""))).expect("created");
+        let secured = update(&conn, &secrets, &created.id, &input("token", true, None)).expect("secured");
+        assert!(secured.secure);
+        assert_eq!(secrets.len(), 0);
+    }
+
+    #[test]
+    fn unsecuring_a_row_whose_secret_is_gone_reports_the_missing_secret() {
+        let conn = memory_db();
+        let secrets = MemorySecrets::new();
+        let created = create(&conn, &secrets, &input("token", true, Some("s3cret"))).expect("created");
+        secrets.delete(&created.id).expect("entry lost");
+        assert_eq!(
+            update(&conn, &secrets, &created.id, &input("token", false, None)).unwrap_err(),
+            "secret-missing:token"
+        );
+        // The row stays secure rather than becoming a plain row with an empty value.
+        assert!(list(&conn).expect("list")[0].secure);
+    }
+
+    #[test]
+    fn reveal_answers_the_column_of_a_plain_row() {
+        let conn = memory_db();
+        let secrets = MemorySecrets::new();
+        let created = create(&conn, &secrets, &input("base", false, Some("https://a"))).expect("created");
+        assert_eq!(reveal(&conn, &secrets, &created.id).expect("reveal"), "https://a");
+        assert_eq!(secrets.len(), 0);
     }
 }
