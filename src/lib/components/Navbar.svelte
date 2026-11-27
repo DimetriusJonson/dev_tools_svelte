@@ -56,6 +56,17 @@
 
 	<div class="flex shrink-0 items-center gap-2.5">
 		{#if desktop}
+			<a
+				href="/global-vars"
+				class="flex h-11 w-11 items-center justify-center rounded-full bg-[var(--nav-active-bg)] text-white transition-all duration-150 hover:scale-105 active:scale-95 {isActive('/global-vars')
+					? 'ring-2 ring-[var(--accent)]'
+					: ''}"
+				title={$t('nav.globalVars')}
+				aria-label={$t('nav.globalVars')}
+				aria-current={isActive('/global-vars') ? 'page' : undefined}
+			>
+				<Icon name="variable" size={19} />
+			</a>
 			<button
 				type="button"
 				onclick={() => void checkForUpdates({ manual: true })}

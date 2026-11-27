@@ -1,0 +1,154 @@
+import type { Translate } from '$lib/stores/i18n';
+import { parseQuery, type RestProperty } from './rest';
+
+
+export const VAR_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+export const MAX_VAR_NAME_CHARS = 64;
+// A safe value is shown as this in the raw-request dump: the real secret never
+// reaches SQLite or the frontend. Mirrors `vars.rs::SECRET_MASK`.
+export const SECRET_MASK = '********';
+// What a secure row shows in the variables table before it is revealed.
+export const SECRET_DOTS = '••••••';
+// How long a revealed secret stays on screen.
+export const REVEAL_MS = 15000;
+
+export interface VarRow {
+	id: string;
+	name: string;
+	secure: boolean;
+}
+
+export interface TemplateSource {
+	url: string;
+	headers: RestProperty[];
+	body: string;
+	body_type: string;
+	form?: RestProperty[];
+	multipart?: RestProperty[];
+	files?: { name: string; path: string; filename: string }[];
+}
+
+/**
+* A template starting at `start`, mirroring the Rust scanner: the inner text is
+* trimmed and must be a valid name, and a nested `{{` does not stop the search for
+* the closing `}}`. Returns the lowercase name and the index just after `}}`.
+*/
+function templateAt(chars: string[], start: number): { name: string; end: number } | null {
+	if (start + 1 >= chars.length || chars[start] !== '{' || chars[start + 1] !== '{') {
+		return null;
+	}
+	for (let index = start + 2; index + 1 < chars.length; index++) {
+		if (chars[index] === '}' && chars[index + 1] === '}') {
+		 const name = chars.slice(start + 2, index).join('').trim();
+			return VAR_NAME_PATTERN.test(name) ? { name: name.toLowerCase(), end: index + 2 } : null;
+		}
+	}
+	return null;
+}
+
+/** Every distinct variable name a text mentions, in the order it appears. */
+export function extractTemplateNames(text: string): string[] {
+	if (!text.includes('{{')) return [];
+	const chars = [...text];
+	const names: string[] = [];
+	for (let index = 0; index < chars.length; index++) {
+		const found = templateAt(chars, index);
+		if (found) {
+			if (!names.includes(found.name)) names.push(found.name);
+			index = found.end - 1;
+		}
+	}
+	return names;
+}
+
+export function containsTemplate(text: string): boolean {
+	return extractTemplateNames(text).length > 0;
+}
+
+/** The `{{ name }}` a user copies into a request. */
+export function templateFor(name: string): string {
+	return `{{ ${name.trim()} }}`;
+}
+
+/**
+* A name is usable when it is a C-style identifier of at most 64 characters.
+* Duplicates are compared case-insensitively, and the row being edited does not
+* duplicate itself.
+*/
+export function validateVarName(
+	name: string,
+	rows: VarRow[],
+	currentId?: string
+): 'required' | 'invalid' | 'duplicate' | null {
+	const trimmed = name.trim();
+	if (!trimmed) return 'required';
+	if (trimmed.length > MAX_VAR_NAME_CHARS || !VAR_NAME_PATTERN.test(trimmed)) return 'invalid';
+	const taken = rows.some(
+		(row) => row.id !== currentId && row.name.toLowerCase() === trimmed.toLowerCase()
+	);
+	return taken ? 'duplicate' : null;
+}
+
+/** Which places of a request can carry a template, and what they contain. */
+function templateTexts(source: TemplateSource): string[] {
+	const texts = [source.url, source.body, ...source.headers.map((header) => header.value)];
+	// A template typed into the Query table is written to the URL as `%7B%7Bname%7D%7D`,
+	// so the decoded rows are the text the backend actually substitutes.
+	for (const row of parseQuery(source.url)) texts.push(row.value);
+	if (source.body_type === 'form') texts.push(...(source.form ?? []).map((row) => row.value));
+	if (source.body_type === 'multipart') {
+		texts.push(...(source.multipart ?? []).map((row) => row.value));
+		// Part names and file rows go into the body verbatim, so a template there is
+		// something the backend refuses rather than something it substitutes.
+		texts.push(...(source.multipart ?? []).map((row) => row.name));
+		for (const file of source.files ?? []) texts.push(file.name, file.path, file.filename);
+	}
+	return texts;
+}
+
+export function requestHasTemplates(source: TemplateSource): boolean {
+	return templateTexts(source).some(containsTemplate);
+}
+
+/**
+* Names the request mentions, deduplicated. Query values are read decoded, because
+* the URL field stores `{{ token }}` as `%7B%7Btoken%7D%7D`.
+*/
+export function referencedVarNames(source: TemplateSource): string[] {
+	const names: string[] = [];
+	for (const text of templateTexts(source)) {
+		for (const name of extractTemplateNames(text)) {
+			if (!names.includes(name)) names.push(name);
+		}
+	}
+	return names;
+}
+
+/**
+* A localized explanation of a backend error. Unknown text is returned verbatim so
+* nothing is hidden behind a generic message.
+*/
+export function describeVarError(error: unknown, t: Translate): string {
+	const text = String(error ?? '');
+	const unknown = /^unknown-var:(.*)$/.exec(text);
+	if (unknown) return t('vars.unknown', { name: unknown[1] });
+
+	const missing = /^secret-missing:(.*)$/.exec(text);
+	if (missing) return t('vars.secretMissing', { name: missing[1] });
+
+	const store = /^secret-store:(.*)$/.exec(text);
+	if (store) return t('vars.secretStore', { message: store[1] });
+
+	if (text === 'secret-too-large') return t('vars.secretTooLarge');
+
+	const duplicate = /^duplicate-name:(.*)$/.exec(text);
+	if (duplicate) return t('vars.nameDuplicate', { name: duplicate[1] });
+
+	const invalid = /^invalid-name:(.*)$/.exec(text);
+	if (invalid) return t('vars.nameInvalid', { name: invalid[1] });
+
+	const unresolved = /^unresolved-template:(.*)$/.exec(text);
+	if (unresolved) return t('vars.unsupportedTemplate', { name: unresolved[1] });
+
+	return text || t('common.error');
+}

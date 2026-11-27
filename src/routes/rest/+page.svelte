@@ -72,6 +72,7 @@
 		propertyFieldHint,
 		validationMessage
 	} from '$lib/utils/validation';
+	import { requestHasTemplates, referencedVarNames } from '$lib/utils/vars';
 
 	type RequestTab = 'headers' | 'query' | 'cookies' | 'raw';
 	type ResponseTab = 'response' | 'headers' | 'raw';
@@ -159,6 +160,11 @@
 				: '')
 	);
 	const requestStatus = $derived(response?.status ?? null);
+	// `{{ name }}` is expanded by the desktop backend, which is the only place that can
+	// read the stored values. The browser build can only send the template verbatim.
+	const templateNames = $derived(active ? referencedVarNames(active) : []);
+	const hasTemplates = $derived(templateNames.length > 0);
+	const templatesNeedDesktop = $derived(hasTemplates && !isTauriRuntime());
 	const responseStatusLine = $derived(
 		response?.status_line ?? active?.response_status_line ?? ''
 	);
@@ -446,6 +452,12 @@
 			notify(failure, 'error');
 			return;
 		}
+		// Substitution needs the value behind the template, and only the desktop app
+		// can read it.
+		if (templatesNeedDesktop) {
+			notify($t('vars.desktopOnlySend'), 'error');
+			return;
+		}
 
 		const target = active;
 		void flushSave(target);
@@ -699,6 +711,12 @@
 			notify(failure, 'error');
 			return;
 		}
+		// A cURL command has no way to reach the credential store, so the template would
+		// be sent literally.
+		if (requestHasTemplates(request)) {
+			notify($t('vars.curlUnavailable'), 'error');
+			return;
+		}
 		const body = resolveRequestBody(request);
 		const command = buildCurl(
 			{
@@ -722,6 +740,10 @@
 			notify(failure, 'error');
 			return;
 		}
+		if (hasTemplates) {
+			notify($t('vars.curlUnavailable'), 'error');
+			return;
+		}
 		const command = buildCurl(
 			{
 				method: active.method,
@@ -742,6 +764,10 @@
 		const failure = validationFailure(active);
 		if (failure) {
 			notify(failure, 'error');
+			return;
+		}
+		if (templatesNeedDesktop) {
+			notify($t('vars.desktopOnlySend'), 'error');
 			return;
 		}
 		// The name can come from the server's `content-disposition`, so it is reduced
@@ -1092,6 +1118,11 @@
 										{$t('rest.curlWindows')}
 									</button>
 								</div>
+								{#if hasTemplates}
+									<p class="shrink-0 text-xs leading-relaxed text-[var(--text-muted)]">
+										{$t('vars.rawHint')}
+									</p>
+								{/if}
 								<div class="min-h-0 flex-1">
 									<CodeMirrorEditor
 										value={rawRequestText}

@@ -60,6 +60,7 @@
 		propertyFieldHint,
 		validationMessage
 	} from '$lib/utils/validation';
+	import { containsTemplate } from '$lib/utils/vars';
 	import {
 		SOAP_METHOD,
 		buildEnvelope,
@@ -194,6 +195,13 @@
 						requestBody
 					)
 				: '')
+	);
+
+	// `{{ name }}` is expanded by the backend when the call is built, so the preview of
+	// the exchange keeps showing the template itself.
+	const hasVarTemplates = $derived(
+		containsTemplate(requestBody) ||
+			userHeaders.some((row) => containsTemplate(row.value))
 	);
 
 	/** True when a row carries a name the binding already sends on its own. */
@@ -1065,13 +1073,22 @@
 									/>
 								</div>
 							{:else}
-								<CodeMirrorEditor
-									value={rawRequestText}
-									language="text"
-									dark={dark}
-									readonly={true}
-									ariaLabel={$t('wsdl.tabRaw')}
-								/>
+								<div class="flex min-h-0 flex-1 flex-col gap-1">
+									{#if hasVarTemplates}
+										<p class="shrink-0 px-2 text-xs leading-relaxed text-[var(--text-muted)]">
+											{$t('vars.rawHint')}
+										</p>
+									{/if}
+									<div class="min-h-0 flex-1">
+										<CodeMirrorEditor
+											value={rawRequestText}
+											language="text"
+											dark={dark}
+											readonly={true}
+											ariaLabel={$t('wsdl.tabRaw')}
+											/>
+									</div>
+								</div>
 							{/if}
 						</div>
 					</div>

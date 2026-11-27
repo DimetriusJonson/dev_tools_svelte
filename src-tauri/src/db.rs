@@ -124,6 +124,23 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 		CREATE INDEX IF NOT EXISTS idx_rest_form_request ON rest_request_form(request_id);
 		CREATE INDEX IF NOT EXISTS idx_rest_multipart_request ON rest_request_multipart(request_id);
 		CREATE INDEX IF NOT EXISTS idx_rest_files_request ON rest_request_files(request_id);
+		-- Global variables: `{{ name }}` in query values, header values, bodies and
+		-- form fields. A secure variable keeps only its name here; the value lives in
+		-- the OS credential store, keyed by `id`, so renaming never orphans a secret.
+		CREATE TABLE IF NOT EXISTS global_vars (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			secure INTEGER NOT NULL DEFAULT 0,
+			-- Always '' when secure = 1: the value is only ever in the keyring.
+			value TEXT NOT NULL DEFAULT '',
+			sort_order INTEGER NOT NULL DEFAULT 0,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_global_vars_name
+			ON global_vars(name COLLATE NOCASE);
+
 		-- WSDL client: projects, imported files, the parsed tree and per-operation state.
 		CREATE TABLE IF NOT EXISTS wsdl_projects (
 			id TEXT PRIMARY KEY,

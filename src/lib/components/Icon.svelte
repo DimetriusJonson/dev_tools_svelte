@@ -91,7 +91,20 @@
 			'M12 9v4',
 			'M12 17h.01'
 		],
-		update: ['M12 3v10', 'm7 9 5 5 5-5', 'M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4']
+		update: ['M12 3v10', 'm7 9 5 5 5-5', 'M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4'],
+		lock: [
+			'M15 11V7a4 4 0 0 0-8 0v4',
+			'M3 13a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'
+		],
+		unlock: [
+			'M7 11V7a5 5 0 0 1 10 0',
+			'M3 13a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'
+		],
+		variable: [
+			'M8 4H5a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h3',
+			'M16 4h3a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1h-3',
+			'M12 9v6'
+		]
 	} satisfies Record<string, string[]>;
 
 	export type IconName = keyof typeof ICON_PATHS;

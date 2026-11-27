@@ -11,6 +11,7 @@ use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use crate::db::AppDb;
+use crate::vars::{self, VarValues};
 
 pub const DEFAULT_USER_AGENT: &str = "WebDevUsefulTools Client";
 const REQUEST_TIMEOUT_SECS: u64 = 120;
@@ -1032,6 +1033,15 @@ fn file_disposition(name: &str, filename: &str) -> String {
     line
 }
 
+/// A field value that carries a line break would open a new part in the body, so a
+/// substituted secret cannot smuggle one in. Mirrors `validateMultipartValue`.
+fn check_multipart_value(name: &str, value: &str) -> Result<(), String> {
+    if value.contains('\r') || value.contains('\n') {
+        return Err(format!("Field {name} cannot contain a line break"));
+    }
+    Ok(())
+}
+
 /// `reqwest` is compiled without its `multipart` feature, so the body is assembled
 /// here: a boundary, one part per row, and the file bytes read from the picked path.
 /// Rows with a blank name are skipped exactly as they are skipped in storage.
@@ -1045,6 +1055,7 @@ pub fn encode_multipart(
         if field.name.trim().is_empty() {
             continue;
         }
+        check_multipart_value(field.name.trim(), &field.value)?;
         out.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
         out.extend_from_slice(
             format!(
@@ -1311,6 +1322,7 @@ fn build_client() -> Result<Client, String> {
         .map_err(|error| format!("Could not create HTTP client: {error}"))
 }
 
+#[derive(Debug)]
 struct PreparedCall {
     method: Method,
     url: Url,
@@ -1324,6 +1336,126 @@ fn multipart_boundary() -> String {
     Uuid::new_v4().to_string()
 }
 
+fn substitute_rows(
+    rows: &[RestProperty],
+    values: &HashMap<String, String>,
+) -> Result<Vec<RestProperty>, String> {
+    rows.iter()
+        .map(|row| {
+            Ok(RestProperty {
+                name: row.name.clone(),
+                value: vars::substitute(&row.value, values)?,
+            })
+        })
+        .collect()
+}
+
+/// Names the variables that a request actually mentions. Query values are read decoded
+/// because the client writes `{{ token }}` into the URL as `%7B%7Btoken%7D%7D`, and only
+/// the body the selected tab produces is scanned, so an unused buffer with a broken
+/// template does not block a send.
+fn referenced_var_names(
+    url: &Url,
+    headers: &[RestProperty],
+    body: &str,
+    body_type: &str,
+    form: &[RestProperty],
+    multipart: &[RestProperty],
+) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let add = |text: &str, names: &mut Vec<String>| {
+        for name in vars::template_names(text) {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    };
+
+    for (_, value) in url.query_pairs() {
+        add(&value, &mut names);
+    }
+    for header in headers {
+        add(&header.value, &mut names);
+    }
+    match body_type {
+        "form" => {
+            for row in form {
+                add(&row.value, &mut names);
+            }
+        }
+        "multipart" => {
+            for row in multipart {
+                add(&row.value, &mut names);
+            }
+        }
+        _ => add(body, &mut names),
+    }
+    names
+}
+
+/// A template in a place the resolver never touches would go on the wire as the literal
+/// `{{ name }}`, so it is reported instead of silently sent. Part names and file rows are
+/// written into the body verbatim, which is why they are checked here too.
+fn reject_unsupported_templates(
+    url: &Url,
+    headers: &[RestProperty],
+    multipart: &[RestProperty],
+    files: &[RestFileRow],
+) -> Result<(), String> {
+    if let Some(name) = vars::first_template_name(&vars::decoded_braces(url.path())) {
+        return Err(format!("unresolved-template:{name}"));
+    }
+    for header in headers {
+        if let Some(name) = vars::first_template_name(&header.name) {
+            return Err(format!("unresolved-template:{name}"));
+        }
+    }
+    for row in multipart {
+        if let Some(name) = vars::first_template_name(&row.name) {
+            return Err(format!("unresolved-template:{name}"));
+        }
+    }
+    for file in files {
+        for text in [&file.name, &file.path, &file.filename] {
+            if let Some(name) = vars::first_template_name(text) {
+                return Err(format!("unresolved-template:{name}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every value a request needs before it goes on the wire. Keyring reads are blocking,
+/// so they happen outside the async runtime instead of stalling it.
+async fn load_request_values(
+    db: &tauri::State<'_, AppDb>,
+    app: &tauri::AppHandle,
+    url: &str,
+    headers: &[RestProperty],
+    body: &str,
+    body_type: &str,
+    form: &[RestProperty],
+    multipart: &[RestProperty],
+) -> Result<VarValues, String> {
+    let parsed = normalize_rest_url(url)?;
+    let names = referenced_var_names(&parsed, headers, body, body_type, form, multipart);
+    if names.is_empty() {
+        return Ok(VarValues::default());
+    }
+    let database = db.inner().clone();
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let connection = database.conn.lock().map_err(|error| error.to_string())?;
+        vars::load_values(
+            &connection,
+            &vars::KeyringSecrets::new(handle),
+            &names
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 #[allow(clippy::too_many_arguments)]
 fn prepare_call(
     method: &str,
@@ -1334,25 +1466,53 @@ fn prepare_call(
     form: &[RestProperty],
     multipart: &[RestProperty],
     files: &[RestFileRow],
+    values: &VarValues,
 ) -> Result<PreparedCall, String> {
     let parsed = normalize_rest_url(url)?;
+    reject_unsupported_templates(&parsed, headers, multipart, files)?;
     let method = Method::from_bytes(method.trim().to_ascii_uppercase().as_bytes())
         .map_err(|_| format!("Invalid HTTP method: {method}"))?;
     let boundary = match body_type {
         "multipart" => Some(multipart_boundary()),
         _ => None,
     };
+    let boundary_for_body = boundary
+        .as_deref()
+        .unwrap_or(MULTIPART_BOUNDARY_PLACEHOLDER);
+
+    // The wire gets the real values; the dump is built from the masked map so a safe
+    // variable never reaches SQLite as text.
+    let real_url = vars::substitute_url(&parsed, &values.real)?;
+    let masked_url = vars::substitute_url(&parsed, &values.masked)?;
+    let real_headers = substitute_rows(headers, &values.real)?;
+    let masked_headers = substitute_rows(headers, &values.masked)?;
+    let real_body = vars::substitute(body, &values.real)?;
+    let masked_body = vars::substitute(body, &values.masked)?;
+    let real_form = substitute_rows(form, &values.real)?;
+    let masked_form = substitute_rows(form, &values.masked)?;
+    let real_multipart = substitute_rows(multipart, &values.real)?;
+    let masked_multipart = substitute_rows(multipart, &values.masked)?;
+
     let resolved = resolve_body(
         body_type,
-        body,
-        form,
-        multipart,
+        &real_body,
+        &real_form,
+        &real_multipart,
         files,
-        boundary
-            .as_deref()
-            .unwrap_or(MULTIPART_BOUNDARY_PLACEHOLDER),
+        boundary_for_body,
     )?;
-    let prepared = prepare_headers(&parsed, headers, &resolved, body_type, boundary.as_deref());
+    // Same boundary and the real `Content-Length`, only the field values are masked, so
+    // the dump keeps the framing of the bytes that are actually sent.
+    let masked_resolved = resolve_body(
+        body_type,
+        &masked_body,
+        &masked_form,
+        &masked_multipart,
+        files,
+        boundary_for_body,
+    )?;
+    let prepared = prepare_headers(&real_url, &real_headers, &resolved, body_type, boundary.as_deref());
+    let dump_headers = prepare_headers(&masked_url, &masked_headers, &resolved, body_type, boundary.as_deref());
     let wire_headers = prepared
         .iter()
         .filter(|header| {
@@ -1362,10 +1522,15 @@ fn prepare_call(
         .cloned()
         .collect::<Vec<_>>();
     let header_map = build_headers_map(&wire_headers)?;
-    let raw_request = build_raw_request(method.as_str(), &parsed, &prepared, &resolved.dump);
+    let raw_request = build_raw_request(
+        method.as_str(),
+        &masked_url,
+        &dump_headers,
+        &masked_resolved.dump,
+    );
     Ok(PreparedCall {
         method,
-        url: parsed,
+        url: real_url,
         headers: header_map,
         body: resolved.wire,
         raw_request,
@@ -1492,6 +1657,8 @@ pub fn cmd_clear_rest_response(db: tauri::State<'_, AppDb>, id: String) -> Resul
 #[tauri::command(rename = "execute_rest_request", rename_all = "snake_case")]
 pub async fn cmd_execute_rest_request(
     cancel: tauri::State<'_, RestCancelState>,
+    db: tauri::State<'_, AppDb>,
+    app: tauri::AppHandle,
     method: String,
     url: String,
     headers: Vec<RestProperty>,
@@ -1502,6 +1669,10 @@ pub async fn cmd_execute_rest_request(
     files: Option<Vec<RestFileRow>>,
 ) -> Result<RestResponse, String> {
     let form = form.unwrap_or_default();
+    let multipart = multipart.unwrap_or_default();
+    let files = files.unwrap_or_default();
+    let values = load_request_values(&db, &app, &url, &headers, &body, &body_type, &form, &multipart)
+        .await?;
     let PreparedCall {
         method,
         url,
@@ -1515,8 +1686,9 @@ pub async fn cmd_execute_rest_request(
         &body,
         &body_type,
         &form,
-        &multipart.unwrap_or_default(),
-        &files.unwrap_or_default(),
+        &multipart,
+        &files,
+        &values,
     )?;
     let client = build_client()?;
     let (cancel_id, receiver) = cancel.begin();
@@ -1608,6 +1780,8 @@ pub fn cmd_cancel_rest_request(cancel: tauri::State<'_, RestCancelState>) -> boo
 
 #[tauri::command(rename = "download_rest_response", rename_all = "snake_case")]
 pub async fn cmd_download_rest_response(
+    db: tauri::State<'_, AppDb>,
+    app: tauri::AppHandle,
     method: String,
     url: String,
     headers: Vec<RestProperty>,
@@ -1619,6 +1793,10 @@ pub async fn cmd_download_rest_response(
     path: String,
 ) -> Result<u64, String> {
     let form = form.unwrap_or_default();
+    let multipart = multipart.unwrap_or_default();
+    let files = files.unwrap_or_default();
+    let values = load_request_values(&db, &app, &url, &headers, &body, &body_type, &form, &multipart)
+        .await?;
     let call = prepare_call(
         &method,
         &url,
@@ -1626,8 +1804,9 @@ pub async fn cmd_download_rest_response(
         &body,
         &body_type,
         &form,
-        &multipart.unwrap_or_default(),
-        &files.unwrap_or_default(),
+        &multipart,
+        &files,
+        &values,
     )?;
     let client = build_client()?;
     let mut builder = client.request(call.method.clone(), call.url.clone());
@@ -1899,6 +2078,7 @@ mod tests {
             &[property("user", "a b"), property("pass", "c&d")],
             &[],
             &[],
+            &VarValues::default(),
         )
         .expect("prepared call");
         assert_eq!(call.body, b"user=a+b&pass=c%26d".to_vec());
@@ -1951,6 +2131,7 @@ mod tests {
             &[],
             &fields,
             &files,
+            &VarValues::default(),
         )
         .expect("prepared call");
         // `prepare_call` generates its own boundary, so only the framing is comparable.
@@ -2382,5 +2563,279 @@ mod tests {
 
         assert!(cancel.cancel(), "the second call is still cancellable");
         assert!(second.try_recv().is_ok(), "and receives the abort signal");
+    }
+
+    fn plain_values(entries: &[(&str, &str)]) -> VarValues {
+        let mut values = VarValues::default();
+        for (name, value) in entries {
+            let key = name.to_ascii_lowercase();
+            values.real.insert(key.clone(), value.to_string());
+            values.masked.insert(key, value.to_string());
+        }
+        values
+    }
+
+    fn values_with_a_secret(secure: &[&str]) -> VarValues {
+        let mut values = VarValues::default();
+        for name in secure {
+            let key = name.to_ascii_lowercase();
+            values.real.insert(key.clone(), "s3cret".to_string());
+            values.masked.insert(key, vars::SECRET_MASK.to_string());
+        }
+        values
+    }
+
+    #[test]
+    fn variables_are_substituted_in_query_headers_and_body() {
+        let values = values_with_a_secret(&["token"]);
+        let call = prepare_call(
+            "POST",
+            "https://example.com/api?a=%7B%7Btoken%7D%7D",
+            &[property("Authorization", "Bearer {{ token }}")],
+            "{\"token\":\"{{token}}\"}",
+            "json",
+            &[],
+            &[],
+            &[],
+            &values,
+        )
+        .expect("prepared call");
+
+        assert_eq!(call.url.to_string(), "https://example.com/api?a=s3cret");
+        assert_eq!(
+            call.body,
+            "{\"token\":\"s3cret\"}".as_bytes().to_vec()
+        );
+        assert!(call
+            .headers
+            .iter()
+            .any(|(name, value)| name.as_str() == "authorization" && value == "Bearer s3cret"));
+
+        // The stored dump shows the template as a mask, never the real secret.
+        assert!(call.raw_request.contains("Bearer ********"));
+        assert!(!call.raw_request.contains("s3cret"));
+    }
+
+    #[test]
+    fn a_query_value_is_reencoded_after_substitution() {
+        let values = plain_values(&[("q", "hello world")]);
+        let call = prepare_call(
+            "GET",
+            "https://example.com/search?q={{q}}&keep=a%20b",
+            &[],
+            "",
+            "json",
+            &[],
+            &[],
+            &[],
+            &values,
+        )
+        .expect("prepared call");
+        // `query_pairs` decodes, so both the `+` and the `%20` spellings are found, and the
+        // rebuilt query re-encodes every value with the form rules: a space becomes `+`.
+        assert_eq!(
+            call.url.to_string(),
+            "https://example.com/search?q=hello+world&keep=a+b"
+        );
+    }
+
+    #[test]
+    fn a_request_without_variables_is_left_exact() {
+        let call = prepare_call(
+            "GET",
+            "https://example.com/p?a=b%20c&d=+x",
+            &[],
+            "",
+            "json",
+            &[],
+            &[],
+            &[],
+            &VarValues::default(),
+        )
+        .expect("prepared call");
+        assert_eq!(call.url.to_string(), "https://example.com/p?a=b%20c&d=+x");
+    }
+
+    #[test]
+    fn an_unknown_variable_blocks_the_request() {
+        let error = prepare_call(
+            "POST",
+            "https://example.com/p",
+            &[],
+            "{\"a\":\"{{missing}}\"}",
+            "json",
+            &[],
+            &[],
+            &[],
+            &VarValues::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error, "unknown-var:missing");
+    }
+
+    #[test]
+    fn a_template_in_an_unsupported_place_is_reported() {
+        let values = plain_values(&[("host", "example.com")]);
+        let path_error = prepare_call(
+            "GET",
+            "https://example.com/{{host}}",
+            &[],
+            "",
+            "json",
+            &[],
+            &[],
+            &[],
+            &values,
+        )
+        .unwrap_err();
+        assert_eq!(path_error, "unresolved-template:host");
+
+        let name_error = prepare_call(
+            "GET",
+            "https://example.com/p",
+            &[property("{{host}}", "value")],
+            "",
+            "json",
+            &[],
+            &[],
+            &[],
+            &values,
+        )
+        .unwrap_err();
+        assert_eq!(name_error, "unresolved-template:host");
+    }
+
+    #[test]
+    fn a_template_in_a_query_name_or_a_part_name_is_reported() {
+        let values = plain_values(&[("token", "x")]);
+
+        let query_error = prepare_call(
+            "GET",
+            "https://example.com/p?{{token}}=1",
+            &[],
+            "",
+            "json",
+            &[],
+            &[],
+            &[],
+            &values,
+        )
+        .unwrap_err();
+        assert_eq!(query_error, "unresolved-template:token");
+
+        // The Query table writes the name percent-encoded, and `query_pairs` decodes it
+        // back, so both spellings are caught.
+        let encoded_error = prepare_call(
+            "GET",
+            "https://example.com/p?%7B%7Btoken%7D%7D=1",
+            &[],
+            "",
+            "json",
+            &[],
+            &[],
+            &[],
+            &values,
+        )
+        .unwrap_err();
+        assert_eq!(encoded_error, "unresolved-template:token");
+
+        let part_error = prepare_call(
+            "POST",
+            "https://example.com/p",
+            &[],
+            "",
+            "multipart",
+            &[],
+            &[property("{{token}}", "value")],
+            &[],
+            &values,
+        )
+        .unwrap_err();
+        assert_eq!(part_error, "unresolved-template:token");
+
+        let file_error = prepare_call(
+            "POST",
+            "https://example.com/p",
+            &[],
+            "",
+            "multipart",
+            &[],
+            &[],
+            &[file_row("part", "{{token}}/report.pdf", "report.pdf")],
+            &values,
+        )
+        .unwrap_err();
+        assert_eq!(file_error, "unresolved-template:token");
+    }
+
+    #[test]
+    fn form_and_multipart_values_are_substituted() {
+        let values = plain_values(&[("name", "a b")]);
+        let form = prepare_call(
+            "POST",
+            "https://example.com/p",
+            &[],
+            "",
+            "form",
+            &[property("field", "{{name}}")],
+            &[],
+            &[],
+            &values,
+        )
+        .expect("form call");
+        assert_eq!(form.body, b"field=a+b".to_vec());
+
+        let directory = std::env::temp_dir().join(format!("rest-vars-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).expect("temp dir");
+        let path = directory.join("note.txt");
+        std::fs::write(&path, b"payload").expect("fixture");
+        let files = vec![RestFileRow {
+            name: "document".to_string(),
+            path: path.display().to_string(),
+            filename: String::new(),
+        }];
+
+        let call = prepare_call(
+            "POST",
+            "https://example.com/p",
+            &[],
+            "",
+            "multipart",
+            &[],
+            &[property("field", "{{name}}")],
+            &files,
+            &values,
+        )
+        .expect("multipart call");
+
+        // The masked dump keeps the framing and the real length of the wire body.
+        assert!(call.raw_request.contains("content-length: "));
+        assert!(call
+            .raw_request
+            .contains(&format!("content-length: {}", call.body.len())));
+        assert!(call.raw_request.contains("name=\"field\""));
+        assert!(call.raw_request.contains("\r\n\r\na b\r\n"));
+        assert!(String::from_utf8_lossy(&call.body).contains("a b"));
+        assert!(!call.raw_request.contains("payload"));
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn a_substituted_line_break_is_not_allowed_in_a_multipart_field() {
+        let values = plain_values(&[("value", "one\r\ntwo")]);
+        let error = prepare_call(
+            "POST",
+            "https://example.com/p",
+            &[],
+            "",
+            "multipart",
+            &[],
+            &[property("field", "{{value}}")],
+            &[],
+            &values,
+        )
+        .unwrap_err();
+        assert!(error.contains("cannot contain a line break"));
     }
 }

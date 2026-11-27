@@ -4,6 +4,7 @@ mod processor;
 mod rest;
 mod share;
 mod update;
+mod vars;
 mod wsdl;
 
 use std::sync::{Arc, Mutex};
@@ -57,6 +58,7 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_keyring::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
@@ -142,6 +144,11 @@ pub fn run() {
             rest::cmd_execute_rest_request,
             rest::cmd_cancel_rest_request,
             rest::cmd_download_rest_response,
+            vars::cmd_list_global_vars,
+            vars::cmd_create_global_var,
+            vars::cmd_update_global_var,
+            vars::cmd_delete_global_var,
+            vars::cmd_reveal_global_var,
             update::restart_app,
             wsdl::cmd_list_wsdl_projects,
             wsdl::cmd_create_wsdl_project,
