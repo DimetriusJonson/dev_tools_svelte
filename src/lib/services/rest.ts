@@ -9,14 +9,20 @@ import {
 	filenameFromDisposition,
 	isAttachmentDisposition,
 	multipartBoundary,
+	normalizeMultipartTab,
+	normalizeRequestTab,
+	normalizeResponseTab,
 	resolveRequestBody,
+	type MultipartTab,
+	type RequestTab,
+	type ResponseTab,
 	type BodyType,
 	type MultipartPreviewOptions,
 	type RestFileRow,
 	type RestProperty
 } from '$lib/utils/rest';
 
-export type { BodyType, RestFileRow, RestProperty };
+export type { BodyType, MultipartTab, RestFileRow, RestProperty, RequestTab, ResponseTab };
 
 export interface RestProject {
 	id: string;
@@ -42,6 +48,12 @@ export interface RestRequest {
 	raw_request: string | null;
 	/** Kept so the Raw response tab can rebuild the dump after a restart. */
 	response_status_line: string | null;
+	/** Which tab of the request panel was open when this request was last edited. */
+	request_tab: RequestTab;
+	/** Which of the `Form` sub-tables was open. */
+	multipart_tab: MultipartTab;
+	/** Which response tab was open: body, headers or the raw dump. */
+	response_tab: ResponseTab;
 	created_at: string;
 	updated_at: string;
 }
@@ -58,6 +70,9 @@ export interface RestRequestDraft {
 	form: RestProperty[];
 	multipart: RestProperty[];
 	files: RestFileRow[];
+	request_tab?: RequestTab;
+	multipart_tab?: MultipartTab;
+	response_tab?: ResponseTab;
 }
 
 export interface RestRequestUpdate extends RestRequestDraft {
@@ -168,8 +183,13 @@ function loadLocal(): LocalState {
 						multipart: rows(request.multipart),
 						files: fileRows(request.files),
 						response_headers: rows(request.response_headers),
-						// Records saved before the Raw response tab have no stored status line.
-						response_status_line: request.response_status_line ?? null
+						// Records saved before the Raw response tab have no stored status line,
+						// and records saved before the open tabs were stored have no tab codes:
+						// both read back as the first tab of their panel.
+						response_status_line: request.response_status_line ?? null,
+						request_tab: normalizeRequestTab(request.request_tab),
+						multipart_tab: normalizeMultipartTab(request.multipart_tab),
+						response_tab: normalizeResponseTab(request.response_tab)
 					}))
 				: []
 		};
@@ -202,7 +222,11 @@ function normalizeDraft(draft: Partial<RestRequestDraft>): RestRequestDraft {
 		headers: Array.isArray(draft.headers) ? draft.headers : [],
 		form: Array.isArray(draft.form) ? draft.form : [],
 		multipart: Array.isArray(draft.multipart) ? draft.multipart : [],
-		files: Array.isArray(draft.files) ? draft.files : []
+		files: Array.isArray(draft.files) ? draft.files : [],
+		// A draft that names no tab opens on the first tab of each panel.
+		request_tab: normalizeRequestTab(draft.request_tab),
+		multipart_tab: normalizeMultipartTab(draft.multipart_tab),
+		response_tab: normalizeResponseTab(draft.response_tab)
 	};
 }
 
@@ -213,6 +237,9 @@ function localCreateRequest(draft: RestRequestDraft): RestRequest {
 	const request: RestRequest = {
 		id: newId(),
 		...normalized,
+		request_tab: normalizeRequestTab(normalized.request_tab),
+		multipart_tab: normalizeMultipartTab(normalized.multipart_tab),
+		response_tab: normalizeResponseTab(normalized.response_tab),
 		response_body: null,
 		response_headers: [],
 		raw_request: null,

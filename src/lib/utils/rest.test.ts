@@ -40,8 +40,39 @@ import {
 	defaultContentType,
 	getHeader,
 	bodyTypeFromContentType,
-	multipartBoundary
+	multipartBoundary,
+	MULTIPART_TABS,
+	normalizeMultipartTab,
+	normalizeRequestTab,
+	normalizeResponseTab,
+	REQUEST_TABS,
+	RESPONSE_TABS
 } from './rest';
+
+describe('open tab codes', () => {
+	it('accepts every code the panel renders, in any capitalization', () => {
+		for (const tab of REQUEST_TABS) expect(normalizeRequestTab(tab)).toBe(tab);
+		for (const tab of MULTIPART_TABS) expect(normalizeMultipartTab(tab)).toBe(tab);
+		for (const tab of RESPONSE_TABS) expect(normalizeResponseTab(tab)).toBe(tab);
+		expect(normalizeRequestTab(' Raw ')).toBe('raw');
+		expect(normalizeMultipartTab('FILES')).toBe('files');
+		expect(normalizeResponseTab('Headers')).toBe('headers');
+	});
+
+	it('reads a code the panel does not have as its first tab', () => {
+		// A record written before the tabs were stored names none of them, and a
+		// hand-edited row can name a tab that does not exist: both open the first tab.
+		expect(normalizeRequestTab('')).toBe('headers');
+		expect(normalizeRequestTab('body')).toBe('headers');
+		expect(normalizeRequestTab(undefined)).toBe('headers');
+		expect(normalizeRequestTab(null)).toBe('headers');
+		expect(normalizeRequestTab(7)).toBe('headers');
+		expect(normalizeMultipartTab('parts')).toBe('fields');
+		expect(normalizeMultipartTab(undefined)).toBe('fields');
+		expect(normalizeResponseTab('body')).toBe('response');
+		expect(normalizeResponseTab('')).toBe('response');
+	});
+});
 
 describe('query parameters', () => {
 	it('parses and decodes query parameters while keeping the fragment', () => {

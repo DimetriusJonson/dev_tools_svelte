@@ -32,9 +32,12 @@
 		saveRestSelection,
 		updateRestRequest,
 		type BodyType,
+		type MultipartTab,
+		type RequestTab,
 		type RestProject,
 		type RestRequest,
-		type RestResponse
+		type RestResponse,
+		type ResponseTab
 	} from '$lib/services/rest';
 	import {
 		buildCurl,
@@ -47,6 +50,7 @@
 		formatRestTime,
 		getHeader,
 		isAttachmentDisposition,
+		MULTIPART_TABS,
 		multipartBoundary,
 		parseCookies,
 		parseCurl,
@@ -74,13 +78,8 @@
 	} from '$lib/utils/validation';
 	import { requestHasTemplates, referencedVarNames } from '$lib/utils/vars';
 
-	type RequestTab = 'headers' | 'query' | 'cookies' | 'raw';
-	type ResponseTab = 'response' | 'headers' | 'raw';
-	type MultipartTab = 'fields' | 'files';
-
 	const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
 	const BODY_TYPES: BodyType[] = ['json', 'xml', 'text', 'form', 'multipart'];
-	const MULTIPART_TABS: MultipartTab[] = ['fields', 'files'];
 	// The raw preview needs a boundary that does not change on every keystroke. The
 	// request itself always gets a fresh one from the encoder, so this marker is only
 	// the layout hint shown before a run.
@@ -200,9 +199,11 @@
 		response = null;
 		responseText = found.response_body ?? '';
 		previewEnabled = false;
-		requestTab = 'headers';
-		multipartTab = 'fields';
-		responseTab = 'response';
+		// The tabs this request was left on are restored instead of resetting, so a
+		// request reopens exactly as it was closed.
+		requestTab = found.request_tab;
+		multipartTab = found.multipart_tab;
+		responseTab = found.response_tab;
 	}
 
 	function selectProject(id: string | null): void {
@@ -249,7 +250,10 @@
 			multipart: request.multipart,
 			// Storage keeps the path and the display name only; the in-memory `File`
 			// belongs to this session and would serialize as an empty object.
-			files: request.files.map(({ name, path, filename }) => ({ name, path, filename }))
+			files: request.files.map(({ name, path, filename }) => ({ name, path, filename })),
+			request_tab: requestTab,
+			multipart_tab: multipartTab,
+			response_tab: responseTab
 		};
 	}
 
@@ -302,6 +306,26 @@
 		// The Form-encode table has its own storage, so switching tabs never copies
 		// rows into the JSON/XML/Text buffer or parses that buffer into rows.
 		patchActive({ body_type: type });
+	}
+
+	// Open tabs are part of the request record: each switch patches the row, and the
+	// shared 450 ms debounce writes it, so the request reopens on the same panels.
+	function setRequestTab(tab: RequestTab): void {
+		if (!active || active.request_tab === tab) return;
+		requestTab = tab;
+		patchActive({ request_tab: tab });
+	}
+
+	function setMultipartTab(tab: MultipartTab): void {
+		if (!active || active.multipart_tab === tab) return;
+		multipartTab = tab;
+		patchActive({ multipart_tab: tab });
+	}
+
+	function setResponseTab(tab: ResponseTab): void {
+		if (!active || active.response_tab === tab) return;
+		responseTab = tab;
+		patchActive({ response_tab: tab });
 	}
 
 	function onHeadersChange(rows: RestProperty[]): void {
@@ -481,7 +505,7 @@
 			if (activeId === target.id) {
 				response = result;
 				responseText = result.body;
-				responseTab = 'response';
+				setResponseTab('response');
 			}
 			if (target.save_response && isSavableResponse(result)) {
 				await persistResponse(target, result);
@@ -1042,7 +1066,7 @@
 						<div class="flex h-11 shrink-0 items-center gap-1 border-b border-[var(--border)] px-2">
 							<button
 								type="button"
-								onclick={() => (requestTab = 'headers')}
+								onclick={() => setRequestTab('headers')}
 								class="flex items-center gap-1 rounded-md px-3 py-1.5 text-sm font-bold transition-colors duration-150 {requestTab ===
 								'headers'
 									? 'bg-[var(--panel-bg-alt)] text-[var(--text)]'
@@ -1058,7 +1082,7 @@
 							</button>
 							<button
 								type="button"
-								onclick={() => (requestTab = 'query')}
+								onclick={() => setRequestTab('query')}
 								class="flex items-center gap-1 rounded-md px-3 py-1.5 text-sm font-bold transition-colors duration-150 {requestTab ===
 								'query'
 									? 'bg-[var(--panel-bg-alt)] text-[var(--text)]'
@@ -1074,7 +1098,7 @@
 							</button>
 							<button
 								type="button"
-								onclick={() => (requestTab = 'cookies')}
+								onclick={() => setRequestTab('cookies')}
 								class="flex items-center gap-1 rounded-md px-3 py-1.5 text-sm font-bold transition-colors duration-150 {requestTab ===
 								'cookies'
 									? 'bg-[var(--panel-bg-alt)] text-[var(--text)]'
@@ -1090,7 +1114,7 @@
 							</button>
 							<button
 								type="button"
-								onclick={() => (requestTab = 'raw')}
+								onclick={() => setRequestTab('raw')}
 								title={$t('rest.rawRequestHint')}
 								class="rounded-md px-3 py-1.5 text-sm font-bold transition-colors duration-150 {requestTab ===
 								'raw'
@@ -1245,7 +1269,7 @@
 										{#each MULTIPART_TABS as tab (tab)}
 											<button
 												type="button"
-												onclick={() => (multipartTab = tab)}
+												onclick={() => setMultipartTab(tab)}
 												class="flex items-center gap-1 rounded-md px-3 py-1 text-sm font-bold transition-colors duration-150 {multipartTab ===
 												tab
 													? 'bg-[var(--row-active)] text-[var(--text)]'
@@ -1328,7 +1352,7 @@
 					<div class="flex h-11 shrink-0 items-center gap-1 border-b border-[var(--border)] px-2">
 						<button
 							type="button"
-							onclick={() => (responseTab = 'response')}
+							onclick={() => setResponseTab('response')}
 							class="rounded-md px-3 py-1.5 text-sm font-bold transition-colors duration-150 {responseTab ===
 							'response'
 								? 'bg-[var(--panel-bg-alt)] text-[var(--text)]'
@@ -1338,7 +1362,7 @@
 						</button>
 						<button
 							type="button"
-							onclick={() => (responseTab = 'headers')}
+							onclick={() => setResponseTab('headers')}
 							class="rounded-md px-3 py-1.5 text-sm font-bold transition-colors duration-150 {responseTab ===
 							'headers'
 								? 'bg-[var(--panel-bg-alt)] text-[var(--text)]'
@@ -1348,7 +1372,7 @@
 						</button>
 						<button
 							type="button"
-							onclick={() => (responseTab = 'raw')}
+							onclick={() => setResponseTab('raw')}
 							title={$t('rest.rawResponseHint')}
 							class="rounded-md px-3 py-1.5 text-sm font-bold transition-colors duration-150 {responseTab ===
 							'raw'

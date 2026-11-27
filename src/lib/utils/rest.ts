@@ -6,6 +6,37 @@ export interface RestProperty {
 export type BodyType = 'json' | 'xml' | 'text' | 'form' | 'multipart';
 export type CurlShell = 'posix' | 'windows';
 
+/** Tabs of the request panel, the `Form` sub-tables and the response panel. */
+export type RequestTab = 'headers' | 'query' | 'cookies' | 'raw';
+export type MultipartTab = 'fields' | 'files';
+export type ResponseTab = 'response' | 'headers' | 'raw';
+
+export const REQUEST_TABS: RequestTab[] = ['headers', 'query', 'cookies', 'raw'];
+export const MULTIPART_TABS: MultipartTab[] = ['fields', 'files'];
+export const RESPONSE_TABS: ResponseTab[] = ['response', 'headers', 'raw'];
+
+/**
+ * A tab code read back from storage. Only the codes the panel really renders survive;
+ * anything else (a record written before the tabs were stored, a hand-edited row) falls
+ * back to the first tab, mirroring the Rust normalizers in `rest.rs`.
+ */
+function normalizeTab<T extends string>(value: unknown, tabs: T[], fallback: T): T {
+	const code = typeof value === 'string' ? value.trim().toLowerCase() : '';
+	return tabs.includes(code as T) ? (code as T) : fallback;
+}
+
+export function normalizeRequestTab(value: unknown): RequestTab {
+	return normalizeTab(value, REQUEST_TABS, 'headers');
+}
+
+export function normalizeMultipartTab(value: unknown): MultipartTab {
+	return normalizeTab(value, MULTIPART_TABS, 'fields');
+}
+
+export function normalizeResponseTab(value: unknown): ResponseTab {
+	return normalizeTab(value, RESPONSE_TABS, 'response');
+}
+
 /**
  * A `multipart/form-data` file part. `path` is what the desktop dialog picked and
  * what goes to SQLite; `file` only exists in the browser build, where the bytes come

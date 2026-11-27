@@ -37,6 +37,9 @@ function request(id: string, projectId: string | null): RestRequest {
 		response_headers: [],
 		raw_request: null,
 		response_status_line: null,
+		request_tab: 'headers',
+		multipart_tab: 'fields',
+		response_tab: 'response',
 		created_at: '2026-01-01 00:00:00',
 		updated_at: '2026-01-01 00:00:00'
 	};
@@ -180,6 +183,10 @@ describe('REST multipart storage in the browser build', () => {
 		expect(legacy.headers).toEqual([{ name: 'Accept', value: '*/*' }]);
 		// Nor a status line: the Raw response tab rebuilds its dump without one.
 		expect(legacy.response_status_line).toBeNull();
+		// Nor the open tabs: they read as the first tab of each panel.
+		expect(legacy.request_tab).toBe('headers');
+		expect(legacy.multipart_tab).toBe('fields');
+		expect(legacy.response_tab).toBe('response');
 	});
 
 	it('keeps the saved status line so the Raw response tab survives a restart', async () => {
@@ -225,6 +232,82 @@ describe('REST multipart storage in the browser build', () => {
 		const stored = await listRestRequests();
 		expect(stored.map((request) => request.id)).toEqual([created.id, copy.id]);
 		expect(window.localStorage.getItem('devtools.rest')).not.toContain('"file"');
+	});
+});
+
+describe('open tabs of a request', () => {
+	beforeEach(() => {
+		window.localStorage.clear();
+	});
+
+	function blankDraft(): RestRequestDraft {
+		return {
+			project_id: null,
+			name: 'Ping',
+			method: 'GET',
+			url: 'https://example.com/ping',
+			body: '',
+			body_type: 'json',
+			save_response: false,
+			headers: [],
+			form: [],
+			multipart: [],
+			files: []
+		};
+	}
+
+	it('opens a request created without tab codes on the first tab of each panel', async () => {
+		const created = await createRestRequest(blankDraft());
+		expect(created.request_tab).toBe('headers');
+		expect(created.multipart_tab).toBe('fields');
+		expect(created.response_tab).toBe('response');
+	});
+
+	it('round trips the tabs the user left open', async () => {
+		const created = await createRestRequest(blankDraft());
+		await updateRestRequest({
+			...created,
+			request_tab: 'raw',
+			multipart_tab: 'files',
+			response_tab: 'headers'
+		});
+
+		const [saved] = await listRestRequests();
+		expect(saved.request_tab).toBe('raw');
+		expect(saved.multipart_tab).toBe('files');
+		expect(saved.response_tab).toBe('headers');
+		// The codes live in the same record as the body, so nothing is stored twice.
+		expect(window.localStorage.getItem('devtools.rest')).toContain('"response_tab":"headers"');
+	});
+
+	it('reads a code the panel does not render as its first tab', async () => {
+		const created = await createRestRequest(blankDraft());
+
+		// A record an older build or a hand-edited store left behind can name a tab the
+		// panel never renders: the read normalizes it instead of opening nothing.
+		window.localStorage.setItem(
+			'devtools.rest',
+			JSON.stringify({
+				projects: [],
+				requests: [
+					{ ...created, request_tab: 'Cookies', multipart_tab: 'parts', response_tab: 'preview' }
+				]
+			})
+		);
+
+		const [saved] = await listRestRequests();
+		// `Cookies` is a real tab in another capitalization, the other two are not tabs.
+		expect(saved.request_tab).toBe('cookies');
+		expect(saved.multipart_tab).toBe('fields');
+		expect(saved.response_tab).toBe('response');
+	});
+
+	it('copies the open tabs when a request is duplicated', async () => {
+		const created = await createRestRequest({ ...blankDraft(), request_tab: 'query', multipart_tab: 'files' });
+		const copy = await duplicateRestRequest(created.id);
+		expect(copy.request_tab).toBe('query');
+		expect(copy.multipart_tab).toBe('files');
+		expect(copy.response_tab).toBe('response');
 	});
 });
 

@@ -80,6 +80,11 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 			response_headers TEXT NOT NULL DEFAULT '[]',
 			raw_request TEXT,
 			response_status_line TEXT,
+			-- Tabs that were open the last time this request was edited: the request
+			-- panel, the `Form` sub-tables and the response panel.
+			request_tab TEXT NOT NULL DEFAULT 'headers',
+			multipart_tab TEXT NOT NULL DEFAULT 'fields',
+			response_tab TEXT NOT NULL DEFAULT 'response',
 			sort_order INTEGER NOT NULL DEFAULT 0,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -224,7 +229,27 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     // saved answer from an older app would rebuild a dump without its first line. The
     // WSDL state row needs the same column for the same reason.
     ensure_column(conn, "rest_requests", "response_status_line", "TEXT")?;
-    ensure_column(conn, "wsdl_operation_state", "response_status_line", "TEXT")
+    ensure_column(conn, "wsdl_operation_state", "response_status_line", "TEXT")?;
+    // Requests saved before the open tabs were persisted keep their data and get the
+    // default tabs: the request panel, the `Поля` table and the response body.
+    ensure_column(
+        conn,
+        "rest_requests",
+        "request_tab",
+        "TEXT NOT NULL DEFAULT 'headers'",
+    )?;
+    ensure_column(
+        conn,
+        "rest_requests",
+        "multipart_tab",
+        "TEXT NOT NULL DEFAULT 'fields'",
+    )?;
+    ensure_column(
+        conn,
+        "rest_requests",
+        "response_tab",
+        "TEXT NOT NULL DEFAULT 'response'",
+    )
 }
 
 /// Adds a column to an existing table. `CREATE TABLE IF NOT EXISTS` never alters a
@@ -621,6 +646,37 @@ mod tests {
             .query_row([], |row| row.get(0))
             .expect("legacy row");
         assert_eq!(line, None, "the saved row keeps its body and gains no line");
+    }
+
+    #[test]
+    fn adds_the_open_tab_columns_to_an_older_database() {
+        let connection = Connection::open_in_memory().expect("database");
+        // A database written before the open tabs were stored: the request survives and
+        // reads with the default tabs instead of failing on a missing column.
+        connection
+            .execute_batch(
+                "CREATE TABLE rest_requests (id TEXT PRIMARY KEY, project_id TEXT, name TEXT NOT NULL DEFAULT '', method TEXT NOT NULL DEFAULT 'GET', url TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '', body_type TEXT NOT NULL DEFAULT 'json', save_response INTEGER NOT NULL DEFAULT 0, response_body TEXT, response_headers TEXT NOT NULL DEFAULT '[]', raw_request TEXT, response_status_line TEXT, sort_order INTEGER NOT NULL DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+                 INSERT INTO rest_requests (id, name, url) VALUES ('old', 'Legacy', 'https://example.com/');",
+            )
+            .expect("legacy table");
+
+        init_schema(&connection).expect("migrate");
+        init_schema(&connection).expect("migrate again");
+
+        let mut statement = connection
+            .prepare("SELECT request_tab, multipart_tab, response_tab FROM rest_requests WHERE id = 'old'")
+            .expect("migrated columns");
+        let tabs: (String, String, String) = statement
+            .query_row([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .expect("legacy row");
+        assert_eq!(
+            tabs,
+            (
+                "headers".to_string(),
+                "fields".to_string(),
+                "response".to_string()
+            )
+        );
     }
 
     #[test]

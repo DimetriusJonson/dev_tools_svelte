@@ -91,7 +91,7 @@ src/
 │   │   ├── files.ts                      # native dialogs, path helpers, sharedFileName, pickPartFile for multipart rows
 │   │   ├── files.test.ts                 # basename across separators + formatted output naming
 │   │   ├── rest.ts                       # REST IPC wrappers + browser fallback + explorer selection persistence
-│   │   ├── rest.test.ts                  # selection restore rules and browser-storage round trip
+│   │   ├── rest.test.ts                  # selection restore rules, browser-storage round trip and the open-tab codes
 │   │   ├── share.ts                      # share IPC wrappers + viewer URL helpers + retention codes and persistence
 │   │   ├── share.test.ts                 # byte formatting, token-free viewer URL, retention default/round trip, desktop-only delete
 │   │   ├── updater.ts                    # plugin check/downloadAndInstall/close wrappers + restart_app
@@ -113,7 +113,7 @@ src/
 │       ├── diff.test.ts
 │       ├── formatters.ts                 # XML/JSON/URL transformations
 │       ├── formatters.test.ts
-│       ├── rest.ts                       # query/cookies/form + cURL helpers + raw request/response dumps + RFC validation + Content-Disposition filename
+│       ├── rest.ts                       # query/cookies/form + cURL helpers + raw request/response dumps + RFC validation + Content-Disposition filename + request/response tab-code normalizers
 │       ├── rest.test.ts
 │       ├── splash.ts                     # loading splash labels, version, dismissal
 │       ├── splash.test.ts
@@ -363,6 +363,9 @@ CREATE TABLE IF NOT EXISTS rest_requests (
   response_headers TEXT NOT NULL DEFAULT '[]',
   raw_request TEXT,
   response_status_line TEXT,
+  request_tab TEXT NOT NULL DEFAULT 'headers',
+  multipart_tab TEXT NOT NULL DEFAULT 'fields',
+  response_tab TEXT NOT NULL DEFAULT 'response',
   sort_order INTEGER NOT NULL DEFAULT 0,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -489,6 +492,7 @@ Rest storage:
 - `rest.rs::resolve_body` (client mirrors: `utils/rest.ts::resolveRequestBody`, `services/rest.ts::wireBody`) gives form rows priority when `body_type = 'form'`: the wire body is `encode_form_urlencoded(form)`, the default content type is `application/x-www-form-urlencoded`, and the text buffer is ignored and left untouched.
 - `resolve_body` returns `ResolvedBody { wire: Vec<u8>, dump: String }` and `PreparedCall.body` is `Vec<u8>`, because a multipart body mixes text parts with file bytes. For `body_type = 'multipart'` the wire bytes come from `encode_multipart` (fields first, then files, in table order, boundary from `multipart_boundary()` = a fresh `Uuid::new_v4()`), the dump replaces every file payload with `<bytes of path>` so the raw-request preview keeps the framing without the payload, and `Content-Length` is the real `wire.len()`. Client mirrors: `resolveRequestBody` returns `''` for multipart, `buildMultipartPreview` renders the dump text with the same framing, and the preview `Content-Length` is the dump's own byte length — file sizes are unknowable client-side.
 - `rest.rs::prepare_headers` retains and re-adds a user `Content-Type` when `body_type = 'multipart'` so the generated `multipart/form-data; boundary=…` always wins; the browser `fetch` path and `buildCurl` drop the user's content type for the same reason.
+- `rest_requests.request_tab`, `multipart_tab` and `response_tab` record which tab of the request panel, of the `Form` sub-tables and of the response panel was open. Codes are lowercased and checked against the panel's own list on every write and read by `rest.rs::normalize_request_tab`, `normalize_multipart_tab` and `normalize_response_tab`; a code outside that list — the empty string of a draft written before the columns existed, or a hand-edited row — reads as the first tab, so the panel never renders a tab it does not have. `utils/rest.ts::normalizeRequestTab`/`normalizeMultipartTab`/`normalizeResponseTab` mirror the same lists (`REQUEST_TABS`, `MULTIPART_TABS`, `RESPONSE_TABS`), and `services/rest.ts::normalizeDraft` and `loadLocal` run them so a legacy localStorage record also reads back as the first tab. On the page `selectRequest` restores the codes instead of resetting, `setRequestTab`/`setMultipartTab`/`setResponseTab` patch the row through the shared 450 ms debounce, `toUpdate` sends all three, and `runRequest` switches the response panel to `Response` and persists that choice.
 
 REST validation (client-side only, `utils/rest.ts`):
 
@@ -762,6 +766,7 @@ json_tolerant_candidate(candidates: &[String]) -> Option<&String>; // mirrors js
 - `read_shared_upload` hides expired rows but does not delete them; only `purge_expired_uploads` (from `insert_shared_upload`, `ShareStore::find` and `bind_and_serve`) erases them, and `db::delete_shared_upload` has no expiry filter so an explicitly deleted row always goes. Do not add `AND expires_at > now` to the delete — it would answer 404 while leaving the payload in the database.
 - The viewer's delete is a two-step in-place confirm (`confirmingDelete`), like the WSDL file menu's delete: the first click only opens the strip, and `removeUpload` clears `upload` and sets `deleted`. Keep it out of `window.confirm` and out of a floating `role="menu"` (a11y warnings in `npm run check`), and keep the delete triggers gated on a loaded `upload`.
 - Keep `invoke` argument names snake_case to match the Rust command signatures.
+- The open-tab codes are stored per request, not per session: `rest_requests.request_tab`/`multipart_tab`/`response_tab` and the localStorage record are the only source of truth for which tabs a request reopens with. The three tab lists must stay identical in `utils/rest.ts` (`REQUEST_TABS`, `MULTIPART_TABS`, `RESPONSE_TABS`) and in the Rust normalizers (`normalize_request_tab`, `normalize_multipart_tab`, `normalize_response_tab`); adding a tab to a panel without adding its code to both lists makes the panel fall back to the first tab and silently loses the user's choice.
 - Browser mode must remain functional for client-side XML/JSON/URL/Compare features.
 - New Tauri APIs may require capability updates; check `capabilities/default.json`.
 - REST command functions are Rust `cmd_*` wrappers with `#[tauri::command(rename = "...", rename_all = "snake_case")]` because the DB helpers already use the public names. Keep the invoke names unchanged when adding commands.

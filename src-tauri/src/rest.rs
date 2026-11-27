@@ -60,11 +60,16 @@ pub struct RestRequest {
     /// The status line of the stored answer (`HTTP/1.1 200 OK`), so the Raw response
     /// tab can rebuild the dump after a restart without re-sending the request.
     pub response_status_line: Option<String>,
+    /// Tabs that were open when this request was last edited: the request panel, the
+    /// `Form` sub-tables and the response panel.
+    pub request_tab: String,
+    pub multipart_tab: String,
+    pub response_tab: String,
     pub created_at: String,
     pub updated_at: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct RestRequestDraft {
     pub project_id: Option<String>,
     pub name: String,
@@ -79,9 +84,17 @@ pub struct RestRequestDraft {
     pub multipart: Vec<RestProperty>,
     #[serde(default)]
     pub files: Vec<RestFileRow>,
+    /// Optional for callers written before the tabs were stored: an absent code reads as
+    /// the first tab of its panel.
+    #[serde(default)]
+    pub request_tab: String,
+    #[serde(default)]
+    pub multipart_tab: String,
+    #[serde(default)]
+    pub response_tab: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct RestRequestUpdate {
     pub id: String,
     pub project_id: Option<String>,
@@ -97,6 +110,12 @@ pub struct RestRequestUpdate {
     pub multipart: Vec<RestProperty>,
     #[serde(default)]
     pub files: Vec<RestFileRow>,
+    #[serde(default)]
+    pub request_tab: String,
+    #[serde(default)]
+    pub multipart_tab: String,
+    #[serde(default)]
+    pub response_tab: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -169,6 +188,29 @@ impl RestCancelState {
 fn next_sort_order(conn: &Connection, table: &str) -> rusqlite::Result<i64> {
     let sql = format!("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM {table}");
     conn.query_row(&sql, [], |row| row.get(0))
+}
+
+/// Tab codes are stored lowercase. A value outside the panel's own list — an empty code
+/// from a draft written before the tabs were stored, or a hand-edited row — reads as the
+/// first tab, so the panel never renders a tab that does not exist.
+fn normalize_tab(value: &str, allowed: &[&str], fallback: &str) -> String {
+    let code = value.trim().to_ascii_lowercase();
+    match allowed.iter().find(|candidate| **candidate == code) {
+        Some(candidate) => candidate.to_string(),
+        None => fallback.to_string(),
+    }
+}
+
+pub fn normalize_request_tab(value: &str) -> String {
+    normalize_tab(value, &["headers", "query", "cookies", "raw"], "headers")
+}
+
+pub fn normalize_multipart_tab(value: &str) -> String {
+    normalize_tab(value, &["fields", "files"], "fields")
+}
+
+pub fn normalize_response_tab(value: &str) -> String {
+    normalize_tab(value, &["response", "headers", "raw"], "response")
 }
 
 fn properties_for(
@@ -344,7 +386,7 @@ pub fn read_rest_request(conn: &Connection, id: &str) -> rusqlite::Result<Option
         r#"
 		SELECT id, project_id, name, method, url, body, body_type, save_response,
 		       response_body, response_headers, raw_request, created_at, updated_at,
-		       response_status_line
+		       response_status_line, request_tab, multipart_tab, response_tab
 		FROM rest_requests WHERE id = ?1
 		"#,
     )?;
@@ -368,6 +410,9 @@ pub fn read_rest_request(conn: &Connection, id: &str) -> rusqlite::Result<Option
                 files: Vec::new(),
                 raw_request: row.get(10)?,
                 response_status_line: row.get(13)?,
+                request_tab: normalize_request_tab(&row.get::<_, String>(14)?),
+                multipart_tab: normalize_multipart_tab(&row.get::<_, String>(15)?),
+                response_tab: normalize_response_tab(&row.get::<_, String>(16)?),
                 created_at: row.get(11)?,
                 updated_at: row.get(12)?,
             })
@@ -482,8 +527,9 @@ pub fn create_rest_request(
         .execute(
             r#"
 		INSERT INTO rest_requests
-			(id, project_id, name, method, url, body, body_type, save_response, sort_order)
-		VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+			(id, project_id, name, method, url, body, body_type, save_response, sort_order,
+			 request_tab, multipart_tab, response_tab)
+		VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
 		"#,
             params![
                 id,
@@ -494,7 +540,10 @@ pub fn create_rest_request(
                 draft.body,
                 draft.body_type,
                 i64::from(draft.save_response),
-                sort_order
+                sort_order,
+                normalize_request_tab(&draft.request_tab),
+                normalize_multipart_tab(&draft.multipart_tab),
+                normalize_response_tab(&draft.response_tab),
             ],
         )
         .map_err(|error| error.to_string())?;
@@ -525,6 +574,9 @@ pub fn update_rest_request(conn: &Connection, update: &RestRequestUpdate) -> Res
 			body = ?6,
 			body_type = ?7,
 			save_response = ?8,
+			request_tab = ?9,
+			multipart_tab = ?10,
+			response_tab = ?11,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?1
 		"#,
@@ -536,7 +588,10 @@ pub fn update_rest_request(conn: &Connection, update: &RestRequestUpdate) -> Res
                 update.url,
                 update.body,
                 update.body_type,
-                i64::from(update.save_response)
+                i64::from(update.save_response),
+                normalize_request_tab(&update.request_tab),
+                normalize_multipart_tab(&update.multipart_tab),
+                normalize_response_tab(&update.response_tab)
             ],
         )
         .map_err(|error| error.to_string())?;
@@ -620,6 +675,10 @@ pub fn duplicate_rest_request(conn: &Connection, id: &str) -> Result<RestRequest
         form: source.form,
         multipart: source.multipart,
         files: source.files,
+        request_tab: source.request_tab,
+        multipart_tab: source.multipart_tab,
+        response_tab: source.response_tab,
+        ..Default::default()
     };
     create_rest_request(conn, &draft)
 }
@@ -2207,6 +2266,7 @@ mod tests {
             form: vec![],
             multipart: vec![],
             files: vec![],
+            ..Default::default()
         };
         let created = create_rest_request(&connection, &draft).expect("request");
         assert_eq!(created.name, "Login");
@@ -2226,6 +2286,7 @@ mod tests {
             form: vec![property("a", "1")],
             multipart: vec![],
             files: vec![],
+            ..Default::default()
         };
         update_rest_request(&connection, &update).expect("update");
         let stored = read_rest_request(&connection, &created.id)
@@ -2274,6 +2335,52 @@ mod tests {
     }
 
     #[test]
+    fn open_tabs_round_trip_and_unknown_codes_fall_back_to_the_first_tab() {
+        let connection = memory_db();
+        let draft = RestRequestDraft {
+            name: "Tabs".to_string(),
+            request_tab: "Raw".to_string(),
+            multipart_tab: "FILES".to_string(),
+            response_tab: "not-a-tab".to_string(),
+            ..Default::default()
+        };
+        let created = create_rest_request(&connection, &draft).expect("request");
+        // Codes are stored lowercase, and a code the panel does not have reads as its
+        // first tab rather than rendering a tab that does not exist.
+        assert_eq!(created.request_tab, "raw");
+        assert_eq!(created.multipart_tab, "files");
+        assert_eq!(created.response_tab, "response");
+
+        // A draft written before the tabs were stored names none of them.
+        let legacy = create_rest_request(&connection, &simple_draft("Legacy")).expect("legacy");
+        assert_eq!(legacy.request_tab, "headers");
+        assert_eq!(legacy.multipart_tab, "fields");
+        assert_eq!(legacy.response_tab, "response");
+
+        let update = RestRequestUpdate {
+            id: created.id.clone(),
+            name: "Tabs".to_string(),
+            request_tab: "cookies".to_string(),
+            multipart_tab: "fields".to_string(),
+            response_tab: "headers".to_string(),
+            ..Default::default()
+        };
+        update_rest_request(&connection, &update).expect("update");
+        let stored = read_rest_request(&connection, &created.id)
+            .expect("read")
+            .expect("present");
+        assert_eq!(stored.request_tab, "cookies");
+        assert_eq!(stored.multipart_tab, "fields");
+        assert_eq!(stored.response_tab, "headers");
+
+        // The copy of a request opens on the same tabs as its source.
+        let duplicate = duplicate_rest_request(&connection, &created.id).expect("duplicate");
+        assert_eq!(duplicate.request_tab, "cookies");
+        assert_eq!(duplicate.multipart_tab, "fields");
+        assert_eq!(duplicate.response_tab, "headers");
+    }
+
+    #[test]
     fn form_rows_are_stored_in_their_own_table() {
         let connection = memory_db();
         let body = "{\"q\":\"text buffer\"}".to_string();
@@ -2291,6 +2398,7 @@ mod tests {
             form: rows.clone(),
             multipart: vec![],
             files: vec![],
+            ..Default::default()
         };
         let created = create_rest_request(&connection, &draft).expect("request");
 
@@ -2307,6 +2415,7 @@ mod tests {
             form: rows.clone(),
             multipart: vec![],
             files: vec![],
+            ..Default::default()
         };
         update_rest_request(&connection, &update).expect("update");
 
@@ -2382,6 +2491,7 @@ mod tests {
                 file_row("document", "/tmp/report.txt", "report.txt"),
                 file_row(" ", "/tmp/anonymous.bin", ""),
             ],
+            ..Default::default()
         };
         let created = create_rest_request(&connection, &draft).expect("request");
 
@@ -2431,6 +2541,7 @@ mod tests {
             form: vec![property("encoded", "1")],
             multipart: vec![property("comment", "hello")],
             files: vec![file_row("document", "/tmp/report.txt", "report.txt")],
+            ..Default::default()
         };
         assert!(update_rest_request(&connection, &update).is_err());
         // Child rows belong to a request that exists, so an unknown id leaves nothing
@@ -2462,6 +2573,7 @@ mod tests {
             form: vec![],
             multipart: vec![],
             files: vec![],
+            ..Default::default()
         };
         let created = create_rest_request(&connection, &draft).expect("request");
         let duplicate = duplicate_rest_request(&connection, &created.id).expect("duplicate");
@@ -2493,6 +2605,7 @@ mod tests {
             form: vec![],
             multipart: vec![],
             files: vec![],
+            ..Default::default()
         }
     }
 
