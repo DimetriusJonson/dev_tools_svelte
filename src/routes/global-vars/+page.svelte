@@ -14,7 +14,6 @@
 		type GlobalVar
 	} from '$lib/services/vars';
 	import {
-		MAX_VAR_NAME_CHARS,
 		REVEAL_MS,
 		SECRET_DOTS,
 		describeVarError,
@@ -486,7 +485,7 @@
 					</button>
 				</div>
 				<p class="mt-3 text-xs leading-relaxed text-[var(--text-muted)]">
-					{$t('vars.secureHint')} · {MAX_VAR_NAME_CHARS}
+					{$t('vars.secureHint')}
 				</p>
 			</section>
 		{/if}
