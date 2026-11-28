@@ -1625,7 +1625,9 @@ fn prepare_call(
     )?;
     // Same boundary, only the values are masked. The dump is a redacted artifact, so its
     // own `Content-Length` describes the text it shows: the real body length would be a
-    // fact about the secret that ends up in SQLite.
+    // fact about the secret that ends up in SQLite. For a multipart body the dump text
+    // replaces file payloads with markers, so the dump headers are built from a body
+    // whose wire length is the dump text length.
     let masked_resolved = resolve_body(
         body_type,
         &masked_body,
@@ -1634,9 +1636,13 @@ fn prepare_call(
         files,
         boundary_for_body,
     )?;
+    let dump_body = ResolvedBody {
+        wire: masked_resolved.dump.as_bytes().to_vec(),
+        dump: masked_resolved.dump.clone(),
+    };
     let prepared = prepare_headers(&real_url, &real_headers, &resolved, body_type, boundary.as_deref());
     let dump_headers =
-        prepare_headers(&masked_url, &masked_headers, &masked_resolved, body_type, boundary.as_deref());
+        prepare_headers(&masked_url, &masked_headers, &dump_body, body_type, boundary.as_deref());
     let wire_headers = prepared
         .iter()
         .filter(|header| {
@@ -2281,9 +2287,18 @@ mod tests {
             "content-type: multipart/form-data; boundary={boundary}"
         )));
         assert!(!call.raw_request.contains("application/json"));
-        assert!(call
+        // The stored dump is the redacted text: its content-length describes that text,
+        // not the wire body (whose length would leak the file size). 299 bytes of framing
+        // and payload become a much shorter marker dump.
+        let body_start = call.raw_request.find("\r\n\r\n").map(|index| index + 4).unwrap_or(0);
+        let dump_text = &call.raw_request[body_start..];
+        let declared_length = call
             .raw_request
-            .contains(&format!("content-length: {}", call.body.len())));
+            .lines()
+            .find(|line| line.starts_with("content-length:"))
+            .and_then(|line| line["content-length:".len()..].trim().parse::<usize>().ok());
+        assert_eq!(declared_length, Some(dump_text.len()));
+        assert_ne!(declared_length, Some(call.body.len()));
         assert_eq!(
             call.headers
                 .iter()
@@ -3037,11 +3052,18 @@ mod tests {
         .expect("multipart call");
 
         // The masked dump keeps the framing of the wire body and the length of the text it
-        // shows, and never the file payload.
+        // shows, and never the file payload: the declared length matches the whole dump
+        // text (whose multipart framing contains a blank line, so split on the first one).
         assert!(call.raw_request.contains("content-length: "));
-        assert!(call
+        let body_start = call.raw_request.find("\r\n\r\n").map(|index| index + 4).unwrap_or(0);
+        let dump_text = &call.raw_request[body_start..];
+        let declared_length = call
             .raw_request
-            .contains(&format!("content-length: {}", call.body.len())));
+            .lines()
+            .find(|line| line.starts_with("content-length:"))
+            .and_then(|line| line["content-length:".len()..].trim().parse::<usize>().ok());
+        assert_eq!(declared_length, Some(dump_text.len()));
+        assert_ne!(declared_length, Some(call.body.len()));
         assert!(call.raw_request.contains("name=\"field\""));
         assert!(call.raw_request.contains("\r\n\r\na b\r\n"));
         assert!(String::from_utf8_lossy(&call.body).contains("a b"));
@@ -3181,6 +3203,153 @@ mod tests {
     }
 
     #[test]
+    fn multipart_dump_length_matches_its_own_text_not_the_file_size() {
+        let directory = std::env::temp_dir().join(format!("rest-dump-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).expect("temp dir");
+        let path = directory.join("report.txt");
+        std::fs::write(&path, b"note content").expect("fixture");
+
+        let files = vec![RestFileRow {
+            name: "document".to_string(),
+            path: path.display().to_string(),
+            filename: String::new(),
+        }];
+        let call = prepare_call(
+            "POST",
+            "https://example.com/upload",
+            &[],
+            "",
+            "multipart",
+            &[],
+            &[property("comment", "hello world")],
+            &files,
+            &VarValues::default(),
+        )
+        .expect("prepared call");
+
+        // The stored dump shows the marker text, so its content-length must describe that
+        // text: the wire length (with the real file bytes) would leak the file size and
+        // disagree with the bytes the dump actually prints.
+        // The stored dump is the redacted text: its content-length describes that whole
+        // text, not the wire body (whose length would leak the file size).
+        let body_start = call.raw_request.find("\r\n\r\n").map(|index| index + 4).unwrap_or(0);
+        let dump_text = &call.raw_request[body_start..];
+        let declared = call
+            .raw_request
+            .lines()
+            .find(|line| line.starts_with("content-length:"))
+            .and_then(|line| line["content-length:".len()..].trim().parse::<usize>().ok());
+        assert_eq!(declared, Some(dump_text.len()));
+        assert_ne!(declared, Some(call.body.len()));
+        assert!(dump_text.contains("<bytes of "));
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn duplicate_rest_request_falls_back_to_the_url_when_the_name_is_empty() {
+        let connection = memory_db();
+        let draft = RestRequestDraft {
+            name: "".to_string(),
+            url: "https://example.com/nameless".to_string(),
+            ..simple_draft("Nameless")
+        };
+        let created = create_rest_request(&connection, &draft).expect("request");
+        let duplicate = duplicate_rest_request(&connection, &created.id).expect("duplicate");
+        assert_eq!(duplicate.name, "https://example.com/nameless");
+    }
+
+    #[test]
+    fn save_rest_response_stores_an_empty_status_line_as_null() {
+        let connection = memory_db();
+        let created = create_rest_request(&connection, &simple_draft("Status")).expect("request");
+        save_rest_response(&connection, &created.id, "{}", &[], "POST /s HTTP/1.1", "").expect("save");
+        let stored = read_rest_request(&connection, &created.id).expect("read").expect("present");
+        assert_eq!(stored.response_status_line, None);
+        assert_eq!(stored.response_body.as_deref(), Some("{}"));
+    }
+
+    #[test]
+    fn a_template_in_a_query_name_loads_no_values_and_is_refused() {
+        let values = plain_values(&[("token", "x")]);
+        let url = Url::parse("https://example.com/p?%7B%7Btoken%7D%7D=1").expect("url");
+        assert!(referenced_var_names(&url, &[], "", "json", &[], &[]).is_empty());
+
+        let error = prepare_call(
+            "GET",
+            "https://example.com/p?{{token}}=1",
+            &[],
+            "",
+            "json",
+            &[],
+            &[],
+            &[],
+            &values,
+        )
+        .unwrap_err();
+        assert_eq!(error, "unresolved-template:token");
+    }
+
+    #[test]
+    #[test]
+    fn form_encode_keeps_name_only_rows_and_drops_blank_name_rows() {
+        // A row with a name but an empty value is sent as `name=`; a row with a value but
+        // no name is dropped, exactly like the browser's `URLSearchParams` mirror and the
+        // storage writers.
+        assert_eq!(
+            encode_form_urlencoded(&[property("a", ""), property("", "b"), property("c", "d")]),
+            "a=&c=d"
+        );
+        assert_eq!(encode_form_urlencoded(&[property(" ", "x")]), "");
+    }
+
+    fn prepare_headers_adds_the_default_headers_and_the_dump_keeps_them() {
+        let url = normalize_rest_url("https://example.com/api").expect("url");
+        let resolved = resolve_body("json", "", &[], &[], &[], "unused").expect("body");
+        let headers = prepare_headers(&url, &[], &resolved, "json", None);
+        let raw = build_raw_request("GET", &url, &headers, "");
+        assert!(raw.contains("user-agent: WebDevUsefulTools Client"));
+        assert!(raw.contains("accept-encoding: gzip"));
+        assert!(raw.contains("host: example.com"));
+        assert!(!raw.contains("content-length"));
+    }
+
+    #[test]
+    fn host_header_names_the_port_when_one_is_given() {
+        let url_with_port = normalize_rest_url("https://example.com:8443/api").expect("url");
+        assert_eq!(host_header(&url_with_port), "example.com:8443");
+
+        let url_without_port = normalize_rest_url("https://example.com/api").expect("url");
+        assert_eq!(host_header(&url_without_port), "example.com");
+    }
+
+    #[test]
+    fn content_type_for_path_maps_known_extensions_and_falls_back() {
+        assert_eq!(content_type_for_path(Path::new("report.csv")), "text/csv");
+        assert_eq!(content_type_for_path(Path::new("photo.png")), "image/png");
+        assert_eq!(content_type_for_path(Path::new("data")), "application/octet-stream");
+    }
+
+    #[test]
+    fn sanitized_parameter_neutralises_quotes_backslashes_and_line_breaks() {
+        assert!(sanitized_parameter("a\"b\\c").contains('_'));
+        assert_eq!(sanitized_parameter("a\"b\\c"), "a_b_c".to_string());
+        // A CR/LF pair becomes two spaces: each control character is neutralised on its own.
+        assert_eq!(sanitized_parameter("one\r\ntwo"), "one  two".to_string());
+        assert_eq!(sanitized_parameter("one\ntwo"), "one two".to_string());
+        assert_eq!(sanitized_parameter("name"), "name".to_string());
+    }
+
+    #[test]
+    fn is_text_content_type_accepts_empty_and_text_like_types() {
+        assert!(is_text_content_type(""));
+        assert!(is_text_content_type("text/html; charset=utf-8"));
+        assert!(is_text_content_type("application/json"));
+        assert!(!is_text_content_type("application/octet-stream"));
+        assert!(!is_text_content_type("image/png"));
+    }
+
+    #[test]
     fn the_masked_dump_reports_its_own_length() {
         let values = values_with_a_secret(&["token"]);
         let call = prepare_call(
@@ -3197,13 +3366,19 @@ mod tests {
         .expect("prepared call");
         // The dump is a redacted artifact: a length of the real body would say how long
         // the secret is, and it would not match the masked text printed below it.
+        let body_start = call.raw_request.find("\r\n\r\n").map(|index| index + 4).unwrap_or(0);
+        let masked_text = &call.raw_request[body_start..];
         let masked = format!("{{\"token\":\"{}\"}}", vars::SECRET_MASK);
-        assert!(call
-            .raw_request
-            .contains(&format!("content-length: {}", masked.len())));
+        assert_eq!(
+            call.raw_request
+                .lines()
+                .find(|line| line.starts_with("content-length:"))
+                .and_then(|line| line["content-length:".len()..].trim().parse::<usize>().ok()),
+            Some(masked_text.len())
+        );
         assert!(!call
             .raw_request
             .contains(&format!("content-length: {}", call.body.len())));
-        assert!(call.raw_request.ends_with(&masked));
+        assert_eq!(masked_text, masked);
     }
 }
