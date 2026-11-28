@@ -104,6 +104,8 @@
 	let secureDialog = $state(false);
 	// The export waiting for the answer, so the dialog's buttons know what to copy.
 	let pendingExport: { request: RestRequest; shell: CurlShell } | null = null;
+	// The cURL export dropdown next to the copy button on the request `Raw` tab.
+	let curlMenu = $state<{ x: number; y: number } | null>(null);
 
 	let projects = $state<RestProject[]>([]);
 	let requests = $state<RestRequest[]>([]);
@@ -893,6 +895,40 @@
 		await exportCurl(active, shell);
 	}
 
+	function openCurlMenu(event: MouseEvent): void {
+		event.stopPropagation();
+		if (curlMenu) {
+			curlMenu = null;
+			return;
+		}
+		const target = event.currentTarget as HTMLElement;
+		const rect = target.getBoundingClientRect();
+		curlMenu = {
+			x: Math.max(8, Math.min(rect.left, window.innerWidth - 228)),
+			y: Math.min(rect.bottom + 4, window.innerHeight - 150)
+		};
+	}
+
+	function closeCurlMenu(): void {
+		curlMenu = null;
+	}
+
+	function runCurlMenuAction(action: () => void): void {
+		action();
+		curlMenu = null;
+	}
+
+	function onWindowClick(event: MouseEvent): void {
+		const target = event.target as HTMLElement | null;
+		if (target && !target.isConnected) return;
+		if (target?.closest('[role="menu"], [role="dialog"]')) return;
+		curlMenu = null;
+	}
+
+	function onWindowKeydown(event: KeyboardEvent): void {
+		if (event.key === 'Escape') curlMenu = null;
+	}
+
 	async function downloadResponse(): Promise<void> {
 		if (!active) return;
 		const failure = validationFailure(active);
@@ -1055,7 +1091,7 @@
 	});
 </script>
 
-<svelte:window onresize={onWindowResize} />
+<svelte:window onresize={onWindowResize} onclick={onWindowClick} onkeydown={onWindowKeydown} />
 
 <div class="flex h-full min-h-0 gap-0 px-3 pb-3 pt-3">
 	<div class="h-full min-h-0 shrink-0" style="width: {explorerWidth}px;">
@@ -1239,21 +1275,40 @@
 						</div>
 						{#if requestTab === 'raw'}
 							<div class="flex min-h-0 flex-1 flex-col gap-2 p-2">
-								<div class="flex shrink-0 flex-wrap items-center gap-2">
+								<div class="ml-auto flex shrink-0 flex-wrap items-center gap-2">
 									<button
 										type="button"
-										onclick={() => copyRawCurl('posix')}
-										class="rounded-full bg-[var(--accent)] px-4 py-1.5 text-xs font-bold text-[var(--accent-text)] transition-all duration-150 hover:scale-105 hover:bg-[var(--accent-hover)] active:scale-95"
+										onclick={openCurlMenu}
+										class="flex h-8 w-8 items-center justify-center rounded-md text-[var(--text-muted)] transition-all duration-150 hover:scale-110 hover:bg-white/5 hover:text-[var(--text)] active:scale-95"
+										title={$t('rest.curlMenu')}
+										aria-label={$t('rest.curlMenu')}
 									>
-										{$t('rest.curlPosix')}
+										<Icon name="more" size={18} strokeWidth={3} />
 									</button>
-									<button
-										type="button"
-										onclick={() => copyRawCurl('windows')}
-										class="rounded-full bg-[var(--accent)] px-4 py-1.5 text-xs font-bold text-[var(--accent-text)] transition-all duration-150 hover:scale-105 hover:bg-[var(--accent-hover)] active:scale-95"
-									>
-										{$t('rest.curlWindows')}
-									</button>
+									{#if curlMenu}
+										<div
+											class="fixed z-50 w-40 overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--panel-bg)] py-1 shadow-2xl"
+											style="left: {curlMenu.x}px; top: {curlMenu.y}px;"
+											role="menu"
+										>
+											<button
+												type="button"
+												onclick={() => runCurlMenuAction(() => void copyRawCurl('posix'))}
+												class="block w-full px-3 py-2 text-left text-sm font-semibold text-[var(--text)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--accent-text)]"
+												role="menuitem"
+											>
+												{$t('rest.copyCurlPosix')}
+											</button>
+											<button
+												type="button"
+												onclick={() => runCurlMenuAction(() => void copyRawCurl('windows'))}
+												class="block w-full px-3 py-2 text-left text-sm font-semibold text-[var(--text)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--accent-text)]"
+												role="menuitem"
+											>
+												{$t('rest.copyCurlWindows')}
+											</button>
+										</div>
+									{/if}
 								</div>
 								{#if hasTemplates}
 									<p class="shrink-0 text-xs leading-relaxed text-[var(--text-muted)]">

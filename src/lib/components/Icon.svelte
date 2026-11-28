@@ -107,7 +107,16 @@
 		]
 	} satisfies Record<string, string[]>;
 
-	export type IconName = keyof typeof ICON_PATHS;
+	export interface IconShape {
+		d: string;
+		fill?: string;
+		stroke?: string;
+		strokeWidth?: number;
+	}
+
+	export const ICON_SHAPES: Record<string, IconShape[]> = {};
+
+	export type IconName = keyof typeof ICON_PATHS | keyof typeof ICON_SHAPES;
 </script>
 
 <script lang="ts">
@@ -132,7 +141,13 @@
 	aria-hidden="true"
 	class={className}
 >
-	{#each ICON_PATHS[name] as d, index (index)}
-		<path {d} />
-	{/each}
+	{#if (ICON_SHAPES as Record<string, IconShape[]>)[name]}
+		{#each (ICON_SHAPES as Record<string, IconShape[]>)[name] as shape, index (index)}
+			<path d={shape.d} fill={shape.fill ?? 'none'} stroke={shape.stroke ?? 'currentColor'} stroke-width={shape.strokeWidth ?? strokeWidth} />
+		{/each}
+	{:else}
+		{#each (ICON_PATHS as Record<string, string[]>)[name] ?? [] as d, index (index)}
+			<path {d} />
+		{/each}
+	{/if}
 </svg>

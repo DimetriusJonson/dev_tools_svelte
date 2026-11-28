@@ -14,7 +14,16 @@ import {
 	describeErrorText,
 	describeWarningText,
 } from './wsdl';
-import { buildEnvelope, buildSoapRawRequest, formatRawResponseDump } from './wsdl';
+import { buildCurl, type CurlShell } from './rest';
+import {
+	buildEnvelope,
+	buildSoapRawRequest,
+	formatRawResponseDump,
+	soapCurlRequest,
+	soapCurlTemplatePlaces,
+	type SoapCurlDraft
+} from './wsdl';
+import { maskedValues, plainValues, referencedVarNames, requestHasTemplates, varValues } from './vars';
 
 const SOAP_NS = 'http://schemas.xmlsoap.org/wsdl/soap/';
 const SOAP12_NS = 'http://schemas.xmlsoap.org/wsdl/soap12/';
@@ -277,5 +286,78 @@ describe('backend reasons and warning codes', () => {
 			key: 'wsdl.warning.unknownType',
 			detail: 'future-code:thing'
 		});
+	});
+});
+
+describe('soap cURL export', () => {
+	const plain = { id: 'plain-1', name: 'token', secure: false, value: 'v1' };
+	const safe = { id: 'safe-1', name: 'token', secure: true, value: 'the-secret' };
+	const draft: SoapCurlDraft = {
+		endpointUrl: 'https://example.com/soap',
+		soapVersion: 'soap11',
+		soapAction: 'urn:demo:echo',
+		userHeaders: [{ name: 'Authorization', value: 'Bearer {{ token }}' }],
+		body: '<echo>{{ token }}</echo>'
+	};
+
+	it('substitutes plain values into the command', () => {
+		const source = soapCurlRequest(draft, varValues([plain]));
+		expect(source).not.toBeNull();
+		const command = buildCurl(source!, 'posix');
+		expect(command).toContain('Bearer v1');
+		expect(command).toContain('<echo>v1</echo>');
+		expect(command).not.toContain('{{');
+	});
+
+	it('keeps a safe value masked until the dialog reveals it', () => {
+		const source = soapCurlRequest(draft, maskedValues(varValues([safe])));
+		const command = buildCurl(source!, 'posix');
+		expect(command).toContain('Bearer ********');
+		expect(command).toContain('<echo>********</echo>');
+		expect(command).not.toContain('the-secret');
+	});
+
+	it('leaves the safe template as text when the answer is "do not replace"', () => {
+		const source = soapCurlRequest(draft, plainValues(varValues([safe])));
+		const command = buildCurl(source!, 'posix');
+		expect(command).toContain('Bearer {{ token }}');
+		expect(command).toContain('<echo>{{ token }}</echo>');
+		expect(command).not.toContain('the-secret');
+	});
+
+	it('substitutes a template the endpoint URL carries as a percent-encoded query value', () => {
+		const source = soapCurlRequest({ ...draft, endpointUrl: 'https://example.com/soap?q=%7B%7B%20token%20%7D%7D' }, varValues([plain]));
+		expect(source).not.toBeNull();
+		const command = buildCurl(source!, 'posix');
+		expect(command).toContain('q=v1');
+		expect(command).not.toContain('%7B');
+	});
+
+	it('scans the same places it substitutes: merged headers (names included) and the envelope', () => {
+		const nameTemplated: SoapCurlDraft = {
+			...draft,
+			userHeaders: [{ name: 'X-{{ token }}', value: 'x' }]
+		};
+		const places = soapCurlTemplatePlaces(nameTemplated);
+		expect(places.headers.some((row) => row.name.includes('{{'))).toBe(true);
+		expect(requestHasTemplates(places)).toBe(true);
+		expect(places.body).toBe(buildEnvelope(nameTemplated.body));
+		expect(places.headers).toEqual(mergeLockedHeaders(lockedHeadersFor('soap11', 'urn:demo:echo'), nameTemplated.userHeaders));
+		expect(referencedVarNames(places)).toEqual(['token']);
+	});
+
+	it('returns null when no endpoint is picked', () => {
+		expect(soapCurlRequest({ ...draft, endpointUrl: '' }, varValues([plain]))).toBeNull();
+		expect(soapCurlRequest({ ...draft, endpointUrl: '   ' }, varValues([plain]))).toBeNull();
+	});
+
+	it('builds both shell spellings of the same call', () => {
+		const source = soapCurlRequest(draft, varValues([plain]));
+		expect(source).not.toBeNull();
+		const posix = buildCurl(source!, 'posix');
+		const windows = buildCurl(source!, 'windows');
+		expect(posix.startsWith('curl ')).toBe(true);
+		expect(windows.startsWith('curl.exe ')).toBe(true);
+		expect(windows).not.toContain('curl \'https');
 	});
 });

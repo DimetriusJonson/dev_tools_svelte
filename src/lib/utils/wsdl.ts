@@ -1,8 +1,56 @@
-import { buildRawRequestPreview, buildRawResponse, type RestProperty } from './rest';
+import { buildCurl, buildRawRequestPreview, buildRawResponse, type CurlShell, type RestProperty } from './rest';
 import { formatContent } from './formatters';
+import { containsTemplate, substituteText, substituteUrl, type TemplateSource, type VarValues } from './vars';
 
 /** A SOAP call is always a POST to the file's endpoint. */
 export const SOAP_METHOD = 'POST';
+
+/** The HTTP request a SOAP cURL export writes, before the shell quoting. */
+export interface SoapCurlRequest {
+	method: string;
+	url: string;
+	headers: RestProperty[];
+	body: string;
+	body_type: 'xml';
+}
+
+/** The page fields an export reads: the endpoint URL, the SOAP version/action
+ *  that decide the locked rows, the user header rows and the body fragment. */
+export interface SoapCurlDraft {
+	endpointUrl: string;
+	soapVersion: SoapVersion;
+	soapAction: string;
+	userHeaders: RestProperty[];
+	body: string;
+}
+
+/** The places the export scans for templates — the merged header rows (the
+ *  names included, because the backend refuses a template in a header name),
+ *  the envelope built from the body fragment, and the endpoint URL. */
+export function soapCurlTemplatePlaces(draft: SoapCurlDraft): TemplateSource {
+	return {
+		url: draft.endpointUrl,
+		headers: mergeLockedHeaders(lockedHeadersFor(draft.soapVersion, draft.soapAction), draft.userHeaders),
+		body: buildEnvelope(draft.body),
+		body_type: 'xml'
+	};
+}
+
+/** The request the export writes, with the variable values the page holds.
+ *  Plain values are written in; a safe one stays the mask until the dialog
+ *  reveals it. `null` when no endpoint is picked — the page blocks on that. */
+export function soapCurlRequest(draft: SoapCurlDraft, values: VarValues): SoapCurlRequest | null {
+	const places = soapCurlTemplatePlaces(draft);
+	if (draft.endpointUrl.trim() === '') return null;
+	const render = (text: string) => (containsTemplate(text) ? substituteText(text, values) : text);
+	return {
+		method: SOAP_METHOD,
+		url: substituteUrl(places.url, values),
+		headers: places.headers.map((row) => ({ name: row.name, value: render(row.value) })),
+		body: render(places.body),
+		body_type: 'xml'
+	};
+}
 
 /** The envelope namespace, shared by SOAP 1.1 and SOAP 1.2 bindings. */
 export const SOAP_ENVELOPE_NS = 'http://schemas.xmlsoap.org/soap/envelope/';

@@ -311,7 +311,9 @@ describe('rest page and global variables', () => {
 		desktopBuild(plainTemplatedRequest(), [PLAIN_VAR, SECURE_VAR]);
 		await openPage();
 
-		byText('cURL (Posix)')[0].click();
+		byTitle(say('rest.curlMenu'))?.click();
+		flushSync();
+		byText(say('rest.copyCurlPosix'))[0]?.click();
 		flushSync();
 		await until(() => {
 			expect(written).toHaveLength(1);
@@ -329,7 +331,9 @@ describe('rest page and global variables', () => {
 		desktopBuild(templatedRequest(), [PLAIN_VAR, SECURE_VAR]);
 		await openPage();
 
-		byText('cURL (Posix)')[0].click();
+		byTitle(say('rest.curlMenu'))?.click();
+		flushSync();
+		byText(say('rest.copyCurlPosix'))[0]?.click();
 		flushSync();
 		await until(() => {
 			expect(document.body.textContent).toContain(say('vars.secureWarning'));
@@ -350,7 +354,9 @@ describe('rest page and global variables', () => {
 		desktopBuild(templatedRequest(), [PLAIN_VAR, SECURE_VAR]);
 		await openPage();
 
-		byText('cURL (Windows)')[0].click();
+		byTitle(say('rest.curlMenu'))?.click();
+		flushSync();
+		byText(say('rest.copyCurlWindows'))[0]?.click();
 		flushSync();
 		await until(() => {
 			expect(document.body.textContent).toContain(say('vars.secureWarning'));
@@ -370,7 +376,9 @@ describe('rest page and global variables', () => {
 		desktopBuild(templatedRequest(), [SECURE_VAR]);
 		await openPage();
 
-		byText('cURL (Posix)')[0].click();
+		byTitle(say('rest.curlMenu'))?.click();
+		flushSync();
+		byText(say('rest.copyCurlPosix'))[0]?.click();
 		flushSync();
 		await until(() => {
 			expect(document.body.textContent).toContain(say('vars.secureWarning'));
@@ -412,7 +420,9 @@ describe('rest page and global variables', () => {
 		browserBuild(templatedRequest());
 		await openPage();
 
-		byText('cURL (Posix)')[0].click();
+		byTitle(say('rest.curlMenu'))?.click();
+		flushSync();
+		byText(say('rest.copyCurlPosix'))[0]?.click();
 		flushSync();
 		await until(() => {
 			expect(messages()).toContain(say('vars.curlUnavailable'));

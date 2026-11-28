@@ -45,6 +45,7 @@
 	} from '$lib/services/wsdl';
 	import {
 		byteLength,
+		buildCurl,
 		buildRawResponse,
 		detectLanguageFromHeaders,
 		filenameFromDisposition,
@@ -53,6 +54,7 @@
 		getHeader,
 		isAttachmentDisposition,
 		validateProperties,
+		type CurlShell,
 		type RestProperty
 	} from '$lib/utils/rest';
 	import {
@@ -64,11 +66,14 @@
 	import {
 		containsTemplate,
 		maskedValues,
+		plainValues,
+		referencedVarNames,
+		requestHasTemplates,
 		substituteText,
 		varValues,
 		type VarValues
 	} from '$lib/utils/vars';
-	import { listGlobalVars } from '$lib/services/vars';
+	import { listGlobalVars, revealGlobalVar } from '$lib/services/vars';
 	import {
 		SOAP_METHOD,
 		buildEnvelope,
@@ -81,6 +86,10 @@
 		mergeLockedHeaders,
 		normalizeHeaderRows,
 		selectEndpoint,
+		soapCurlRequest,
+		soapCurlTemplatePlaces,
+		type SoapCurlDraft,
+		type SoapCurlRequest,
 		type SoapVersion
 	} from '$lib/utils/wsdl';
 
@@ -117,6 +126,13 @@
 	// The Raw preview substitutes plain variables and masks safe ones, exactly like
 	// the dump the backend stores after a call.
 	let vars = $state<VarValues>({});
+	// A safe value is read only while the cURL dialog is open — the Raw preview keeps
+	// the mask. The same rule the REST page keeps for its export.
+	let secureDialog = $state(false);
+	// The cURL export dropdown next to the copy button on the request `Raw` tab.
+	let curlMenu = $state<{ x: number; y: number } | null>(null);
+	// The export waiting for the dialog answer, so its buttons know what to copy.
+	let pendingExport: (SoapCurlDraft & { shell: CurlShell }) | null = null;
 	let endpointId = $state('');
 	let dirty = $state(false);
 	let saveResponse = $state(false);
@@ -321,6 +337,126 @@
 
 	async function copyRawRequest(): Promise<void> {
 		if (rawRequestText) await copyText(rawRequestText);
+	}
+
+	function openCurlMenu(event: MouseEvent): void {
+		event.stopPropagation();
+		if (curlMenu) {
+			curlMenu = null;
+			return;
+		}
+		const target = event.currentTarget as HTMLElement;
+		const rect = target.getBoundingClientRect();
+		curlMenu = {
+			x: Math.max(8, Math.min(rect.left, window.innerWidth - 228)),
+			y: Math.min(rect.bottom + 4, window.innerHeight - 150)
+		};
+	}
+
+	function closeCurlMenu(): void {
+		curlMenu = null;
+	}
+
+	function runCurlMenuAction(action: () => void): void {
+		action();
+		curlMenu = null;
+	}
+
+	function onWindowClick(event: MouseEvent): void {
+		const target = event.target as HTMLElement | null;
+		if (target && !target.isConnected) return;
+		if (target?.closest('[role="menu"], [role="dialog"]')) return;
+		curlMenu = null;
+	}
+
+	function onWindowKeydown(event: KeyboardEvent): void {
+		if (event.key === 'Escape') curlMenu = null;
+	}
+
+	/** Same gate the download button uses: an endpoint must exist and the header
+	 *  table must be clean. A request that cannot be sent is not exported either. */
+	function soapExportBlocked(): string | null {
+		if (!endpoint) return $t('wsdl.noEndpoint');
+		const issues = headerIssues;
+		if (issues.length) return blockedMessage(issues, $t) ?? $t('common.error');
+		return null;
+	}
+
+	/** Re-reads the variable list before an export, so a value edited on
+	 *  /global-vars cannot reach the command as a stale copy. */
+	async function refreshVars(): Promise<void> {
+		if (!isTauriRuntime()) return;
+		try {
+			vars = varValues(await listGlobalVars());
+		} catch (error) {
+			notify(describeVarError(error, $t) || $t('vars.loadFailed'), 'error');
+		}
+	}
+
+	/** Reads the safe values this export mentions, one reveal per name. */
+	async function revealSoapSecureValues(draft: SoapCurlDraft): Promise<VarValues> {
+		const values: VarValues = { ...vars };
+		for (const name of referencedVarNames(soapCurlTemplatePlaces(draft))) {
+			const entry = values[name];
+			if (!entry?.secure) continue;
+			const secret = await revealGlobalVar(entry.id);
+			values[name] = { ...entry, value: secret };
+		}
+		return values;
+	}
+
+	/** Exports the call the Send button would make as cURL. Plain variables are
+	 *  always substituted; a safe variable the call mentions is asked about first.
+	 */
+	async function exportSoapCurl(shell: CurlShell): Promise<void> {
+		const blocked = soapExportBlocked();
+		if (blocked) {
+			notify(blocked, 'error');
+			return;
+		}
+		const draft: SoapCurlDraft & { shell: CurlShell } = {
+			endpointUrl: endpoint?.url ?? '',
+			soapVersion,
+			soapAction,
+			userHeaders: [...userHeaders],
+			body: requestBody,
+			shell
+		};
+		const places = soapCurlTemplatePlaces(draft);
+		if (!isTauriRuntime()) {
+			// The browser build cannot read the variable store, so a template would
+			// be written literally.
+			if (requestHasTemplates(places)) {
+				notify($t('vars.curlUnavailable'), 'error');
+				return;
+			}
+			const source = soapCurlRequest(draft, vars);
+			if (source) await copyText(buildCurl(source, shell));
+			return;
+		}
+		await refreshVars();
+		if (!referencedVarNames(places).some((name) => vars[name]?.secure)) {
+			const source = soapCurlRequest(draft, vars);
+			if (source) await copyText(buildCurl(source, shell));
+			return;
+		}
+		pendingExport = draft;
+		secureDialog = true;
+	}
+
+	/** Answers the safe-variable question: "Replace" copies the real values. */
+	async function resolveSecureExport(replace: boolean): Promise<void> {
+		const target = pendingExport;
+		pendingExport = null;
+		secureDialog = false;
+		if (!target) return;
+		try {
+			const values = replace ? await revealSoapSecureValues(target) : plainValues(vars);
+			const source = soapCurlRequest(target, values);
+			if (source) await copyText(buildCurl(source, target.shell));
+		} catch (error) {
+			notify(describeVarError(error, $t) || $t('vars.loadFailed'), 'error');
+		}
 	}
 
 	async function copyRawResponse(): Promise<void> {
@@ -881,7 +1017,7 @@
 	});
 </script>
 
-<svelte:window onresize={onWindowResize} />
+<svelte:window onresize={onWindowResize} onclick={onWindowClick} onkeydown={onWindowKeydown} />
 
 {#if !desktop}
 	<div class="flex h-full min-h-0 items-center justify-center px-6">
@@ -1066,6 +1202,39 @@
 									>
 										<Icon name="copy" size={18} strokeWidth={1.9} />
 									</button>
+									<button
+										type="button"
+										onclick={openCurlMenu}
+										class="flex h-8 w-8 items-center justify-center rounded-md text-[var(--text-muted)] transition-all duration-150 hover:scale-110 hover:bg-white/5 hover:text-[var(--text)] active:scale-95"
+										title={$t('rest.curlMenu')}
+										aria-label={$t('rest.curlMenu')}
+									>
+										<Icon name="more" size={18} strokeWidth={3} />
+									</button>
+									{#if curlMenu}
+										<div
+											class="fixed z-50 w-40 overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--panel-bg)] py-1 shadow-2xl"
+											style="left: {curlMenu.x}px; top: {curlMenu.y}px;"
+											role="menu"
+										>
+											<button
+												type="button"
+												onclick={() => runCurlMenuAction(() => void exportSoapCurl('posix'))}
+												class="block w-full px-3 py-2 text-left text-sm font-semibold text-[var(--text)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--accent-text)]"
+												role="menuitem"
+											>
+												{$t('rest.copyCurlPosix')}
+											</button>
+											<button
+												type="button"
+												onclick={() => runCurlMenuAction(() => void exportSoapCurl('windows'))}
+												class="block w-full px-3 py-2 text-left text-sm font-semibold text-[var(--text)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--accent-text)]"
+												role="menuitem"
+											>
+												{$t('rest.copyCurlWindows')}
+											</button>
+										</div>
+									{/if}
 								{/if}
 							</div>
 						</div>
@@ -1352,4 +1521,54 @@
 			{/if}
 		</div>
 	</div>
+{#if secureDialog}
+	<div
+		class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+		role="dialog"
+		aria-modal="true"
+		aria-labelledby="soap-secure-templates-heading"
+	>
+		<div
+			class="w-[460px] max-w-full rounded-xl border border-[var(--border-strong)] bg-[var(--panel-bg)] p-4 shadow-2xl"
+		>
+			<div class="flex items-start gap-3">
+				<Icon
+					name="warning"
+					size={20}
+					strokeWidth={1.9}
+					class="mt-0.5 shrink-0 text-[var(--danger-text)]"
+				/>
+				<p id="soap-secure-templates-heading" class="text-sm leading-relaxed text-[var(--text)]">
+					{$t('vars.secureWarning')}
+				</p>
+			</div>
+			<div class="mt-4 flex flex-wrap items-center gap-2">
+				<button
+					type="button"
+					onclick={() => void resolveSecureExport(true)}
+					class="rounded-full bg-[var(--accent)] px-4 py-1.5 text-xs font-bold text-[var(--accent-text)] transition-all duration-150 hover:scale-105 hover:bg-[var(--accent-hover)] active:scale-95"
+				>
+					{$t('vars.replace')}
+				</button>
+				<button
+					type="button"
+					onclick={() => void resolveSecureExport(false)}
+					class="rounded-full bg-[var(--accent)] px-4 py-1.5 text-xs font-bold text-[var(--accent-text)] transition-all duration-150 hover:scale-105 hover:bg-[var(--accent-hover)] active:scale-95"
+				>
+					{$t('vars.keepTemplates')}
+				</button>
+				<button
+					type="button"
+					onclick={() => {
+						pendingExport = null;
+						secureDialog = false;
+					}}
+					class="rounded-full px-4 py-1.5 text-xs font-bold text-[var(--text-muted)] transition-all duration-150 hover:scale-105 hover:bg-[var(--panel-bg-alt)] active:scale-95"
+				>
+					{$t('common.cancel')}
+				</button>
+			</div>
+		</div>
+	</div>
+{/if}
 {/if}
