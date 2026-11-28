@@ -62,7 +62,11 @@
 		notifyError(message);
 	}
 
-	function execute(): void {
+	export function setSource(value: string): void {
+		source = value;
+	}
+
+	export function execute(): void {
 		try {
 			output = formatContent(mode, source, currentOptions());
 			status = '';
@@ -72,7 +76,7 @@
 		}
 	}
 
-	function escapeSource(): void {
+	export function escapeSource(): void {
 		try {
 			output = escapeContent(mode, source);
 			status = '';
@@ -92,7 +96,7 @@
 		}, 1500);
 	}
 
-	function shareOutput(): void {
+	export function shareOutput(): void {
 		if (!output) return;
 		draftShare.set({
 			content: output,
@@ -104,7 +108,7 @@
 		void goto('/share');
 	}
 
-	async function downloadOutput(): Promise<void> {
+	export async function downloadOutput(): Promise<void> {
 		if (!output) return;
 		if (isTauriRuntime()) {
 			try {
@@ -125,8 +129,13 @@
 		const anchor = document.createElement('a');
 		anchor.href = url;
 		anchor.download = `result.${mode}`;
-		anchor.click();
-		URL.revokeObjectURL(url);
+		document.body.appendChild(anchor);
+		try {
+			anchor.click();
+		} finally {
+			document.body.removeChild(anchor);
+			URL.revokeObjectURL(url);
+		}
 	}
 
 	async function selectFile(): Promise<void> {
