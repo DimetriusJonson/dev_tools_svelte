@@ -1,5 +1,5 @@
 import type { Translate } from '$lib/stores/i18n';
-import { parseQuery, type RestProperty } from './rest';
+import { decodeQueryPart, parseQuery, splitFragment, type RestProperty } from './rest';
 
 
 export const VAR_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -17,6 +17,17 @@ export interface VarRow {
 	name: string;
 	secure: boolean;
 }
+
+/** A variable as a dump or an export can write it: a safe value is either the mask
+ *  or the revealed secret, never the `null` the variables list carries. */
+export interface VarValue {
+	id: string;
+	secure: boolean;
+	value: string;
+}
+
+/** Templates are looked up by the lowercased name, like the backend scanner. */
+export type VarValues = Record<string, VarValue>;
 
 export interface TemplateSource {
 	url: string;
@@ -202,4 +213,103 @@ export function describeVarError(error: unknown, t: Translate): string {
 	if (unresolved) return t('vars.unsupportedTemplate', { name: unresolved[1] });
 
 	return text;
+}
+
+// The same grammar the scanner accepts: braces, an optional space, an ASCII name.
+const TEMPLATE_BRACES = /\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g;
+
+/** A row as the variables list answers it: a safe value is never in the list. */
+export interface VarRecord {
+	id: string;
+	name: string;
+	secure: boolean;
+	value: string | null;
+}
+
+/**
+ * Indexes the variables list by the lowercased name, which is how the backend looks a
+ * template up. A safe row starts as the mask, so a dump can be built without reading
+ * the credential store.
+ */
+export function varValues(rows: VarRecord[]): VarValues {
+	const values: VarValues = {};
+	for (const row of rows) {
+		values[row.name.toLowerCase()] = {
+			id: row.id,
+			secure: row.secure,
+			value: row.secure ? SECRET_MASK : (row.value ?? '')
+		};
+	}
+	return values;
+}
+
+/** The map a dump reads: a safe value becomes the mask the backend stores with it. */
+export function maskedValues(values: VarValues): VarValues {
+	const masked: VarValues = {};
+	for (const [name, entry] of Object.entries(values)) {
+		masked[name] = entry.secure ? { ...entry, value: SECRET_MASK } : entry;
+	}
+	return masked;
+}
+
+/** The map that leaves a safe template as text: plain variables only. */
+export function plainValues(values: VarValues): VarValues {
+	const plain: VarValues = {};
+	for (const [name, entry] of Object.entries(values)) {
+		if (!entry.secure) plain[name] = entry;
+	}
+	return plain;
+}
+
+/**
+ * Replaces every `{{ name }}` whose variable is in `values`. There is no recursion:
+ * the written value is never rescanned, so a value that contains a template stays
+ * text, and `{{a{{b}}}}` becomes `{{a` + the value of `b` + `}}`.
+ */
+export function substituteText(text: string, values: VarValues): string {
+	if (!text.includes('{{')) return text;
+	let result = '';
+	let cursor = 0;
+	for (const match of text.matchAll(TEMPLATE_BRACES)) {
+		const start = match.index ?? 0;
+		result += text.slice(cursor, start);
+		const entry = values[match[1].trim().toLowerCase()];
+		result += entry ? entry.value : match[0];
+		cursor = start + match[0].length;
+	}
+	return result + text.slice(cursor);
+}
+
+/** Percent-encodes a value the way the backend writes a substituted query pair. */
+function formEncode(value: string): string {
+	return encodeURIComponent(value).replace(/%20/g, '+');
+}
+
+/**
+ * Substitutes the query **values** of a raw URL and leaves every other part exactly
+ * as typed: a pair whose value had no template keeps its own spelling, a bare flag
+ * gains no `=`, an empty pair survives and the fragment stays outside the query.
+ * The value is decoded before it is scanned, which is what `vars.rs::substitute_url`
+ * does with `form_decode` — a template typed into the Query table reaches the URL as
+ * `%7B%7B%20name%20%7D%7D`, so scanning the raw text would never find it.
+ */
+export function substituteUrl(url: string, values: VarValues): string {
+	const { withoutFragment, fragment } = splitFragment(url);
+	const index = withoutFragment.indexOf('?');
+	if (index < 0) return url;
+	const head = withoutFragment.slice(0, index);
+	const pairs = withoutFragment
+		.slice(index + 1)
+		.split('&')
+		.map((segment) => {
+			const separator = segment.indexOf('=');
+			if (separator < 0) return segment;
+			const name = segment.slice(0, separator);
+			const decoded = decodeQueryPart(segment.slice(separator + 1));
+			const substituted = substituteText(decoded, values);
+			if (substituted === decoded) return segment;
+			return `${name}=${formEncode(substituted)}`;
+		})
+		.join('&');
+	return `${head}?${pairs}${fragment}`;
 }

@@ -76,7 +76,19 @@
 		propertyFieldHint,
 		validationMessage
 	} from '$lib/utils/validation';
-	import { describeVarError, requestHasTemplates, referencedVarNames } from '$lib/utils/vars';
+	import {
+		containsTemplate,
+		describeVarError,
+		maskedValues,
+		plainValues,
+		referencedVarNames,
+		requestHasTemplates,
+		substituteText,
+		substituteUrl,
+		varValues,
+		type VarValues
+	} from '$lib/utils/vars';
+	import { listGlobalVars, revealGlobalVar } from '$lib/services/vars';
 
 	const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
 	const BODY_TYPES: BodyType[] = ['json', 'xml', 'text', 'form', 'multipart'];
@@ -84,6 +96,14 @@
 	// request itself always gets a fresh one from the encoder, so this marker is only
 	// the layout hint shown before a run.
 	const previewBoundary = multipartBoundary();
+
+	// The variables this page can substitute into a dump or a cURL command. Plain
+	// values come from the list; a safe value is read only when the user chose
+	// "Replace", so nothing secret is fetched for the Raw tab.
+	let vars = $state<VarValues>({});
+	let secureDialog = $state(false);
+	// The export waiting for the answer, so the dialog's buttons know what to copy.
+	let pendingExport: { request: RestRequest; shell: CurlShell } | null = null;
 
 	let projects = $state<RestProject[]>([]);
 	let requests = $state<RestRequest[]>([]);
@@ -110,6 +130,44 @@
 	let saveTimer: ReturnType<typeof setTimeout> | undefined;
 
 	const dark = $derived($isDark);
+
+	interface RenderedRequest {
+		method: string;
+		url: string;
+		headers: RestProperty[];
+		body: string;
+		body_type: BodyType;
+		form: RestProperty[];
+		multipart: RestProperty[];
+		files: RestFileRow[];
+	}
+
+	/**
+	 * The request with its templates rewritten from `values`. Only the places the
+	 * backend substitutes are touched: a template in the host, path, a query name, a
+	 * header name or a part name stays as typed, because such a request is refused
+	 * rather than sent.
+	 */
+	function withValues(request: RestRequest, values: VarValues): RenderedRequest {
+		const render = (text: string) =>
+			containsTemplate(text) ? substituteText(text, values) : text;
+		return {
+			method: request.method,
+			url: substituteUrl(request.url, values),
+			headers: request.headers.map((row) => ({ name: row.name, value: render(row.value) })),
+			body: render(request.body),
+			body_type: request.body_type,
+			form: request.form.map((row) => ({ name: row.name, value: render(row.value) })),
+			multipart: request.multipart.map((row) => ({
+				name: row.name,
+				value: render(row.value)
+			})),
+			files: request.files.map((row) => ({ ...row }))
+		};
+	}
+
+	/** What the Raw tab shows before a run: plain values, safe ones as the mask. */
+	const dumpSource = $derived(active ? withValues(active, maskedValues(vars)) : null);
 	const filteredRequests = $derived(
 		activeProjectId
 			? requests.filter((request) => request.project_id === activeProjectId)
@@ -147,14 +205,18 @@
 	const rawRequestText = $derived(
 		response?.raw_request ??
 			active?.raw_request ??
-			(active
+			(dumpSource
 				? buildRawRequestPreview(
-						active.method,
-						active.url,
-						active.headers,
-						effectiveBody,
-						active.body_type,
-						{ fields: active.multipart, files: active.files, boundary: previewBoundary }
+						dumpSource.method,
+						dumpSource.url,
+						dumpSource.headers,
+						resolveRequestBody(dumpSource),
+						dumpSource.body_type,
+						{
+							fields: dumpSource.multipart,
+							files: dumpSource.files,
+							boundary: previewBoundary
+						}
 					)
 				: '')
 	);
@@ -729,6 +791,87 @@
 		await runRequest();
 	}
 
+	/** Reloads the variable list so a dump or an export never works from stale values. */
+	async function refreshVars(): Promise<void> {
+		if (!isTauriRuntime()) return;
+		try {
+			vars = varValues(await listGlobalVars());
+		} catch (error) {
+			notify(describeVarError(error, $t) || $t('vars.loadFailed'), 'error');
+		}
+	}
+
+	/** The cURL text of a request with its templates rewritten from `values`. */
+	function curlCommand(request: RestRequest, values: VarValues, shell: CurlShell): string {
+		const source = withValues(request, values);
+		return buildCurl(
+			{
+				method: source.method,
+				url: source.url,
+				headers: source.headers,
+				body: resolveRequestBody(source),
+				body_type: source.body_type,
+				multipart: source.multipart,
+				files: source.files
+			},
+			shell
+		);
+	}
+
+	/**
+	 * Reads the values behind the safe templates of a request. They live in this page's
+	 * memory for the duration of one copy and never reach SQLite or localStorage.
+	 */
+	async function revealSecureValues(request: RestRequest): Promise<VarValues> {
+		const values: VarValues = { ...vars };
+		for (const name of referencedVarNames(request)) {
+			const entry = values[name];
+			if (!entry?.secure) continue;
+			const secret = await revealGlobalVar(entry.id);
+			values[name] = { ...entry, value: secret };
+		}
+		return values;
+	}
+
+	/**
+	 * Exports a request as cURL. Plain variables are always substituted; when the
+	 * request also references a safe variable the user decides whether its real value
+	 * goes into the clipboard or the template stays as text.
+	 */
+	async function exportCurl(request: RestRequest, shell: CurlShell): Promise<void> {
+		if (!isTauriRuntime()) {
+			// The browser build cannot read the variable store at all, so it would write
+			// the template literally.
+			if (requestHasTemplates(request)) {
+				notify($t('vars.curlUnavailable'), 'error');
+				return;
+			}
+			await copyText(curlCommand(request, vars, shell));
+			return;
+		}
+		await refreshVars();
+		if (!referencedVarNames(request).some((name) => vars[name]?.secure)) {
+			await copyText(curlCommand(request, vars, shell));
+			return;
+		}
+		pendingExport = { request, shell };
+		secureDialog = true;
+	}
+
+	/** Answers the safe-variable question: "Replace" copies the real values. */
+	async function resolveSecureExport(replace: boolean): Promise<void> {
+		const target = pendingExport;
+		pendingExport = null;
+		secureDialog = false;
+		if (!target) return;
+		try {
+			const values = replace ? await revealSecureValues(target.request) : plainValues(vars);
+			await copyText(curlCommand(target.request, values, target.shell));
+		} catch (error) {
+			notify(describeVarError(error, $t) || $t('vars.loadFailed'), 'error');
+		}
+	}
+
 	async function copyCurl(id: string, shell: CurlShell): Promise<void> {
 		const request = requests.find((item) => item.id === id);
 		if (!request) return;
@@ -737,26 +880,7 @@
 			notify(failure, 'error');
 			return;
 		}
-		// A cURL command has no way to reach the credential store, so the template would
-		// be sent literally.
-		if (requestHasTemplates(request)) {
-			notify($t('vars.curlUnavailable'), 'error');
-			return;
-		}
-		const body = resolveRequestBody(request);
-		const command = buildCurl(
-			{
-				method: request.method,
-				url: request.url,
-				headers: request.headers,
-				body,
-				body_type: request.body_type,
-				multipart: request.multipart,
-				files: request.files
-			},
-			shell
-		);
-		await copyText(command);
+		await exportCurl(request, shell);
 	}
 
 	async function copyRawCurl(shell: CurlShell): Promise<void> {
@@ -766,23 +890,7 @@
 			notify(failure, 'error');
 			return;
 		}
-		if (hasTemplates) {
-			notify($t('vars.curlUnavailable'), 'error');
-			return;
-		}
-		const command = buildCurl(
-			{
-				method: active.method,
-				url: active.url,
-				headers: active.headers,
-				body: effectiveBody,
-				body_type: active.body_type,
-				multipart: active.multipart,
-				files: active.files
-			},
-			shell
-		);
-		await copyText(command);
+		await exportCurl(active, shell);
 	}
 
 	async function downloadResponse(): Promise<void> {
@@ -923,6 +1031,9 @@
 				savedSelection = selectionKey(stored.project_id, stored.request_id);
 				activeProjectId = restored.project_id;
 				if (restored.request_id) selectRequest(restored.request_id);
+				// The Raw tab substitutes plain variables, so their values are read once
+				// at startup and again before an export.
+				await refreshVars();
 			} catch (error) {
 				notifyError(error, $t('common.error'));
 			} finally {
@@ -1609,4 +1720,55 @@
 			</div>
 		{/if}
 	</div>
+
+	{#if secureDialog}
+		<div
+			class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+			role="dialog"
+			aria-modal="true"
+			aria-labelledby="secure-templates-heading"
+		>
+			<div
+				class="w-[460px] max-w-full rounded-xl border border-[var(--border-strong)] bg-[var(--panel-bg)] p-4 shadow-2xl"
+			>
+				<div class="flex items-start gap-3">
+					<Icon
+						name="warning"
+						size={20}
+						strokeWidth={1.9}
+						class="mt-0.5 shrink-0 text-[var(--danger-text)]"
+					/>
+					<p id="secure-templates-heading" class="text-sm leading-relaxed text-[var(--text)]">
+						{$t('vars.secureWarning')}
+					</p>
+				</div>
+				<div class="mt-4 flex flex-wrap items-center gap-2">
+					<button
+						type="button"
+						onclick={() => void resolveSecureExport(true)}
+						class="rounded-full bg-[var(--accent)] px-4 py-1.5 text-xs font-bold text-[var(--accent-text)] transition-all duration-150 hover:scale-105 hover:bg-[var(--accent-hover)] active:scale-95"
+					>
+						{$t('vars.replace')}
+					</button>
+					<button
+						type="button"
+						onclick={() => void resolveSecureExport(false)}
+						class="rounded-full bg-[var(--accent)] px-4 py-1.5 text-xs font-bold text-[var(--accent-text)] transition-all duration-150 hover:scale-105 hover:bg-[var(--accent-hover)] active:scale-95"
+					>
+						{$t('vars.keepTemplates')}
+					</button>
+					<button
+						type="button"
+						onclick={() => {
+							pendingExport = null;
+							secureDialog = false;
+						}}
+						class="rounded-full px-4 py-1.5 text-xs font-bold text-[var(--text-muted)] transition-all duration-150 hover:scale-105 hover:bg-[var(--panel-bg-alt)] active:scale-95"
+					>
+						{$t('common.cancel')}
+					</button>
+				</div>
+			</div>
+		</div>
+	{/if}
 </div>

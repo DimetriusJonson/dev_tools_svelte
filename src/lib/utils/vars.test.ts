@@ -7,12 +7,19 @@ import {
 	containsTemplate,
 	describeVarError,
 	extractTemplateNames,
-	requestHasTemplates,
+	maskedValues,
+	plainValues,
 	referencedVarNames,
+	requestHasTemplates,
 	soapHasTemplates,
+	substituteText,
+	substituteUrl,
 	templateFor,
+	varValues,
 	validateVarName,
-	type TemplateSource
+	type TemplateSource,
+	type VarRecord,
+	type VarValues
 } from './vars';
 
 // `$t` is the locale store's translate function; tests read it once per case.
@@ -241,5 +248,97 @@ describe('backend error texts', () => {
 
 	it('masks a safe value with the same text the dump uses', () => {
 		expect(SECRET_MASK).toBe('********');
+	});
+});
+
+describe('rendering templates for a dump or an export', () => {
+	const rows: VarRecord[] = [
+		{ id: 'a1', name: 'Host', secure: false, value: 'v1' },
+		{ id: 'a2', name: 'Token', secure: true, value: null }
+	];
+
+	it('indexes by the lowercased name and starts a safe row as the mask', () => {
+		const values = varValues(rows);
+		expect(Object.keys(values)).toEqual(['host', 'token']);
+		expect(values.host).toEqual({ id: 'a1', secure: false, value: 'v1' });
+		// The list never carries a secret, so the mask is what a dump reads by default.
+		expect(values.token.value).toBe(SECRET_MASK);
+	});
+
+	it('masks a safe value and keeps a plain one', () => {
+		const revealed = { ...varValues(rows), token: { id: 'a2', secure: true, value: 's3cret' } };
+		expect(maskedValues(revealed).token.value).toBe(SECRET_MASK);
+		expect(maskedValues(revealed).host.value).toBe('v1');
+	});
+
+	it('drops safe entries so their template stays text', () => {
+		const values = varValues(rows);
+		expect(Object.keys(plainValues(values))).toEqual(['host']);
+		expect(substituteText('Bearer {{ token }}', plainValues(values))).toBe(
+			'Bearer {{ token }}'
+		);
+	});
+
+	it('substitutes a known name and leaves an unknown one as typed', () => {
+		const values = varValues(rows);
+		expect(substituteText('Bearer {{ Token }}', values)).toBe(`Bearer ${SECRET_MASK}`);
+		expect(substituteText('{{ host }}:8080', values)).toBe('v1:8080');
+		expect(substituteText('{{ missing }}', values)).toBe('{{ missing }}');
+		// Text without braces is returned untouched, so no scan runs over a big body.
+		expect(substituteText('<i>plain</i>', values)).toBe('<i>plain</i>');
+	});
+
+	it('never rescans the value it wrote, like the Rust scanner', () => {
+		const values: VarValues = {
+			a: { id: 'a', secure: false, value: '{{b}}' },
+			b: { id: 'b', secure: false, value: 'v' }
+		};
+		// One pass: `{{a}}` becomes the text `{{b}}`, which is not expanded again.
+		expect(substituteText('{{a}}', values)).toBe('{{b}}');
+		// The outer pair is not a name, so only the inner one resolves.
+		expect(substituteText('{{a{{b}}}}', values)).toBe('{{av}}');
+	});
+
+	it('substitutes query values and keeps every other segment as typed', () => {
+		const values = varValues([{ id: 'q', name: 'q', secure: false, value: 'v' }]);
+		expect(
+			substituteUrl('https://e.com/p?debug&a=1&&keep=a%20b&x=%7B%7Bq%7D%7D&y=%5E', values)
+		).toBe('https://e.com/p?debug&a=1&&keep=a%20b&x=v&y=%5E');
+		// A rewritten value is written the way the backend writes it: `+` for a space.
+		expect(
+			substituteUrl('https://e.com/p?q={{q}}', {
+				q: { id: 'q', secure: false, value: 'a b&c' }
+			})
+		).toBe('https://e.com/p?q=a+b%26c');
+		// A template in a parameter **name** is never substituted, and a URL without a
+		// query is returned as it stands.
+		expect(substituteUrl('https://e.com/p?{{q}}=1', values)).toBe('https://e.com/p?{{q}}=1');
+		expect(substituteUrl('https://e.com/p', values)).toBe('https://e.com/p');
+	});
+
+	it('finds a template the Query table wrote, where the braces and spaces are encoded', () => {
+		const values = varValues([{ id: 'q', name: 'q', secure: false, value: 'v' }]);
+		// `buildQuery` writes `{{ q }}` as `%7B%7B%20q%20%7D%7D`, so scanning the raw
+		// segment would never match it.
+		expect(substituteUrl('https://e.com/p?id=%7B%7B%20q%20%7D%7D', values)).toBe(
+			'https://e.com/p?id=v'
+		);
+		expect(substituteUrl('https://e.com/p?id=%7b%7b%20q%20%7d%7d', values)).toBe(
+			'https://e.com/p?id=v'
+		);
+		// A safe value keeps the mask in that position too.
+		expect(
+			substituteUrl('https://e.com/p?t=%7B%7B%20q%20%7D%7D', {
+				q: { id: 'q', secure: true, value: SECRET_MASK }
+			})
+		).toBe('https://e.com/p?t=********');
+	});
+
+	it('keeps the fragment outside the query it rewrites', () => {
+		const values = varValues([{ id: 'q', name: 'q', secure: false, value: 'v' }]);
+		expect(substituteUrl('https://e.com/p?q=%7B%7B%20q%20%7D%7D#section', values)).toBe(
+			'https://e.com/p?q=v#section'
+		);
+		expect(substituteUrl('https://e.com/p?a=1#{{q}}', values)).toBe('https://e.com/p?a=1#{{q}}');
 	});
 });

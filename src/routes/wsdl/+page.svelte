@@ -62,6 +62,14 @@
 	} from '$lib/utils/validation';
 	import { describeVarError, soapHasTemplates } from '$lib/utils/vars';
 	import {
+		containsTemplate,
+		maskedValues,
+		substituteText,
+		varValues,
+		type VarValues
+	} from '$lib/utils/vars';
+	import { listGlobalVars } from '$lib/services/vars';
+	import {
 		SOAP_METHOD,
 		buildEnvelope,
 		buildSoapRawRequest,
@@ -106,6 +114,9 @@
 
 	let requestBody = $state('');
 	let userHeaders = $state<RestProperty[]>([]);
+	// The Raw preview substitutes plain variables and masks safe ones, exactly like
+	// the dump the backend stores after a call.
+	let vars = $state<VarValues>({});
 	let endpointId = $state('');
 	let dirty = $state(false);
 	let saveResponse = $state(false);
@@ -181,6 +192,11 @@
 		response ? response.size : savedResponseBody ? byteLength(savedResponseBody) : 0
 	);
 	const responseTime = $derived(response?.duration_ms ?? null);
+	/** Preview text with plain variables substituted and safe ones replaced by the mask. */
+	function renderTemplates(text: string): string {
+		return containsTemplate(text) ? substituteText(text, maskedValues(vars)) : text;
+	}
+
 	// The answer to a call is the dump the backend wrote; before any call the tab
 	// shows the exchange the Send button would produce.
 	const rawRequestText = $derived(
@@ -191,8 +207,11 @@
 						endpoint.url,
 						soapVersion,
 						soapAction,
-						editableForSave(soapVersion, soapAction, userHeaders),
-						requestBody
+						editableForSave(soapVersion, soapAction, userHeaders).map((row) => ({
+							name: row.name,
+							value: renderTemplates(row.value)
+						})),
+						renderTemplates(requestBody)
 					)
 				: '')
 	);
@@ -837,6 +856,12 @@
 				savedSelection = selectionKey(stored.project_id, stored.operation_id);
 				activeProjectId = restored.project_id;
 				if (restored.operation_id) await openOperation(restored.operation_id);
+				// The `Raw` tab substitutes plain variables, so their values are read once.
+				try {
+					vars = varValues(await listGlobalVars());
+				} catch {
+					vars = {};
+				}
 			} catch (error) {
 				notifyError(error, $t('common.error'));
 			} finally {

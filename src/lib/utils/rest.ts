@@ -62,7 +62,8 @@ export interface ParsedCurl {
 
 const DEFAULT_USER_AGENT = 'WebDevUsefulTools Client';
 
-function splitFragment(url: string): { withoutFragment: string; fragment: string } {
+/** The part after the first `#`, kept apart from the query the way `Url::parse` keeps it. */
+export function splitFragment(url: string): { withoutFragment: string; fragment: string } {
 	const index = url.indexOf('#');
 	if (index < 0) return { withoutFragment: url, fragment: '' };
 	return { withoutFragment: url.slice(0, index), fragment: url.slice(index) };
@@ -86,7 +87,13 @@ export function parseQuery(url: string): RestProperty[] {
 	});
 }
 
-function decodeQueryPart(value: string): string {
+/**
+ * The decoding `form_decode` applies: `+` is a space and a complete `%XX` escape becomes
+ * its character, so a template typed into the Query table — which `buildQuery` writes as
+ * `%7B%7B%20name%20%7D%7D` — arrives in the form the scanner reads. A broken escape keeps
+ * the text as it stands.
+ */
+export function decodeQueryPart(value: string): string {
 	try {
 		return decodeURIComponent(value.replace(/\+/g, ' '));
 	} catch {
@@ -528,6 +535,17 @@ const PERCENT_ESCAPE = /^[0-9A-Fa-f]{2}/;
 // RFC 6265 §4.1.1 cookie-value: printable ASCII without DQUOTE, comma, semicolon
 // or backslash, because those delimit or quote the Cookie header.
 const COOKIE_VALUE_CHARACTER = /[\u0021\u0023-\u002B\u002D-\u003A\u003C-\u005B\u005D-\u007E]/;
+// A `{{ name }}` template is rewritten by the desktop backend before the request goes on
+// the wire, so the braces and the spaces of its spelling never reach the field grammar:
+// a cookie value becomes part of the `Cookie` header and a query value is percent-encoded
+// by `Url::parse`. The name rules match the scanner in `utils/vars.ts` and `vars.rs`, so
+// `{{ a b }}` and `{{1}}` stay ordinary text and are still reported.
+const TEMPLATE_SPAN = /\{\{\s*[A-Za-z_][A-Za-z0-9_]*\s*\}\}/g;
+
+/** Hides every template behind one allowed character so only the text around it is judged. */
+function withoutTemplates(text: string): string {
+	return text.includes('{{') ? text.replace(TEMPLATE_SPAN, 'x') : text;
+}
 
 export function describeCharacter(character: string): string {
 	switch (character) {
@@ -605,15 +623,20 @@ export function validateCookieName(name: string): ValidationIssue | null {
 
 export function validateCookieValue(value: string): ValidationIssue | null {
 	if (!value) return null;
-	const character = firstDisallowed(value, COOKIE_VALUE_CHARACTER);
+	// The row is folded into the `Cookie` header, where the backend substitutes the
+	// template, so only the text around a template has to be a cookie value.
+	const character = firstDisallowed(withoutTemplates(value), COOKIE_VALUE_CHARACTER);
 	if (character) return makeIssue('cookie-value', 'value', value, character);
 	return null;
 }
 
-// Query rows are written into the URL verbatim, so they must already be valid.
+// Query rows are written into the URL verbatim, so they must already be valid. A template
+// in a **value** is exempt: `Url::parse` percent-encodes its braces and spaces and the
+// backend substitutes it before sending. A template in a parameter name is a place the
+// backend refuses rather than substitutes, so its braces stay reported.
 function validateQueryText(text: string, field: 'name' | 'value'): ValidationIssue | null {
 	if (!text) return null;
-	const character = firstQueryViolation(text);
+	const character = firstQueryViolation(field === 'value' ? withoutTemplates(text) : text);
 	if (character) return makeIssue('query-param', field, text, character);
 	return null;
 }

@@ -34,6 +34,30 @@ interface Request {
 	updated_at: string;
 }
 
+/** A variable row as `list_global_vars` answers it: a safe value is never in the list. */
+interface VarRow {
+	id: string;
+	name: string;
+	secure: boolean;
+	value: string | null;
+}
+
+const PLAIN_VAR: VarRow = {
+	id: 'aaaaaaaa-0000-4000-8000-0000000000a1',
+	name: 'host',
+	secure: false,
+	value: 'v1'
+};
+
+const SECURE_VAR: VarRow = {
+	id: 'aaaaaaaa-0000-4000-8000-0000000000a2',
+	name: 'token',
+	secure: true,
+	value: null
+};
+
+const SECRET = 's3cret';
+
 /** A request whose header value carries a template, so every guard below has a reason. */
 function templatedRequest(): Request {
 	return {
@@ -62,8 +86,32 @@ function templatedRequest(): Request {
 	};
 }
 
+/** A request whose only template is a plain variable, so the export never asks. */
+function plainTemplatedRequest(): Request {
+	return { ...templatedRequest(), headers: [{ name: 'X-Host', value: '{{ host }}' }] };
+}
+
+/** A request whose template came from the Query table, so the URL holds it percent-encoded
+ *  the way `buildQuery` writes it: `%7B%7B%20host%20%7D%7D`. */
+function queryTemplatedRequest(): Request {
+	return {
+		...templatedRequest(),
+		headers: [],
+		url: 'https://example.com/p?id=%7B%7B%20host%20%7D%7D&keep=a%20b'
+	};
+}
+
+/** A request whose template sits in a `Cookies` row, i.e. in the `Cookie` header value. */
+function cookieTemplatedRequest(): Request {
+	return {
+		...templatedRequest(),
+		headers: [{ name: 'Cookie', value: 'sid={{ host }}; other={{ token }}' }]
+	};
+}
+
 let calls: Array<[string, Record<string, unknown>]>;
 let executeFailure: string | null;
+let written: string[];
 let component: ReturnType<typeof mount> | undefined;
 
 const say: Translate = (key, params) => get(t)(key, params);
@@ -73,7 +121,7 @@ function failBackend(text: string): never {
 	throw text;
 }
 
-function desktopBuild(request: Request): void {
+function desktopBuild(request: Request, rows: VarRow[] = []): void {
 	calls = [];
 	executeFailure = null;
 	(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {
@@ -81,6 +129,8 @@ function desktopBuild(request: Request): void {
 			calls.push([command, args]);
 			if (command === 'list_rest_projects') return [];
 			if (command === 'list_rest_requests') return [request];
+			if (command === 'list_global_vars') return rows;
+			if (command === 'reveal_global_var') return SECRET;
 			if (command === 'execute_rest_request') {
 				if (executeFailure) failBackend(executeFailure);
 				return {
@@ -160,12 +210,19 @@ describe('rest page and global variables', () => {
 	beforeEach(() => {
 		setLocale('en');
 		toasts.set([]);
+		written = [];
 		delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
 		window.localStorage.clear();
 		(window as unknown as Record<string, unknown>).matchMedia = () => ({
 			matches: false,
 			addEventListener: () => {},
 			removeEventListener: () => {}
+		});
+		// `copyText` prefers the async clipboard whenever the context is secure.
+		Object.defineProperty(window, 'isSecureContext', { value: true, configurable: true });
+		Object.defineProperty(navigator, 'clipboard', {
+			value: { writeText: async (text: string) => written.push(text) },
+			configurable: true
 		});
 		vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200 })));
 	});
@@ -192,10 +249,55 @@ describe('rest page and global variables', () => {
 		flushSync();
 	}
 
-	it('says on the Raw tab that a template is expanded only on the desktop', async () => {
-		desktopBuild(templatedRequest());
+	it('substitutes a plain variable and masks a safe one on the Raw tab', async () => {
+		desktopBuild(templatedRequest(), [PLAIN_VAR, SECURE_VAR]);
 		await openPage();
+
+		expect(document.body.textContent).toContain('Bearer ********');
+		expect(document.body.textContent).not.toContain('{{ token }}');
 		expect(document.body.textContent).toContain(say('vars.rawHint'));
+	});
+
+	it('substitutes a template the Query table wrote into the URL', async () => {
+		desktopBuild(queryTemplatedRequest(), [PLAIN_VAR, SECURE_VAR]);
+		await openPage();
+
+		// The Query table percent-encodes the braces and the spaces, so the preview has
+		// to decode a value before it can find the template; a pair with no template
+		// keeps the spelling the user typed.
+		expect(document.body.textContent).toContain('id=v1');
+		expect(document.body.textContent).toContain('keep=a%20b');
+		expect(document.body.textContent).not.toContain('%7B%7B');
+		expect(document.body.textContent).toContain(say('vars.rawHint'));
+	});
+
+	it('masks a safe variable the Query table wrote into the URL', async () => {
+		const request = {
+			...queryTemplatedRequest(),
+			url: 'https://example.com/p?t=%7B%7B%20token%20%7D%7D'
+		};
+		desktopBuild(request, [PLAIN_VAR, SECURE_VAR]);
+		await openPage();
+
+		expect(document.body.textContent).toContain('t=********');
+		expect(document.body.textContent).not.toContain(SECRET);
+	});
+
+	it('accepts a template in a cookie row and sends the request', async () => {
+		desktopBuild(cookieTemplatedRequest(), [PLAIN_VAR, SECURE_VAR]);
+		await openPage();
+
+		// A cookie row is the `Cookie` header value, which the backend substitutes, so the
+		// spaces of `{{ name }}` are not a validation error and the dump shows both renderings.
+		expect(document.body.textContent).toContain('Cookie: sid=v1; other=********');
+		expect(document.body.textContent).not.toContain('{{');
+		expect(document.body.textContent).not.toContain(SECRET);
+
+		byTitle(say('rest.execute'))?.click();
+		await until(() => {
+			expect(calls.some(([command]) => command === 'execute_rest_request')).toBe(true);
+		});
+		expect(messages().join(' ')).not.toContain(say('rest.validation.blocked'));
 	});
 
 	it('names nothing on the Raw tab when the request references no variable', async () => {
@@ -203,6 +305,82 @@ describe('rest page and global variables', () => {
 		desktopBuild(request);
 		await openPage();
 		expect(document.body.textContent).not.toContain(say('vars.rawHint'));
+	});
+
+	it('copies a cURL command with plain variables substituted', async () => {
+		desktopBuild(plainTemplatedRequest(), [PLAIN_VAR, SECURE_VAR]);
+		await openPage();
+
+		byText('cURL (Posix)')[0].click();
+		flushSync();
+		await until(() => {
+			expect(written).toHaveLength(1);
+		});
+		expect(written[0]).toContain('v1');
+		expect(written[0]).not.toContain('{{');
+		// No safe variable was referenced, so nothing was asked and nothing revealed.
+		expect(document.body.textContent).not.toContain(say('vars.secureWarning'));
+		expect(calls.some(([command]) => command === 'reveal_global_var')).toBe(false);
+		// The only notification is the copy itself: no question, no failure.
+		expect(messages()).toEqual([say('common.copied')]);
+	});
+
+	it('asks about safe templates and replaces them with the real value', async () => {
+		desktopBuild(templatedRequest(), [PLAIN_VAR, SECURE_VAR]);
+		await openPage();
+
+		byText('cURL (Posix)')[0].click();
+		flushSync();
+		await until(() => {
+			expect(document.body.textContent).toContain(say('vars.secureWarning'));
+		});
+		expect(written).toHaveLength(0);
+
+		byText(say('vars.replace'))[0].click();
+		flushSync();
+		await until(() => {
+			expect(written).toHaveLength(1);
+		});
+		expect(written[0]).toContain(`Bearer ${SECRET}`);
+		expect(calls.some(([command]) => command === 'reveal_global_var')).toBe(true);
+		expect(document.body.textContent).not.toContain(say('vars.secureWarning'));
+	});
+
+	it('keeps the safe template as text when the answer is "Do not replace"', async () => {
+		desktopBuild(templatedRequest(), [PLAIN_VAR, SECURE_VAR]);
+		await openPage();
+
+		byText('cURL (Windows)')[0].click();
+		flushSync();
+		await until(() => {
+			expect(document.body.textContent).toContain(say('vars.secureWarning'));
+		});
+
+		byText(say('vars.keepTemplates'))[0].click();
+		flushSync();
+		await until(() => {
+			expect(written).toHaveLength(1);
+		});
+		expect(written[0]).toContain('{{ token }}');
+		expect(written[0]).not.toContain(SECRET);
+		expect(calls.some(([command]) => command === 'reveal_global_var')).toBe(false);
+	});
+
+	it('copies nothing when the safe-variable question is cancelled', async () => {
+		desktopBuild(templatedRequest(), [SECURE_VAR]);
+		await openPage();
+
+		byText('cURL (Posix)')[0].click();
+		flushSync();
+		await until(() => {
+			expect(document.body.textContent).toContain(say('vars.secureWarning'));
+		});
+
+		byText(say('common.cancel'))[0].click();
+		flushSync();
+		expect(written).toHaveLength(0);
+		expect(document.body.textContent).not.toContain(say('vars.secureWarning'));
+		expect(get(toasts)).toHaveLength(0);
 	});
 
 	it('localizes a substitution failure instead of showing the backend code', async () => {
@@ -230,8 +408,8 @@ describe('rest page and global variables', () => {
 		expect(vi.mocked(fetch)).not.toHaveBeenCalled();
 	});
 
-	it('refuses to export a templated request as cURL', async () => {
-		desktopBuild(templatedRequest());
+	it('refuses to export a templated request as cURL in the browser build', async () => {
+		browserBuild(templatedRequest());
 		await openPage();
 
 		byText('cURL (Posix)')[0].click();
@@ -241,6 +419,6 @@ describe('rest page and global variables', () => {
 		});
 		// Nothing was written out, so the toast stack holds only the refusal.
 		expect(get(toasts)).toHaveLength(1);
-		expect(calls.some(([command]) => command.startsWith('plugin:clipboard'))).toBe(false);
+		expect(written).toHaveLength(0);
 	});
 });

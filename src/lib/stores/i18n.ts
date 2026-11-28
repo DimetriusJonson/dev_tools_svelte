@@ -371,9 +371,14 @@ export const en: Dictionary = {
 		'The browser build has no access to the application database or to the system credential store.',
 	'vars.desktopOnlySend':
 		'Global variables are substituted by the desktop app: open the app to send this request',
-	'vars.curlUnavailable': 'A request with global variables cannot be exported as cURL',
+	'vars.curlUnavailable':
+		'Global variables are substituted by the desktop app: open the app to export this request as cURL',
 	'vars.rawHint':
-		'Variables are substituted when the request is sent; safe values stay masked in this dump',
+		'Plain variables are substituted in this dump; safe values appear as ********',
+	'vars.secureWarning':
+		'Warning! The request uses safe variables. What to do with the templates of safe variables?',
+	'vars.replace': 'Replace',
+	'vars.keepTemplates': 'Do not replace',
 	'vars.unknown': 'Unknown variable: {name}',
 	'vars.secretMissing':
 		'The value of {name} is not in the credential store. Type it again; if it stays empty, this system has no credential store — on Linux it needs GNOME Keyring or KWallet over D-Bus.',
@@ -764,9 +769,14 @@ export const ru: Dictionary = {
 		'Сборка в браузере не имеет доступа к базе данных приложения и к системному хранилищу секретов.',
 	'vars.desktopOnlySend':
 		'Глобальные переменные подставляет desktop-приложение: откройте приложение, чтобы отправить запрос',
-	'vars.curlUnavailable': 'Запрос с глобальными переменными нельзя экспортировать как cURL',
+	'vars.curlUnavailable':
+		'Глобальные переменные подставляет desktop-приложение: откройте приложение, чтобы экспортировать запрос как cURL',
 	'vars.rawHint':
-		'Переменные подставляются при отправке запроса; безопасные значения в этом дампе скрыты',
+		'Обычные переменные подставляются в этот дамп; безопасные показываются как ********',
+	'vars.secureWarning':
+		'Внимание! В запросе используются безопасные переменные. Что делать с шаблонами безопасных переменных?',
+	'vars.replace': 'Заменить',
+	'vars.keepTemplates': 'Не заменять',
 	'vars.unknown': 'Неизвестная переменная: {name}',
 	'vars.secretMissing':
 		'Значение {name} отсутствует в хранилище секретов. Введите его снова; если оно остаётся пустым, в системе нет хранилища секретов — в Linux нужны GNOME Keyring или KWallet поверх D-Bus.',

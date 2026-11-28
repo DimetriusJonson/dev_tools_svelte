@@ -483,6 +483,34 @@ describe('header and parameter validation', () => {
 		).toEqual([expect.objectContaining({ kind: 'cookie-name', row: 0 })]);
 	});
 
+	it('accepts a variable template in a cookie value', () => {
+		// The row is folded into the `Cookie` header, where the backend substitutes the
+		// template, so the spaces of `{{ name }}` are not cookie-value characters.
+		expect(validateCookieValue('{{ token }}')).toBeNull();
+		expect(validateCookieValue('sid-{{ token }}')).toBeNull();
+		// A space *between* two templates belongs to neither of them, so it is still a
+		// cookie-value violation.
+		expect(validateCookieValue('{{ token }}{{ id }}')).toBeNull();
+		expect(validateCookieValue('{{ token }} {{ id }}')).toMatchObject({
+			kind: 'cookie-value',
+			char: '␠'
+		});
+		// Something the scanner does not resolve stays ordinary text, so its space is illegal.
+		expect(validateCookieValue('{{ a b }}')).toMatchObject({ kind: 'cookie-value', char: '␠' });
+		expect(validateCookieValue('a {{ token }} b')).toMatchObject({
+			kind: 'cookie-value',
+			char: '␠'
+		});
+		// A name is never substituted, so a template there stays a broken token.
+		expect(validateCookieName('{{ token }}')).toMatchObject({ kind: 'cookie-name', char: '{' });
+		expect(
+			validateProperties(
+				'cookie',
+				parseCookies([{ name: 'Cookie', value: 'sid={{ token }}; other=1' }])
+			)
+		).toEqual([]);
+	});
+
 	it('validates the raw query string, not the decoded rows', () => {
 		expect(validateQueryUrl('https://example.com/?a=1&b=2')).toEqual([]);
 		expect(validateQueryUrl('https://example.com/?q=hello%20world')).toEqual([]);
@@ -496,6 +524,12 @@ describe('header and parameter validation', () => {
 			{ kind: 'query-param', field: 'value', name: 'b', char: '%', row: 1 }
 		]);
 		expect(validateQueryUrl('https://example.com/?a=1#frag ment')).toEqual([]);
+		// A template in a value is substituted by the backend, which percent-encodes its
+		// braces and spaces; a template in a parameter name is a place it refuses.
+		expect(validateQueryUrl('https://example.com/?q={{ token }}&keep=a%20b')).toEqual([]);
+		expect(validateQueryUrl('https://example.com/?{{ token }}=1')).toEqual([
+			{ kind: 'query-param', field: 'name', name: '{{ token }}', char: '{', row: 0 }
+		]);
 	});
 
 	it('only rejects form fields that cannot survive the wire', () => {
@@ -526,6 +560,17 @@ describe('header and parameter validation', () => {
 			'cookie-value',
 			'query-param'
 		]);
+	});
+
+	it('lets a request whose cookie and query carry templates through', () => {
+		expect(
+			validateRequest({
+				url: 'https://example.com/?q={{ token }}',
+				headers: [{ name: 'Cookie', value: 'sid={{ token }}' }],
+				form: [],
+				body_type: 'json'
+			})
+		).toEqual([]);
 	});
 
 	it('validates form rows only when the Form-encode tab is active', () => {
