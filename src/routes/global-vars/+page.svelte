@@ -76,6 +76,16 @@
 		return $t('vars.nameDuplicate', { name });
 	}
 
+	/**
+	 * A backend code becomes its localized text and any other text is shown as it came.
+	 * A failure that carries **no** text reads the key of the action that failed, so the
+	 * toast names the operation instead of the generic error.
+	 */
+	function varFailure(error: unknown, fallbackKey: string): string {
+		const text = error instanceof Error ? error.message : String(error ?? '');
+		return text ? describeVarError(text, $t) : $t(fallbackKey);
+	}
+
 	function clearReveal(id: string): void {
 		const timer = revealTimers.get(id);
 		if (timer) clearTimeout(timer);
@@ -149,7 +159,7 @@
 			// The reveal timer keeps the secret on screen for the time it was asked for,
 			// so a save does not hide the field the user is still typing in.
 		} catch (error) {
-			notifyError(describeVarError(error, $t) || $t('vars.saveFailed'));
+			notifyError(varFailure(error, 'vars.saveFailed'));
 		}
 	}
 
@@ -171,7 +181,7 @@
 			draft = { name: '', value: '', secure: draft.secure };
 			notify($t('vars.created'), 'success');
 		} catch (error) {
-			notifyError(describeVarError(error, $t) || $t('vars.saveFailed'));
+			notifyError(varFailure(error, 'vars.saveFailed'));
 		}
 	}
 
@@ -206,7 +216,7 @@
 			secretless[row.id] = (row.value ?? '') === '';
 			notify($t('vars.updated'), 'success');
 		} catch (error) {
-			notifyError(describeVarError(error, $t) || $t('vars.saveFailed'));
+			notifyError(varFailure(error, 'vars.saveFailed'));
 		}
 	}
 
@@ -227,7 +237,7 @@
 			clearReveal(row.id);
 			notify($t('vars.updated'), 'success');
 		} catch (error) {
-			notifyError(describeVarError(error, $t) || $t('vars.saveFailed'));
+			notifyError(varFailure(error, 'vars.saveFailed'));
 		}
 	}
 
@@ -278,7 +288,7 @@
 				try {
 					vars = await listGlobalVars();
 				} catch (error) {
-					notifyError(describeVarError(error, $t) || $t('vars.loadFailed'));
+					notifyError(varFailure(error, 'vars.loadFailed'));
 				} finally {
 					loading = false;
 				}

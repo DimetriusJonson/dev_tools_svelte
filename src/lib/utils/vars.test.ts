@@ -9,6 +9,7 @@ import {
 	extractTemplateNames,
 	requestHasTemplates,
 	referencedVarNames,
+	soapHasTemplates,
 	templateFor,
 	validateVarName,
 	type TemplateSource
@@ -147,6 +148,19 @@ describe('where a request can carry a template', () => {
 		expect(requestHasTemplates(source)).toBe(true);
 	});
 
+	it('scans a SOAP call over its envelope and the whole header table', () => {
+		// A SOAP call has no URL table, query rows or Form tabs, so those places cannot
+		// appear here; the header **names** are read like the REST table's.
+		expect(soapHasTemplates({ body: '<i>plain</i>', headers: [] })).toBe(false);
+		expect(soapHasTemplates({ body: '<i>{{id}}</i>', headers: [] })).toBe(true);
+		expect(
+			soapHasTemplates({ body: '<i>plain</i>', headers: [{ name: 'X-Token', value: '{{t}}' }] })
+		).toBe(true);
+		expect(
+			soapHasTemplates({ body: '<i>plain</i>', headers: [{ name: '{{name}}', value: 'v' }] })
+		).toBe(true);
+	});
+
 	it('names every variable once, across all the places at once', () => {
 		const source = request({
 			url: 'https://example.com/p?id={{id}}',
@@ -201,12 +215,28 @@ describe('backend error texts', () => {
 		expect(describeVarError('invalid-value:Authorization=␍', say)).toBe(
 			say('vars.invalidValue', { field: 'Authorization', char: '␍' })
 		);
+		expect(describeVarError('invalid-value:note=U+0000', say)).toBe(
+			say('vars.invalidValue', { field: 'note', char: 'U+0000' })
+		);
+		// A multipart part name is not an RFC token in Rust, so it may itself contain `=`;
+		// the glyph is still the text after the last one.
+		expect(describeVarError('invalid-value:a=b=␊', say)).toBe(
+			say('vars.invalidValue', { field: 'a=b', char: '␊' })
+		);
 	});
 
-	it('shows a message it does not know verbatim, and the generic one for nothing', () => {
+	it('shows a message it does not know verbatim, and nothing for an empty one', () => {
 		const say = translate();
 		expect(describeVarError('Could not reach the server', say)).toBe('Could not reach the server');
-		expect(describeVarError('', say)).toBe(say('common.error'));
+		// An empty failure answers `''` so the caller's fallback names the action that
+		// failed rather than a generic error, and an `Error` is read through its `message`
+		// the way `notifyError` reads it — a browser failure keeps its own wording.
+		expect(describeVarError('', say)).toBe('');
+		expect(describeVarError(undefined, say)).toBe('');
+		expect(describeVarError(new Error('unknown-var:token'), say)).toBe(
+			say('vars.unknown', { name: 'token' })
+		);
+		expect(describeVarError(new TypeError('Failed to fetch'), say)).toBe('Failed to fetch');
 	});
 
 	it('masks a safe value with the same text the dump uses', () => {

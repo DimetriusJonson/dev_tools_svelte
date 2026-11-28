@@ -138,6 +138,19 @@ export function requestHasTemplates(source: TemplateSource): boolean {
 }
 
 /**
+ * Whether a SOAP call carries a template. It has no URL table, query rows or Form tabs,
+ * so the places to scan are the envelope and the header table — the header **names**
+ * included, because the backend refuses a template there rather than substituting it.
+ */
+export function soapHasTemplates(source: { body: string; headers: RestProperty[] }): boolean {
+	return [
+		source.body,
+		...source.headers.map((row) => row.name),
+		...source.headers.map((row) => row.value)
+	].some(containsTemplate);
+}
+
+/**
  * Names the request mentions, deduplicated. Query values are read decoded, because
  * the URL field stores `{{ token }}` as `%7B%7Btoken%7D%7D`.
  */
@@ -153,10 +166,13 @@ export function referencedVarNames(source: TemplateSource): string[] {
 
 /**
 * A localized explanation of a backend error. Unknown text is returned verbatim so
-* nothing is hidden behind a generic message.
+* nothing is hidden behind a generic message, and an empty one answers `''` so the
+* caller's own fallback names the failed action. An `Error` is read through its
+* `message`, like `notifyError` does, so a browser failure keeps its own wording
+* instead of gaining an `Error: ` prefix.
 */
 export function describeVarError(error: unknown, t: Translate): string {
-	const text = String(error ?? '');
+	const text = error instanceof Error ? error.message : String(error ?? '');
 	const unknown = /^unknown-var:(.*)$/.exec(text);
 	if (unknown) return t('vars.unknown', { name: unknown[1] });
 
@@ -175,8 +191,9 @@ export function describeVarError(error: unknown, t: Translate): string {
 	if (invalid) return t('vars.nameInvalid', { name: invalid[1] });
 
 	// `<field>=<char>`: the backend found a control character in the text a variable
-	// produced, which client validation could not see.
-	const invalidValue = /^invalid-value:([^=]*)=(.*)$/.exec(text);
+	// produced, which client validation could not see. The field is read up to the **last**
+	// `=` because a multipart part name is not an RFC token in Rust and may contain one.
+	const invalidValue = /^invalid-value:(.*)=([^=]*)$/.exec(text);
 	if (invalidValue) {
 		return t('vars.invalidValue', { field: invalidValue[1], char: invalidValue[2] });
 	}
@@ -184,5 +201,5 @@ export function describeVarError(error: unknown, t: Translate): string {
 	const unresolved = /^unresolved-template:(.*)$/.exec(text);
 	if (unresolved) return t('vars.unsupportedTemplate', { name: unresolved[1] });
 
-	return text || t('common.error');
+	return text;
 }

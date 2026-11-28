@@ -1533,6 +1533,19 @@ fn reject_unsupported_templates(
     Ok(())
 }
 
+/// A template in the host or the port makes the URL unparseable, so `normalize_rest_url`
+/// fails before `substitute_url` can name it. The client refuses the same request as an
+/// unsupported template, so the backend reports the same thing instead of a port error.
+fn normalize_url_with_vars(url: &str) -> Result<Url, String> {
+    normalize_rest_url(url).map_err(|error| {
+        let authority = url.split(['?', '#']).next().unwrap_or(url);
+        match vars::first_template_name(&vars::decoded_braces(authority)) {
+            Some(name) => format!("unresolved-template:{name}"),
+            None => error,
+        }
+    })
+}
+
 /// Every value a request needs before it goes on the wire. Keyring reads are blocking,
 /// so they happen outside the async runtime instead of stalling it.
 async fn load_request_values(
@@ -1545,7 +1558,7 @@ async fn load_request_values(
     form: &[RestProperty],
     multipart: &[RestProperty],
 ) -> Result<VarValues, String> {
-    let parsed = normalize_rest_url(url)?;
+    let parsed = normalize_url_with_vars(url)?;
     let names = referenced_var_names(&parsed, headers, body, body_type, form, multipart);
     if names.is_empty() {
         return Ok(VarValues::default());
@@ -1576,7 +1589,7 @@ fn prepare_call(
     files: &[RestFileRow],
     values: &VarValues,
 ) -> Result<PreparedCall, String> {
-    let parsed = normalize_rest_url(url)?;
+    let parsed = normalize_url_with_vars(url)?;
     reject_unsupported_templates(&parsed, headers, body_type, multipart, files)?;
     let method = Method::from_bytes(method.trim().to_ascii_uppercase().as_bytes())
         .map_err(|_| format!("Invalid HTTP method: {method}"))?;
@@ -2796,11 +2809,12 @@ mod tests {
             &values,
         )
         .expect("prepared call");
-        // `query_pairs` decodes, so both the `+` and the `%20` spellings are found, and the
-        // rebuilt query re-encodes every value with the form rules: a space becomes `+`.
+        // `form_decode` reads both the `+` and the `%20` spellings, and only the pair the
+        // substitution changed is re-encoded: a space in the new value becomes `+`, while
+        // a pair nobody touched keeps the escape the user wrote.
         assert_eq!(
             call.url.to_string(),
-            "https://example.com/search?q=hello+world&keep=a+b"
+            "https://example.com/search?q=hello+world&keep=a%20b"
         );
     }
 
@@ -2840,10 +2854,10 @@ mod tests {
 
     #[test]
     fn a_template_in_an_unsupported_place_is_reported() {
-        let values = plain_values(&[("host", "example.com")]);
+        let values = plain_values(&[("segment", "example.com")]);
         let path_error = prepare_call(
             "GET",
-            "https://example.com/{{host}}",
+            "https://example.com/{{segment}}",
             &[],
             "",
             "json",
@@ -2853,12 +2867,12 @@ mod tests {
             &values,
         )
         .unwrap_err();
-        assert_eq!(path_error, "unresolved-template:host");
+        assert_eq!(path_error, "unresolved-template:segment");
 
         let name_error = prepare_call(
             "GET",
             "https://example.com/p",
-            &[property("{{host}}", "value")],
+            &[property("{{segment}}", "value")],
             "",
             "json",
             &[],
@@ -2867,7 +2881,56 @@ mod tests {
             &values,
         )
         .unwrap_err();
-        assert_eq!(name_error, "unresolved-template:host");
+        assert_eq!(name_error, "unresolved-template:segment");
+    }
+
+    #[test]
+    fn a_template_in_the_port_is_reported_as_an_unsupported_template() {
+        // A brace in the port makes the URL unparseable, so the failure arrives before
+        // the resolver runs. The client already refuses it as a template, and the
+        // backend must name the same problem rather than a port number.
+        let error = prepare_call(
+            "GET",
+            "https://example.com:{{port}}/p",
+            &[],
+            "",
+            "json",
+            &[],
+            &[],
+            &[],
+            &plain_values(&[("port", "8080")]),
+        )
+        .unwrap_err();
+        assert_eq!(error, "unresolved-template:port");
+
+        // A URL that is simply malformed still reports why, with no template invented.
+        let malformed = prepare_call(
+            "GET",
+            "https://ex ample.com/p",
+            &[],
+            "",
+            "json",
+            &[],
+            &[],
+            &[],
+            &VarValues::default(),
+        )
+        .unwrap_err();
+        assert!(malformed.starts_with("Invalid URL"), "{malformed}");
+    }
+
+    #[test]
+    fn a_request_that_only_references_unsupported_places_loads_no_values() {
+        // Nothing is read from the store for a request that is refused anyway, so the
+        // scanner must stay scoped to the positions the resolver actually substitutes.
+        let url = Url::parse("https://example.com/%7b%7btoken%7d%7d?a=1").expect("url");
+        assert!(referenced_var_names(&url, &[], "", "json", &[], &[]).is_empty());
+
+        let url = Url::parse("https://example.com/p?a=%7B%7Btoken%7D%7D").expect("url");
+        assert_eq!(
+            referenced_var_names(&url, &[], "", "json", &[], &[]),
+            vec!["token".to_string()]
+        );
     }
 
     #[test]

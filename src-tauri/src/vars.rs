@@ -12,8 +12,9 @@ pub const KEYRING_SERVICE: &str = "app.webdev.usefultools.global-vars";
 /// The text a safe variable shows in a saved raw-request dump: the real value and its
 /// length never reach the database or the frontend.
 pub const SECRET_MASK: &str = "********";
-/// Windows Credential Manager refuses anything longer than this.
-pub const MAX_SECRET_BYTES: usize = 2048;
+/// Windows Credential Manager refuses anything longer than this. Counted in characters,
+/// which is what the localized limit says; a Cyrillic secret has more bytes than chars.
+pub const MAX_SECRET_CHARS: usize = 2048;
 pub const MAX_NAME_CHARS: usize = 64;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -201,42 +202,42 @@ pub fn substitute_url(url: &Url, values: &HashMap<String, String>) -> Result<Url
     if let Some(name) = first_template_name(&decoded_braces(url.path())) {
         return Err(format!("unresolved-template:{name}"));
     }
-    if url.query().is_none() {
+    let Some(raw_query) = url.query() else {
         return Ok(url.clone());
-    }
+    };
 
-    let pairs: Vec<(String, String)> = url
-        .query_pairs()
-        .map(|(name, value)| (name.to_string(), value.to_string()))
-        .collect();
-    let mut rebuilt: Vec<(String, String)> = Vec::with_capacity(pairs.len());
+    // The raw segments are what gets written back, so a pair whose value did not change
+    // keeps the spelling the user typed: a bare flag gains no `=`, an empty pair survives
+    // and an existing `%20` is not rewritten as `+`. `form_decode` is the decoding
+    // `query_pairs` would apply, which is the form a template typed into the Query table
+    // arrives in.
+    let segments: Vec<&str> = raw_query.split('&').collect();
+
+    let mut rebuilt: Vec<String> = Vec::with_capacity(segments.len());
     let mut changed = false;
-    for (name, value) in pairs {
-        // `query_pairs` hands the name back percent-decoded, which is the form a
-        // template typed into the Query table arrives in.
-        if let Some(inner) = first_template_name(&name) {
+    for segment in segments {
+        let (raw_name, raw_value) = match segment.split_once('=') {
+            Some((name, value)) => (name, value),
+            None => (segment, ""),
+        };
+        if let Some(inner) = first_template_name(&form_decode(raw_name)) {
             return Err(format!("unresolved-template:{inner}"));
         }
+        let value = form_decode(raw_value);
         let replaced = substitute(&value, values)?;
-        if replaced != value {
-            changed = true;
+        if replaced == value {
+            rebuilt.push(segment.to_string());
+            continue;
         }
-        rebuilt.push((name, replaced));
+        changed = true;
+        rebuilt.push(format!("{raw_name}={}", form_encode(&replaced)));
     }
 
     if !changed {
         return Ok(url.clone());
     }
     let mut result = url.clone();
-    {
-        let mut query = result.query_pairs_mut();
-        query.clear();
-        query.extend_pairs(
-            rebuilt
-                .iter()
-                .map(|(name, value)| (name.as_str(), value.as_str())),
-        );
-    }
+    result.set_query(Some(&rebuilt.join("&")));
     Ok(result)
 }
 
@@ -323,10 +324,64 @@ fn duplicate_error(name: &str, error: rusqlite::Error) -> String {
 }
 
 fn check_secret_size(value: &str) -> Result<(), String> {
-    if value.len() > MAX_SECRET_BYTES {
+    if value.chars().count() > MAX_SECRET_CHARS {
         return Err("secret-too-large".to_string());
     }
     Ok(())
+}
+
+/// Form encoding of a substituted query value, the same rules `query_pairs_mut` applies:
+/// alphanumerics and `*`, `-`, `.`, `_` stay, a space becomes `+`, everything else is
+/// percent-escaped with uppercase hex.
+fn form_encode(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'*' | b'-' | b'.' | b'_' => {
+                encoded.push(byte as char);
+            }
+            b' ' => encoded.push('+'),
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
+/// The decoding `query_pairs` applies: `+` is a space and a complete `%XX` escape becomes
+/// its byte, so a template typed into the Query table arrives in the form `substitute`
+/// reads. An incomplete escape stays literal.
+fn form_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut decoded: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => {
+                decoded.push(b' ');
+                index += 1;
+            }
+            b'%' if index + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[index + 1..index + 3])
+                    .ok()
+                    .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+                match hex {
+                    Some(byte) => {
+                        decoded.push(byte);
+                        index += 3;
+                    }
+                    None => {
+                        decoded.push(b'%');
+                        index += 1;
+                    }
+                }
+            }
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
 }
 
 fn validate_name(name: &str) -> Result<String, String> {
@@ -476,11 +531,9 @@ pub fn update(
 
     if was_secure && !input.secure {
         // secure -> plain: the secret is pulled into SQLite on purpose, then erased.
+        // The column has no size limit, so the keyring's limit no longer applies here.
         let value = match &input.value {
-            Some(value) => {
-                check_secret_size(value)?;
-                value.clone()
-            }
+            Some(value) => value.clone(),
             None => secrets
                 .get(id)?
                 .ok_or_else(|| format!("secret-missing:{current_name}"))?,
@@ -749,6 +802,40 @@ mod tests {
     }
 
     #[test]
+    fn deleting_a_secure_variable_without_an_entry_still_removes_the_row() {
+        // A row whose secret is already gone (no credential store, or an entry deleted
+        // outside the app) must still disappear rather than stay undeletable.
+        let conn = memory_db();
+        let secrets = MemorySecrets::new();
+        let created = create(&conn, &secrets, &input("token", true, None)).expect("secure row");
+        assert_eq!(secrets.len(), 0);
+        delete(&conn, &secrets, &created.id).expect("deleted");
+        assert!(list(&conn).expect("list").is_empty());
+    }
+
+    #[test]
+    fn secure_to_plain_with_a_revealed_value_writes_that_value() {
+        let conn = memory_db();
+        let secrets = MemorySecrets::new();
+        let created = create(&conn, &secrets, &input("token", true, Some("s3cret"))).expect("created");
+        let moved = update(&conn, &secrets, &created.id, &input("token", false, Some("typed")))
+            .expect("moved");
+        assert_eq!(moved.value.as_deref(), Some("typed"));
+        assert_eq!(secrets.len(), 0);
+    }
+
+    #[test]
+    fn secure_to_plain_with_an_empty_value_leaves_the_column_empty() {
+        let conn = memory_db();
+        let secrets = MemorySecrets::new();
+        let created = create(&conn, &secrets, &input("token", true, Some("s3cret"))).expect("created");
+        let moved = update(&conn, &secrets, &created.id, &input("token", false, Some("")))
+            .expect("moved");
+        assert_eq!(moved.value.as_deref(), Some(""));
+        assert_eq!(secrets.len(), 0);
+    }
+
+    #[test]
     fn a_duplicate_name_in_another_case_is_refused() {
         let conn = memory_db();
         let secrets = MemorySecrets::new();
@@ -770,11 +857,65 @@ mod tests {
     fn a_secure_value_over_the_limit_is_refused() {
         let conn = memory_db();
         let secrets = MemorySecrets::new();
-        let long = "a".repeat(MAX_SECRET_BYTES + 1);
+        let long = "a".repeat(MAX_SECRET_CHARS + 1);
         assert_eq!(
             create(&conn, &secrets, &input("token", true, Some(&long))).unwrap_err(),
             "secret-too-large"
         );
+        assert_eq!(secrets.len(), 0);
+
+        // The limit counts characters, as the localized message promises, so a multibyte
+        // secret of the same length is refused too — and one that fits is accepted even
+        // though it is twice as many bytes.
+        let cyrillic = "т".repeat(MAX_SECRET_CHARS + 1);
+        assert_eq!(
+            create(&conn, &secrets, &input("token", true, Some(&cyrillic))).unwrap_err(),
+            "secret-too-large"
+        );
+        let fits = "т".repeat(MAX_SECRET_CHARS);
+        assert_eq!(fits.len(), MAX_SECRET_CHARS * 2);
+        create(&conn, &secrets, &input("token", true, Some(&fits))).expect("fits");
+    }
+
+    #[test]
+    fn the_limit_applies_to_every_write_into_the_secret_store() {
+        let conn = memory_db();
+        let secrets = MemorySecrets::new();
+        let long = "a".repeat(MAX_SECRET_CHARS + 1);
+
+        let secure = create(&conn, &secrets, &input("token", true, Some("first"))).expect("secure");
+        assert_eq!(
+            update(&conn, &secrets, &secure.id, &input("token", true, Some(&long))).unwrap_err(),
+            "secret-too-large"
+        );
+        assert_eq!(secrets.get(&secure.id).expect("secret").as_deref(), Some("first"));
+
+        let plain = create(&conn, &secrets, &input("base", false, Some("x"))).expect("plain");
+        assert_eq!(
+            update(&conn, &secrets, &plain.id, &input("base", true, Some(&long))).unwrap_err(),
+            "secret-too-large"
+        );
+        assert_eq!(secrets.len(), 1);
+        assert_eq!(
+            conn
+                .query_row("SELECT value FROM global_vars WHERE id = ?1", params![plain.id], |row| row.get::<_, String>(0))
+                .expect("stored"),
+            "x"
+        );
+    }
+
+    #[test]
+    fn moving_a_long_secret_out_of_the_store_is_not_limited() {
+        // SQLite has no size limit, so the keyring's cap must not block secure -> plain.
+        let conn = memory_db();
+        let secrets = MemorySecrets::new();
+        let long = "a".repeat(MAX_SECRET_CHARS + 1);
+        let created = create(&conn, &secrets, &input("token", true, Some("short"))).expect("secure");
+        secrets.set(&created.id, &long).expect("secret");
+
+        let moved = update(&conn, &secrets, &created.id, &input("token", false, None)).expect("moved");
+        assert!(!moved.secure);
+        assert_eq!(moved.value.as_deref(), Some(long.as_str()));
         assert_eq!(secrets.len(), 0);
     }
 
@@ -785,6 +926,17 @@ mod tests {
         let created = create(&conn, &secrets, &input("token", true, Some("s3cret"))).expect("created");
         assert_eq!(list(&conn).expect("list")[0].value, None);
         assert_eq!(reveal(&conn, &secrets, &created.id).expect("reveal"), "s3cret");
+    }
+
+    #[test]
+    fn list_is_ordered_by_name_ignoring_case() {
+        let conn = memory_db();
+        let secrets = MemorySecrets::new();
+        create(&conn, &secrets, &input("zeta", false, Some("1"))).expect("zeta");
+        create(&conn, &secrets, &input("Alpha", false, Some("2"))).expect("alpha");
+        create(&conn, &secrets, &input("beta", false, Some("3"))).expect("beta");
+        let names: Vec<String> = list(&conn).expect("list").into_iter().map(|var| var.name).collect();
+        assert_eq!(names, vec!["Alpha".to_string(), "beta".to_string(), "zeta".to_string()]);
     }
 
     #[test]
@@ -822,6 +974,21 @@ mod tests {
         assert_eq!(values.masked.get("base").unwrap(), "https://a");
         assert_eq!(values.real.get("token").unwrap(), "s3cret");
         assert_eq!(values.masked.get("token").unwrap(), SECRET_MASK);
+    }
+
+    #[test]
+    fn a_name_mentioned_twice_is_read_once() {
+        let conn = memory_db();
+        let secrets = MemorySecrets::new();
+        create(&conn, &secrets, &input("token", true, Some("s3cret"))).expect("secure");
+        let values = load_values(
+            &conn,
+            &secrets,
+            &["token".to_string(), "TOKEN".to_string(), "Token".to_string()],
+        )
+        .expect("values");
+        assert_eq!(values.real.len(), 1);
+        assert_eq!(values.masked.len(), 1);
     }
 
     #[test]
@@ -882,10 +1049,51 @@ mod tests {
     #[test]
     fn a_template_in_the_path_or_a_parameter_name_is_rejected() {
         let values = HashMap::new();
-        let url = Url::parse("https://example.com/{{host}}?a=1").expect("url");
-        assert_eq!(substitute_url(&url, &values).unwrap_err(), "unresolved-template:host");
+        let url = Url::parse("https://example.com/{{segment}}?a=1").expect("url");
+        assert_eq!(substitute_url(&url, &values).unwrap_err(), "unresolved-template:segment");
         let url = Url::parse("https://example.com/p?{{name}}=1").expect("url");
         assert_eq!(substitute_url(&url, &values).unwrap_err(), "unresolved-template:name");
+    }
+
+    #[test]
+    fn a_template_in_the_host_is_rejected() {
+        // `Url::parse` keeps a typed brace in the host literally and decodes an
+        // already-encoded one, so both spellings reach the same check.
+        let values = HashMap::new();
+        let url = Url::parse("https://{{token}}/x").expect("url");
+        assert_eq!(url.host_str(), Some("{{token}}"));
+        assert_eq!(substitute_url(&url, &values).unwrap_err(), "unresolved-template:host");
+
+        let url = Url::parse("https://%7b%7btoken%7d%7d/x").expect("url");
+        assert_eq!(url.host_str(), Some("{{token}}"));
+        assert_eq!(substitute_url(&url, &values).unwrap_err(), "unresolved-template:host");
+    }
+
+    #[test]
+    fn a_substituted_value_does_not_re_spell_the_pairs_around_it() {
+        // The rebuild only touches the pair it changed: a bare flag keeps no `=`, an
+        // empty pair survives, and an existing escape stays as the user wrote it.
+        let mut values = HashMap::new();
+        values.insert("q".to_string(), "v".to_string());
+        let url = Url::parse("https://example.com/p?debug&a=1&&keep=a%20b&x=%7B%7Bq%7D%7D&y=%5E")
+            .expect("url");
+        let replaced = substitute_url(&url, &values).expect("substituted");
+        assert_eq!(
+            replaced.query().unwrap(),
+            "debug&a=1&&keep=a%20b&x=v&y=%5E"
+        );
+    }
+
+    #[test]
+    fn a_substituted_value_is_form_encoded() {
+        let mut values = HashMap::new();
+        values.insert("q".to_string(), "hello world/ä".to_string());
+        let url = Url::parse("https://example.com/p?x=%7B%7Bq%7D%7D").expect("url");
+        let replaced = substitute_url(&url, &values).expect("substituted");
+        // The same rules `query_pairs_mut` used before: a space becomes `+`, everything
+        // else outside the unreserved set is percent-escaped with uppercase hex.
+        assert_eq!(replaced.query().unwrap(), "x=hello+world%2F%C3%A4");
+        assert_eq!(replaced.query_pairs().next().unwrap().1, "hello world/ä");
     }
 
     #[test]

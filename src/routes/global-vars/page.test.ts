@@ -39,6 +39,8 @@ const safe: Row = {
 let stored: Row[];
 let secrets: Record<string, string>;
 let storeBroken = false;
+/** Set to make `list_global_vars` fail; an empty string is a failure with no text. */
+let listFailure: string | null = null;
 let calls: Array<[string, Record<string, unknown>]>;
 let component: ReturnType<typeof mount> | undefined;
 
@@ -59,11 +61,13 @@ function desktopBuild(rows: Row[]): void {
 		if (row.secure && row.secret) secrets[row.id] = row.secret;
 	}
 	storeBroken = false;
+	listFailure = null;
 	calls = [];
 	(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {
 		invoke: async (command: string, args: Record<string, unknown> = {}) => {
 			calls.push([command, args]);
 			if (command === 'list_global_vars') {
+				if (listFailure !== null) failBackend(listFailure);
 				return stored.map(({ secret: _secret, ...row }) => row);
 			}
 			if (command === 'create_global_var') {
@@ -547,5 +551,75 @@ describe('Global variables page', () => {
 		expect(argsOf('delete_global_var')).toEqual([{ id: 'v1' }]);
 		expect(argsOf('update_global_var')).toHaveLength(0);
 		expect(nameInputs()).toHaveLength(0);
+	});
+
+	it('copies the template of a row, not its value', async () => {
+		desktopBuild([plain, safe]);
+		const writeText = vi.fn(async () => {});
+		// `copyText` only uses the clipboard in a secure context, which jsdom does not claim.
+		Object.defineProperty(window, 'isSecureContext', { value: true, configurable: true });
+		Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+
+		component = mount(VariablesPage, { target: document.body });
+		flushSync();
+		await loaded();
+
+		buttonByLabel('Copy the template {{ base }}')?.click();
+		await until(() => expect(writeText).toHaveBeenCalledWith('{{ base }}'));
+		await until(() =>
+			expect(get(toasts).map((toast) => toast.message)).toContain('Template copied')
+		);
+		// A safe row copies the same shape: the secret is never what goes to the clipboard.
+		expect(writeText.mock.calls.flat()).not.toContain('s3cret');
+	});
+
+	it('names the load action when the list answers no reason', async () => {
+		desktopBuild([plain]);
+		listFailure = '';
+		component = mount(VariablesPage, { target: document.body });
+		flushSync();
+
+		await until(() =>
+			expect(get(toasts).map((toast) => toast.message)).toContain(
+				'Could not load global variables'
+			)
+		);
+		expect(document.querySelector('#var-draft-name')).toBeTruthy();
+	});
+
+	it('shows the database reason of a failed load as it came', async () => {
+		desktopBuild([plain]);
+		listFailure = 'no such table: global_vars';
+		component = mount(VariablesPage, { target: document.body });
+		flushSync();
+
+		await until(() =>
+			expect(get(toasts).map((toast) => toast.message)).toContain('no such table: global_vars')
+		);
+		expect(get(toasts).map((toast) => toast.message).join(' ')).not.toContain(
+			'Could not load global variables'
+		);
+	});
+
+	it('names the save action when a write answers no reason', async () => {
+		desktopBuild([plain]);
+		component = mount(VariablesPage, { target: document.body });
+		flushSync();
+		await loaded();
+
+		vi.useFakeTimers();
+		// The backend rejects with an empty text, which no code prefix can explain.
+		(window as unknown as { __TAURI_INTERNALS__: { invoke: unknown } }).__TAURI_INTERNALS__ = {
+			invoke: async (command: string) => {
+				calls.push([command, {}]);
+				if (command === 'update_global_var') failBackend('');
+				return null;
+			}
+		};
+		type(valueInput(rowOf('base')!)!, 'changed');
+		await vi.advanceTimersByTimeAsync(500);
+		flushSync();
+
+		expect(get(toasts).map((toast) => toast.message)).toContain('Could not save the variable');
 	});
 });

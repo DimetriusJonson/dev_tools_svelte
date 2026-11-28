@@ -76,7 +76,7 @@
 		propertyFieldHint,
 		validationMessage
 	} from '$lib/utils/validation';
-	import { requestHasTemplates, referencedVarNames } from '$lib/utils/vars';
+	import { describeVarError, requestHasTemplates, referencedVarNames } from '$lib/utils/vars';
 
 	const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
 	const BODY_TYPES: BodyType[] = ['json', 'xml', 'text', 'form', 'multipart'];
@@ -514,7 +514,9 @@
 			if (aborting || String(error).toLowerCase().includes('aborted')) {
 				notify($t('rest.aborted'), 'info');
 			} else {
-				notifyError(error, $t('rest.requestFailed'));
+				// A substitution failure arrives as a code (`unknown-var:`, `secret-store:`),
+				// so it is localized here rather than shown as backend text.
+				notifyError(describeVarError(error, $t), $t('rest.requestFailed'));
 			}
 		} finally {
 			running = false;
@@ -819,7 +821,7 @@
 			}
 			notify($t('rest.downloaded', { name }), 'success');
 		} catch (error) {
-			notifyError(error, $t('rest.downloadFailed'));
+			notifyError(describeVarError(error, $t), $t('rest.downloadFailed'));
 		} finally {
 			downloading = false;
 		}

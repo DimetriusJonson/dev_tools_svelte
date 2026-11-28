@@ -60,7 +60,7 @@
 		propertyFieldHint,
 		validationMessage
 	} from '$lib/utils/validation';
-	import { containsTemplate } from '$lib/utils/vars';
+	import { describeVarError, soapHasTemplates } from '$lib/utils/vars';
 	import {
 		SOAP_METHOD,
 		buildEnvelope,
@@ -198,10 +198,10 @@
 	);
 
 	// `{{ name }}` is expanded by the backend when the call is built, so the preview of
-	// the exchange keeps showing the template itself.
+	// the exchange keeps showing the template itself. A header **name** is scanned too:
+	// the backend refuses a template there, and this flag is what labels the `Raw` tab.
 	const hasVarTemplates = $derived(
-		containsTemplate(requestBody) ||
-			userHeaders.some((row) => containsTemplate(row.value))
+		soapHasTemplates({ body: requestBody, headers: userHeaders })
 	);
 
 	/** True when a row carries a name the binding already sends on its own. */
@@ -397,7 +397,7 @@
 			}
 			notify($t('rest.downloaded', { name }), 'success');
 		} catch (error) {
-			notifyError(error, $t('rest.downloadFailed'));
+			notifyError(describeVarError(error, $t), $t('rest.downloadFailed'));
 		} finally {
 			downloading = false;
 		}
@@ -711,7 +711,9 @@
 			if (aborting || String(error).toLowerCase().includes('cancel')) {
 				notify($t('rest.aborted'), 'info');
 			} else {
-				notifyError(error, $t('rest.requestFailed'));
+				// The SOAP call goes through the REST executor, so a substitution failure
+				// arrives as a code and is localized rather than shown as backend text.
+				notifyError(describeVarError(error, $t), $t('rest.requestFailed'));
 			}
 		} finally {
 			running = false;
