@@ -26,8 +26,10 @@ const GENERATED_PREFIX: &str = "ns";
 const PLACEHOLDER: &str = "?";
 
 /// SoapUI's own markers above a block, spelled exactly as SoapUI spells them.
-/// An optional element is *not* commented out — the marker says it may go.
-const OPTIONAL_NOTE: &str = "Optional:";
+/// An optional element is *not* commented out — the marker says it may go. The
+/// optional marker is spelled without the colon and appended to the element's
+/// own line, so it no longer spends a line of its own.
+const OPTIONAL_NOTE: &str = "Optional";
 const ZERO_OR_MORE: &str = "Zero or more repetitions:";
 const ONE_OR_MORE: &str = "One or more repetitions:";
 const CHOICE_NOTE: &str = "Choice:";
@@ -1000,13 +1002,14 @@ fn note(pad: &str, text: &str) -> String {
     format!("{pad}<!-- {} -->", soften(text))
 }
 
-/// SoapUI's marker above a block, printed without the spaces of [`note`] so the
-/// template reads like the one SoapUI writes (`<!--Optional:-->`).
+/// SoapUI's marker, spelled without the spaces of [`note`]. The optional marker
+/// is appended to the element's own line (`<tag>?</tag> <!--Optional-->`) rather
+/// than spending a line of its own.
 fn marker(pad: &str, text: &str) -> String {
     format!("{pad}<!--{}-->", soften(text))
 }
 
-/// A whole-line marker comment (`<!--Optional:-->`). It is a comment already, so
+/// A whole-line marker comment (`<!--Optional-->`). It is a comment already, so
 /// wrapping it again would nest markers for no reason. `<!---->` is an empty
 /// comment rather than a marker, and a note written with spaces (`<!-- x -->`)
 /// is not one either: only SoapUI's tight spelling is. Returns the text inside.
@@ -1065,14 +1068,38 @@ fn comment_block(lines: &[String]) -> Vec<String> {
         .iter()
         .filter_map(|line| {
             let pad = &line[..line.len() - line.trim_start().len()];
-            let (body, tight) = comment_text(line);
+            let trimmed = line.trim();
+            // A trailing inline marker (`<!--Optional-->`) belongs to the line's
+            // own markup, not to the wrapper: keep it outside the comment so a
+            // commented branch reads `<!-- <tag>?</tag> --> <!--Optional-->`.
+            // A line that is already a comment is unwrapped by `comment_text`
+            // below, never split here.
+            let (body, trailing) = if trimmed.starts_with("<!--") {
+                (trimmed, None)
+            } else {
+                match trimmed.rsplit_once("<!--") {
+                    Some((before, after)) if after.ends_with("-->") && !before.contains("-->") => {
+                        let marker = after[..after.len() - "-->".len()].trim();
+                        (before.trim(), Some(format!("<!--{}-->", marker)))
+                    }
+                    _ => (trimmed, None),
+                }
+            };
+            let (body, tight) = comment_text(body);
             if body.is_empty() {
                 return None;
             }
-            if tight {
-                return Some(format!("{pad}<!--{body}-->"));
+            let wrapped = if tight {
+                format!("{pad}<!--{body}-->")
+            } else {
+                format!("{pad}<!-- {body} -->")
+            };
+            match trailing {
+                Some(trail) if trail.trim().starts_with("<!--") => {
+                    Some(format!("{wrapped} {trail}"))
+                }
+                _ => Some(wrapped),
             }
-            Some(format!("{pad}<!-- {body} -->"))
         })
         .collect()
 }
@@ -1121,6 +1148,10 @@ fn fields_of(kind: &Kind) -> &[Field] {
 impl Printer {
     /// Markup of one field, with nothing commented yet and no cardinality note.
     fn markup(&self, field: &Field, indent: usize) -> Vec<String> {
+        self.markup_inner(field, indent, true)
+    }
+
+    fn markup_inner(&self, field: &Field, indent: usize, markers: bool) -> Vec<String> {
         let pad = "  ".repeat(indent);
         let tag = self.qualified(&field.uri, &field.local);
         let mut lines = Vec::new();
@@ -1157,7 +1188,7 @@ impl Printer {
                 let children: Vec<String> = fields
                     .iter()
                     .filter(|child| !child.attribute)
-                    .flat_map(|child| self.entry(child, indent + 1))
+                    .flat_map(|child| self.entry_inner(child, indent + 1, markers))
                     .collect();
                 if children.is_empty() {
                     // Only attributes here: a type derived from a simple one by
@@ -1176,7 +1207,14 @@ impl Printer {
             Kind::Choice { branches } => {
                 for branch in branches {
                     lines.push(marker(&pad, CHOICE_NOTE));
-                    lines.extend(comment_block(&self.entry(branch, indent)));
+                    // A branch is fully commented, so its per-element markers are
+                    // noise: the branch's own marker rides the commented block's
+                    // last line on its own line.
+                    let mut branch_lines = comment_block(&self.markup_inner(branch, indent, false));
+                    if let Some(text) = Self::field_marker_text(branch) {
+                        branch_lines.push(marker(&pad, text));
+                    }
+                    lines.extend(branch_lines);
                 }
             }
         }
@@ -1184,48 +1222,69 @@ impl Printer {
         lines
     }
 
+    /// The marker text a field carries, if any, computed from its cardinality.
+    fn field_marker_text(field: &Field) -> Option<&'static str> {
+        if field.occurs.max == UNBOUNDED {
+            Some(if field.occurs.min == 0 {
+                ZERO_OR_MORE
+            } else {
+                ONE_OR_MORE
+            })
+        } else if field.occurs.max > 1 {
+            (field.occurs.min == 0).then_some(OPTIONAL_NOTE)
+        } else if field.occurs.min == 0 {
+            Some(OPTIONAL_NOTE)
+        } else {
+            None
+        }
+    }
+
     /// Markup of one field with SoapUI's cardinality markers: an optional element
-    /// stays in the template under `<!--Optional:-->` so the user deletes the tag
-    /// they do not need, an unbounded one under a repetitions marker with a single
-    /// copy to duplicate, and a choice prints commented alternatives. A finite
-    /// `maxOccurs` needs no marker: it simply shows a couple of copies.
+    /// keeps the marker on its own closing line — `<tag>?</tag> <!--Optional-->`
+    /// — so the tag stays live markup and the marker no longer spends a line of
+    /// its own. An unbounded element carries the repetitions marker the same way
+    /// (appended to its single copy), and a finite `maxOccurs` needs no marker: it
+    /// simply shows a couple of copies.
     fn entry(&self, field: &Field, indent: usize) -> Vec<String> {
+        self.entry_inner(field, indent, true)
+    }
+
+    fn entry_inner(&self, field: &Field, indent: usize, markers: bool) -> Vec<String> {
         let pad = "  ".repeat(indent);
 
-        if field.occurs.max == UNBOUNDED {
-            let mut lines = vec![marker(
-                &pad,
-                if field.occurs.min == 0 {
-                    ZERO_OR_MORE
+        let marker_text = markers.then(|| Self::field_marker_text(field)).flatten();
+
+        let copies = if field.occurs.max == UNBOUNDED {
+            1
+        } else if field.occurs.max > 1 {
+            (field.occurs.max as usize).min(REPETITIONS)
+        } else {
+            1
+        };
+
+        let mut lines = Vec::new();
+        for _ in 0..copies {
+            lines.extend(self.markup_inner(field, indent, markers));
+        }
+
+        if let Some(text) = marker_text {
+            // A marker belongs on the element's own line, after its closing tag.
+            // A line that is already a comment (a `choice` branch, the `xsd:any`
+            // note) cannot hold a second one without breaking the one-comment-per
+            // -line rule: keep the marker on its own line for that case.
+            let inline = format!(" <!--{}-->", soften(text));
+            if let Some(last) = lines.last_mut() {
+                if last.trim().starts_with("<!--") {
+                    lines.push(marker(&pad, text));
                 } else {
-                    ONE_OR_MORE
-                },
-            )];
-            lines.extend(self.markup(field, indent));
-            return lines;
-        }
-
-        if field.occurs.max > 1 {
-            let copies = (field.occurs.max as usize).min(REPETITIONS);
-            let mut lines = Vec::new();
-            // An optional repeating block still says the tag may go, before the
-            // copies that show how many times it may come back.
-            if field.occurs.min == 0 {
-                lines.push(marker(&pad, OPTIONAL_NOTE));
+                    last.push_str(&inline);
+                }
+            } else {
+                lines.push(marker(&pad, text));
             }
-            for _ in 0..copies {
-                lines.extend(self.markup(field, indent));
-            }
-            return lines;
         }
 
-        if field.occurs.min == 0 {
-            let mut lines = vec![marker(&pad, OPTIONAL_NOTE)];
-            lines.extend(self.markup(field, indent));
-            return lines;
-        }
-
-        self.markup(field, indent)
+        lines
     }
 }
 
@@ -1394,8 +1453,8 @@ mod tests {
 
     #[test]
     fn comment_body_drops_the_markers_of_an_already_commented_line() {
-        assert_eq!(comment_body("<!--Optional:-->"), "Optional:");
-        assert_eq!(comment_body("<!-- <!--Optional:--> -->"), "Optional:");
+        assert_eq!(comment_body("<!--Optional-->"), "Optional");
+        assert_eq!(comment_body("<!-- <!--Optional--> -->"), "Optional");
         assert_eq!(
             comment_body("  <ns1>Login>?</ns1>Login>  "),
             "<ns1>Login>?</ns1>Login>"
@@ -1441,7 +1500,7 @@ mod tests {
             "  <!-- cycle in ns:a- -b -->"
         );
         assert_eq!(note("", "unknown type a--b"), "<!-- unknown type a- -b -->");
-        assert_eq!(marker("  ", "Optional:"), "  <!--Optional:-->");
+        assert_eq!(marker("  ", "Optional"), "  <!--Optional-->");
         assert_eq!(marker("", "a--b"), "<!--a- -b-->");
     }
 
@@ -1473,36 +1532,19 @@ mod tests {
         let xml = template_of(SAMPLE);
         // A commented `choice` branch of a complex type keeps every line's own
         // indentation, so the block nests the way the schema does once the user
-        // uncomments it.
+        // uncomments it. The branch's optional marker rides its own line: a
+        // commented block has no live tag to append it to.
         assert!(xml.contains("    <!-- <ns1:OrderRef> -->"), "{xml}");
         assert!(
             xml.contains("      <!-- <ns1:Position>?</ns1:Position> -->"),
             "{xml}"
         );
-        assert!(xml.contains("      <!--Optional:-->"), "{xml}");
         assert!(
             xml.contains("      <!-- <ns1:Note>?</ns1:Note> -->"),
             "{xml}"
         );
         assert!(xml.contains("    <!-- </ns1:OrderRef> -->"), "{xml}");
-    }
-
-    #[test]
-    fn prints_optional_elements_live_under_the_optional_marker() {
-        let xml = template_of(SAMPLE);
-        assert!(xml.contains("<tns:CloseSession xmlns:tns="), "{xml}");
-        // Nothing is commented out: the marker tells the user the tag may go.
-        assert!(xml.contains("  <!--Optional:-->\n  <tns:Request>"), "{xml}");
-        assert!(
-            xml.contains("        <!--Optional:-->\n        <ns1:SessionId>?</ns1:SessionId>"),
-            "{xml}"
-        );
-        assert!(!xml.contains("<!-- <ns1:SessionId>"), "{xml}");
-        // A `nillable` attribute adds nothing: one marker says it all.
-        assert!(!xml.contains("nillable"), "{xml}");
-        // A marker is never wrapped in another comment.
-        assert!(!xml.contains("<!-- Optional: -->"), "{xml}");
-        assert!(!xml.contains("<!--Optional:--> -->"), "{xml}");
+        assert!(xml.contains("    <!--Optional-->"), "{xml}");
     }
 
     #[test]
@@ -1592,21 +1634,22 @@ mod tests {
     #[test]
     fn prints_the_repetitions_markers_of_a_repeating_element() {
         let xml = occurs_template();
-        // An unbounded element appears once under a marker that says to copy it.
+        // An unbounded element appears once with the marker appended to its copy.
         assert!(
-            xml.contains("  <!--Zero or more repetitions:-->\n  <tns:Any Kind=\"?\">"),
+            xml.contains("  </tns:Any> <!--Zero or more repetitions:-->"),
             "{xml}"
         );
         assert_eq!(xml.matches("<tns:Any").count(), 1, "{xml}");
         assert!(
-            xml.contains("  <!--One or more repetitions:-->\n  <tns:AtLeastOne Kind=\"?\">"),
+            xml.contains("  </tns:AtLeastOne> <!--One or more repetitions:-->"),
             "{xml}"
         );
         assert_eq!(xml.matches("<tns:AtLeastOne").count(), 1, "{xml}");
-        // A finite `maxOccurs` shows two copies and needs no marker to copy them.
+        // A finite `maxOccurs` shows two copies and needs no marker to copy them:
+        // neither copy carries a repetitions marker of its own.
         assert!(xml.contains("  <tns:UpToThree Kind=\"?\">"), "{xml}");
         assert_eq!(xml.matches("<tns:UpToThree").count(), 2, "{xml}");
-        assert!(!xml.contains("repetitions:-->\n  <tns:UpToThree"), "{xml}");
+        assert!(!xml.contains("</tns:UpToThree> <!--repetitions:"), "{xml}");
     }
 
     #[test]
@@ -1625,10 +1668,7 @@ mod tests {
         let xml = occurs_template();
         assert!(xml.contains("  <tns:Required>?</tns:Required>"), "{xml}");
         assert!(xml.contains("    <tns:Code>?</tns:Code>"), "{xml}");
-        assert!(
-            xml.contains("  <!--Optional:-->\n  <tns:Optional>?</tns:Optional>"),
-            "{xml}"
-        );
+        assert!(xml.contains("  <tns:Optional>?</tns:Optional> <!--Optional-->"), "{xml}");
         build_dom(&xml).expect("the cardinality template is well-formed markup");
         for line in xml.lines() {
             assert!(line.matches("<!--").count() <= 1, "nested markers: {line}");
@@ -1739,10 +1779,7 @@ mod tests {
             xml.find("ns1:FlightRef").expect("nested body field") > body,
             "{xml}"
         );
-        assert!(
-            xml.contains("      <!--Optional:-->\n      <ns1:FlightRef>?</ns1:FlightRef>"),
-            "{xml}"
-        );
+        assert!(xml.contains("      <ns1:FlightRef>?</ns1:FlightRef> <!--Optional-->"), "{xml}");
     }
 
     #[test]
@@ -2256,10 +2293,7 @@ mod tests {
         let xml = template_for(source, "http://example.com/refs", "Root");
         assert_eq!(xml.matches("<ns1:Item").count(), 2, "{xml}");
         // `minOccurs="0"` on the reference says the copies may go.
-        assert!(
-            xml.contains("<!--Optional:-->\n  <ns1:Item>?</ns1:Item>"),
-            "{xml}"
-        );
+        assert!(xml.contains("  <ns1:Item>?</ns1:Item> <!--Optional-->"), "{xml}");
         let _ = build_dom(&xml);
     }
 }

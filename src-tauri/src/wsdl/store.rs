@@ -1299,7 +1299,7 @@ mod tests {
         assert!(
             detail
                 .input_template
-                .contains("  <!--Optional:-->\n  <comment>?</comment>"),
+                .contains("  <comment>?</comment> <!--Optional-->"),
             "{}",
             detail.input_template
         );
