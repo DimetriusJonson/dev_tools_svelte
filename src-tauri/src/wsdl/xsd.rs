@@ -7,8 +7,11 @@ use crate::wsdl::{MAX_TEMPLATE_DEPTH, MAX_TEMPLATE_ELEMENTS, XSD_NAMESPACE};
 /// XSD name, so a key splits back into its two parts without ambiguity.
 const KEY_SEPARATOR: char = '\u{0001}';
 
-/// `maxOccurs="unbounded"` is kept as zero, which means "no cap is implied".
-const UNBOUNDED: u8 = 0;
+/// `maxOccurs="unbounded"` is kept as the largest value, which means "no cap is
+/// implied". It is deliberately out of the `u16` range a real `maxOccurs` can
+/// spell, because `maxOccurs="0"` is a legal way to forbid an element and must
+/// not collide with the sentinel.
+const UNBOUNDED: u16 = u16::MAX;
 
 /// A finite `maxOccurs` prints at most this many copies of the element: the user
 /// sees that the block is a list and copies it for the rest.
@@ -181,8 +184,8 @@ impl Context {
 /// How many times a piece of markup appears in an instance document.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Occurs {
-    min: u8,
-    max: u8,
+    min: u16,
+    max: u16,
 }
 
 impl Default for Occurs {
@@ -191,12 +194,14 @@ impl Default for Occurs {
     }
 }
 
-fn positive(text: &str) -> Option<u8> {
-    text.trim().parse::<u8>().ok()
+fn positive(text: &str) -> Option<u16> {
+    text.trim().parse::<u16>().ok()
 }
 
 /// Reads `minOccurs`/`maxOccurs`. A non-numeric value is treated as the default
 /// rather than as a schema error: the goal is a usable template, not validation.
+/// `maxOccurs="0"` means the element never appears, so it is remembered as a
+/// zero maximum rather than as the unbounded sentinel.
 fn occurs(dom: &XmlDom, index: usize) -> Occurs {
     let mut result = Occurs::default();
     if let Some(text) = get_attr(dom, index, "minOccurs") {
@@ -213,7 +218,7 @@ fn occurs(dom: &XmlDom, index: usize) -> Occurs {
             result.max = value;
         }
     }
-    if result.max == UNBOUNDED || result.max >= result.min {
+    if result.max == UNBOUNDED || result.max == 0 || result.max >= result.min {
         return result;
     }
     Occurs {
@@ -411,8 +416,9 @@ impl<'a> Walk<'a> {
             Some(declaration) => declaration,
             None => {
                 // Nothing in the inline schemas answers the reference. The markup
-                // still shows the tag, with the type named in a comment, so the
-                // user can fill it in rather than getting a failed import.
+                // keeps the tag as an empty element with the type named in a
+                // comment, so the user can fill it in rather than getting a
+                // failed import.
                 self.note(&format!("unknown-type:{local}"));
                 return Some(Definition::unknown(local));
             }
@@ -545,6 +551,10 @@ impl<'a> Walk<'a> {
     /// A `choice` becomes a single field holding every branch, so the template can
     /// print all of them commented out and let the user keep one.
     fn choice(&mut self, node: usize, context: &Context, depth: u8) -> Vec<Field> {
+        // A `maxOccurs="0"` choice allows no branch, so none of it is printed.
+        if occurs(self.dom, node).max == 0 {
+            return Vec::new();
+        }
         let branches = self.composite(node, context, depth);
         if branches.is_empty() {
             return Vec::new();
@@ -634,7 +644,7 @@ impl<'a> Walk<'a> {
             kind,
             // An attribute is optional unless the schema says otherwise.
             occurs: Occurs {
-                min: u8::from(get_attr(dom, node, "use").as_deref() == Some("required")),
+                min: u16::from(get_attr(dom, node, "use").as_deref() == Some("required")),
                 max: 1,
             },
             attribute: true,
@@ -663,7 +673,12 @@ impl<'a> Walk<'a> {
                 "element" => fields.extend(self.element_field(*child, context, depth)),
                 "sequence" | "all" => fields.extend(self.composite(*child, context, depth + 1)),
                 "choice" => fields.extend(self.choice(*child, context, depth + 1)),
-                "group" => fields.extend(self.group_ref(*child, depth).unwrap_or_default()),
+                "group" => {
+                    // A `maxOccurs="0"` group contributes nothing.
+                    if occurs(dom, *child).max != 0 {
+                        fields.extend(self.group_ref(*child, depth).unwrap_or_default())
+                    }
+                }
                 "any" => {
                     // `xsd:any` says "some element from somewhere": there is nothing
                     // to guess, so the template comments it and the user fills it in.
@@ -689,6 +704,19 @@ impl<'a> Walk<'a> {
     fn element_field(&mut self, node: usize, context: &Context, depth: u8) -> Option<Field> {
         let dom = self.dom;
 
+        // Every child element spends one slot of the element budget, so a hostile
+        // schema of deeply nested anonymous types cannot print forever without
+        // ever resolving a reference.
+        if !self.charge(depth) {
+            return None;
+        }
+
+        let cardinality = occurs(dom, node);
+        // `maxOccurs="0"` forbids the element outright: nothing of it is printed.
+        if cardinality.max == 0 {
+            return None;
+        }
+
         if let Some((uri, local)) = get_reference(dom, node, "ref") {
             let declaration = self.index.element(&uri, &local)?;
             let namespace = declaration.context.target_ns.clone();
@@ -698,13 +726,14 @@ impl<'a> Walk<'a> {
                 local,
                 type_name: found.type_name,
                 kind: found.kind,
-                occurs: occurs(dom, node),
+                occurs: cardinality,
                 attribute: false,
                 text: found.text,
             });
         }
 
         let name = get_attr(dom, node, "name")?;
+
         let found = if get_attr(dom, node, "type").is_some() {
             let (uri, local) = get_reference(dom, node, "type")?;
             match builtin_leaf(&uri, &local) {
@@ -724,7 +753,7 @@ impl<'a> Walk<'a> {
             local: name,
             type_name: found.type_name,
             kind: found.kind,
-            occurs: occurs(dom, node),
+            occurs: cardinality,
             attribute: false,
             text: found.text,
         })
@@ -939,6 +968,18 @@ fn assign_prefixes(dom: &XmlDom, scope: usize, uris: &[String]) -> Vec<(String, 
                 format!("{GENERATED_PREFIX}{generated}")
             }
         };
+        // A prefix already carrying another namespace must not be reused: two
+        // documents in the same WSDL can rebind one prefix to different URIs,
+        // and silently dropping the second URI would print its elements
+        // unprefixed with no declaration. Mint a fresh generated prefix instead.
+        let mut prefix = prefix;
+        while bound
+            .iter()
+            .any(|(known, bound)| known == &prefix && bound != uri)
+        {
+            generated += 1;
+            prefix = format!("{GENERATED_PREFIX}{generated}");
+        }
         if !bound.iter().any(|(known, _)| known == &prefix) {
             bound.push((prefix, uri.clone()));
         }
@@ -1009,6 +1050,7 @@ fn comment_text(line: &str) -> (String, bool) {
 
 /// Comment body of one generated line, markers stripped and double hyphens made
 /// safe. Kept separate from [`comment_text`] so the flattening stays testable.
+#[cfg(test)]
 fn comment_body(line: &str) -> String {
     comment_text(line).0
 }
@@ -1101,6 +1143,12 @@ impl Printer {
                     &pad,
                     &format!("{label}: content could not be generated"),
                 ));
+                // Keep the tag itself on screen — the comment names the type, the
+                // empty element keeps the position the user fills in. The `xsd:any`
+                // marker is not an element declaration and stays a comment only.
+                if !field.attribute && field.local != "any" {
+                    lines.push(format!("{pad}<{tag}{attributes}></{tag}>"));
+                }
             }
             Kind::Leaf => {
                 lines.push(format!("{pad}<{tag}{attributes}>{PLACEHOLDER}</{tag}>"));
@@ -1160,6 +1208,11 @@ impl Printer {
         if field.occurs.max > 1 {
             let copies = (field.occurs.max as usize).min(REPETITIONS);
             let mut lines = Vec::new();
+            // An optional repeating block still says the tag may go, before the
+            // copies that show how many times it may come back.
+            if field.occurs.min == 0 {
+                lines.push(marker(&pad, OPTIONAL_NOTE));
+            }
             for _ in 0..copies {
                 lines.extend(self.markup(field, indent));
             }
@@ -1745,5 +1798,468 @@ mod tests {
             assert!(!line.contains("<!- -"), "softened opener: {line}");
             assert!(!line.contains("- ->"), "softened closer: {line}");
         }
+    }
+
+    #[test]
+    fn max_occurs_zero_emits_no_element() {
+        let source = r#"<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+          xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+          xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+          xmlns:tns="http://example.com/cards"
+          targetNamespace="http://example.com/cards">
+  <wsdl:types>
+    <xsd:schema targetNamespace="http://example.com/cards" elementFormDefault="qualified">
+      <xsd:element name="Cards" type="tns:CardsRequest"/>
+      <xsd:complexType name="CardsRequest">
+        <xsd:sequence>
+          <xsd:element name="Hidden" type="xsd:string" maxOccurs="0"/>
+          <xsd:element name="Visible" type="xsd:string"/>
+        </xsd:sequence>
+      </xsd:complexType>
+    </xsd:schema>
+  </wsdl:types>
+  <wsdl:message name="CardsInput">
+    <wsdl:part name="body" element="tns:Cards"/>
+  </wsdl:message>
+  <wsdl:portType name="CardsPortType">
+    <wsdl:operation name="Cards">
+      <wsdl:input message="tns:CardsInput"/>
+    </wsdl:operation>
+  </wsdl:portType>
+  <wsdl:binding name="CardsBinding" type="tns:CardsPortType">
+    <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <wsdl:operation name="Cards">
+      <soap:operation soapAction="urn:Cards" style="document"/>
+      <wsdl:input><soap:body use="literal"/></wsdl:input>
+    </wsdl:operation>
+  </wsdl:binding>
+  <wsdl:service name="CardsService">
+    <wsdl:port name="CardsPort" binding="tns:CardsBinding">
+      <soap:address location="http://127.0.0.1:9000/soap"/>
+    </wsdl:port>
+  </wsdl:service>
+</wsdl:definitions>"#;
+        let xml = template_for(source, "http://example.com/cards", "Cards");
+        assert!(
+            !xml.contains("tns:Hidden"),
+            "maxOccurs=0 must print nothing: {xml}"
+        );
+        assert!(xml.contains("<tns:Visible>?</tns:Visible>"), "{xml}");
+    }
+
+    #[test]
+    fn unprefixed_reference_resolves_to_the_declaring_schema_namespace() {
+        let source = r#"<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+          xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+          xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+          xmlns:tns="http://nemo-ibe.com/STL"
+          targetNamespace="http://nemo-ibe.com/STL">
+  <wsdl:types>
+    <xsd:schema targetNamespace="http://nemo-ibe.com/STL" elementFormDefault="qualified">
+      <xsd:element name="Root" type="Request"/>
+      <xsd:complexType name="Request">
+        <xsd:sequence>
+          <xsd:element name="Login" type="xsd:string" minOccurs="0"/>
+        </xsd:sequence>
+      </xsd:complexType>
+    </xsd:schema>
+  </wsdl:types>
+  <wsdl:message name="RootInput">
+    <wsdl:part name="body" element="tns:Root"/>
+  </wsdl:message>
+  <wsdl:portType name="RootPortType">
+    <wsdl:operation name="Root">
+      <wsdl:input message="tns:RootInput"/>
+    </wsdl:operation>
+  </wsdl:portType>
+  <wsdl:binding name="RootBinding" type="tns:RootPortType">
+    <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <wsdl:operation name="Root">
+      <soap:operation soapAction="urn:Root" style="document"/>
+      <wsdl:input><soap:body use="literal"/></wsdl:input>
+    </wsdl:operation>
+  </wsdl:binding>
+  <wsdl:service name="RootService">
+    <wsdl:port name="RootPort" binding="tns:RootBinding">
+      <soap:address location="http://127.0.0.1:9000/soap"/>
+    </wsdl:port>
+  </wsdl:service>
+</wsdl:definitions>"#;
+        let xml = template_for(source, "http://nemo-ibe.com/STL", "Root");
+        assert!(xml.contains("<tns:Root"), "{xml}");
+        assert!(xml.contains("<tns:Login>?</tns:Login>"), "{xml}");
+    }
+
+    #[test]
+    fn element_ref_prints_the_global_element_in_its_own_namespace() {
+        let source = r#"<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+          xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+          xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+          xmlns:tns="http://nemo-ibe.com/Avia"
+          xmlns:ns1="http://nemo-ibe.com/STL"
+          targetNamespace="http://nemo-ibe.com/Avia">
+  <wsdl:types>
+    <xsd:schema targetNamespace="http://nemo-ibe.com/Avia" elementFormDefault="qualified">
+      <xsd:element name="CloseSession" type="tns:CloseSessionRequest"/>
+      <xsd:complexType name="CloseSessionRequest">
+        <xsd:sequence>
+          <xsd:element ref="ns1:Session"/>
+        </xsd:sequence>
+      </xsd:complexType>
+    </xsd:schema>
+    <xsd:schema targetNamespace="http://nemo-ibe.com/STL" elementFormDefault="qualified">
+      <xsd:element name="Session" type="xsd:string"/>
+    </xsd:schema>
+  </wsdl:types>
+  <wsdl:message name="CloseSessionInput">
+    <wsdl:part name="body" element="tns:CloseSession"/>
+  </wsdl:message>
+  <wsdl:portType name="AviaPortType">
+    <wsdl:operation name="CloseSession">
+      <wsdl:input message="tns:CloseSessionInput"/>
+    </wsdl:operation>
+  </wsdl:portType>
+  <wsdl:binding name="AviaBinding" type="tns:AviaPortType">
+    <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <wsdl:operation name="CloseSession">
+      <soap:operation soapAction="urn:CloseSession" style="document"/>
+      <wsdl:input><soap:body use="literal"/></wsdl:input>
+    </wsdl:operation>
+  </wsdl:binding>
+  <wsdl:service name="AviaService">
+    <wsdl:port name="AviaPort" binding="tns:AviaBinding">
+      <soap:address location="http://127.0.0.1:9000/soap"/>
+    </wsdl:port>
+  </wsdl:service>
+</wsdl:definitions>"#;
+        let xml = template_for(source, "http://nemo-ibe.com/Avia", "CloseSession");
+        assert!(xml.contains("<ns1:Session>?</ns1:Session>"), "{xml}");
+    }
+
+    #[test]
+    fn cycle_is_reported_as_a_warning_and_does_not_loop() {
+        let source = r#"<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+          xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+          xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+          xmlns:tns="http://example.com/cycle"
+          targetNamespace="http://example.com/cycle">
+  <wsdl:types>
+    <xsd:schema targetNamespace="http://example.com/cycle" elementFormDefault="qualified">
+      <xsd:element name="Root" type="tns:RootRequest"/>
+      <xsd:complexType name="RootRequest">
+        <xsd:sequence>
+          <xsd:element name="Child" type="tns:ChildRequest"/>
+        </xsd:sequence>
+      </xsd:complexType>
+      <xsd:complexType name="ChildRequest">
+        <xsd:sequence>
+          <xsd:element name="Parent" type="tns:RootRequest"/>
+        </xsd:sequence>
+      </xsd:complexType>
+    </xsd:schema>
+  </wsdl:types>
+  <wsdl:message name="RootInput">
+    <wsdl:part name="body" element="tns:Root"/>
+  </wsdl:message>
+  <wsdl:portType name="RootPortType">
+    <wsdl:operation name="Root">
+      <wsdl:input message="tns:RootInput"/>
+    </wsdl:operation>
+  </wsdl:portType>
+  <wsdl:binding name="RootBinding" type="tns:RootPortType">
+    <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <wsdl:operation name="Root">
+      <soap:operation soapAction="urn:Root" style="document"/>
+      <wsdl:input><soap:body use="literal"/></wsdl:input>
+    </wsdl:operation>
+  </wsdl:binding>
+  <wsdl:service name="RootService">
+    <wsdl:port name="RootPort" binding="tns:RootBinding">
+      <soap:address location="http://127.0.0.1:9000/soap"/>
+    </wsdl:port>
+  </wsdl:service>
+</wsdl:definitions>"#;
+        let parsed = parse_wsdl(source).expect("wsdl");
+        let index = XsdIndex::build(&parsed.dom);
+        let out = body_template(
+            &parsed.dom,
+            &index,
+            parsed.dom.root(),
+            "http://example.com/cycle",
+            "Root",
+        );
+        assert!(
+            out.warnings.iter().any(|w| w.starts_with("cycle:")),
+            "{:?}",
+            out.warnings
+        );
+        assert!(
+            out.xml.contains("<tns:Child>"),
+            "cycle template: {}",
+            out.xml
+        );
+    }
+
+    #[test]
+    fn unknown_type_warns_and_still_prints_a_tag() {
+        let source = r#"<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+          xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+          xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+          xmlns:tns="http://example.com/missing"
+          targetNamespace="http://example.com/missing">
+  <wsdl:types>
+    <xsd:schema targetNamespace="http://example.com/missing" elementFormDefault="qualified">
+      <xsd:element name="Root" type="tns:RootRequest"/>
+      <xsd:complexType name="RootRequest">
+        <xsd:sequence>
+          <xsd:element name="Gone" type="tns:NoSuchType"/>
+        </xsd:sequence>
+      </xsd:complexType>
+    </xsd:schema>
+  </wsdl:types>
+  <wsdl:message name="RootInput">
+    <wsdl:part name="body" element="tns:Root"/>
+  </wsdl:message>
+  <wsdl:portType name="RootPortType">
+    <wsdl:operation name="Root">
+      <wsdl:input message="tns:RootInput"/>
+    </wsdl:operation>
+  </wsdl:portType>
+  <wsdl:binding name="RootBinding" type="tns:RootPortType">
+    <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <wsdl:operation name="Root">
+      <soap:operation soapAction="urn:Root" style="document"/>
+      <wsdl:input><soap:body use="literal"/></wsdl:input>
+    </wsdl:operation>
+  </wsdl:binding>
+  <wsdl:service name="RootService">
+    <wsdl:port name="RootPort" binding="tns:RootBinding">
+      <soap:address location="http://127.0.0.1:9000/soap"/>
+    </wsdl:port>
+  </wsdl:service>
+</wsdl:definitions>"#;
+        let parsed = parse_wsdl(source).expect("wsdl");
+        let index = XsdIndex::build(&parsed.dom);
+        let out = body_template(
+            &parsed.dom,
+            &index,
+            parsed.dom.root(),
+            "http://example.com/missing",
+            "Root",
+        );
+        assert!(
+            out.warnings.iter().any(|w| w == "unknown-type:NoSuchType"),
+            "{:?}",
+            out.warnings
+        );
+        assert!(
+            out.xml.contains("<tns:Gone></tns:Gone>"),
+            "unknown type template: {}",
+            out.xml
+        );
+        build_dom(&out.xml).expect("template is well-formed markup");
+    }
+
+    #[test]
+    fn xsd_any_prints_a_comment_instead_of_a_tag() {
+        let source = r#"<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+          xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+          xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+          xmlns:tns="http://example.com/any"
+          targetNamespace="http://example.com/any">
+  <wsdl:types>
+    <xsd:schema targetNamespace="http://example.com/any" elementFormDefault="qualified">
+      <xsd:element name="Root" type="tns:RootRequest"/>
+      <xsd:complexType name="RootRequest">
+        <xsd:sequence>
+          <xsd:any minOccurs="0" maxOccurs="unbounded"/>
+        </xsd:sequence>
+      </xsd:complexType>
+    </xsd:schema>
+  </wsdl:types>
+  <wsdl:message name="RootInput">
+    <wsdl:part name="body" element="tns:Root"/>
+  </wsdl:message>
+  <wsdl:portType name="RootPortType">
+    <wsdl:operation name="Root">
+      <wsdl:input message="tns:RootInput"/>
+    </wsdl:operation>
+  </wsdl:portType>
+  <wsdl:binding name="RootBinding" type="tns:RootPortType">
+    <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <wsdl:operation name="Root">
+      <soap:operation soapAction="urn:Root" style="document"/>
+      <wsdl:input><soap:body use="literal"/></wsdl:input>
+    </wsdl:operation>
+  </wsdl:binding>
+  <wsdl:service name="RootService">
+    <wsdl:port name="RootPort" binding="tns:RootBinding">
+      <soap:address location="http://127.0.0.1:9000/soap"/>
+    </wsdl:port>
+  </wsdl:service>
+</wsdl:definitions>"#;
+        let xml = template_for(source, "http://example.com/any", "Root");
+        assert!(
+            xml.contains("any (xsd:any): content could not be generated"),
+            "{xml}"
+        );
+    }
+
+    #[test]
+    fn max_occurs_zero_on_a_choice_prints_no_branch() {
+        let source = r#"<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+          xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+          xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+          xmlns:tns="http://example.com/cards"
+          targetNamespace="http://example.com/cards">
+  <wsdl:types>
+    <xsd:schema targetNamespace="http://example.com/cards" elementFormDefault="qualified">
+      <xsd:element name="Cards" type="tns:CardsRequest"/>
+      <xsd:complexType name="CardsRequest">
+        <xsd:sequence>
+          <xsd:choice maxOccurs="0">
+            <xsd:element name="Taken" type="xsd:string"/>
+            <xsd:element name="Kept" type="xsd:string"/>
+          </xsd:choice>
+          <xsd:element name="Shown" type="xsd:string"/>
+        </xsd:sequence>
+      </xsd:complexType>
+    </xsd:schema>
+  </wsdl:types>
+  <wsdl:message name="CardsInput">
+    <wsdl:part name="body" element="tns:Cards"/>
+  </wsdl:message>
+  <wsdl:portType name="CardsPortType">
+    <wsdl:operation name="Cards">
+      <wsdl:input message="tns:CardsInput"/>
+    </wsdl:operation>
+  </wsdl:portType>
+  <wsdl:binding name="CardsBinding" type="tns:CardsPortType">
+    <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <wsdl:operation name="Cards">
+      <soap:operation soapAction="urn:Cards" style="document"/>
+      <wsdl:input><soap:body use="literal"/></wsdl:input>
+    </wsdl:operation>
+  </wsdl:binding>
+  <wsdl:service name="CardsService">
+    <wsdl:port name="CardsPort" binding="tns:CardsBinding">
+      <soap:address location="http://127.0.0.1:9000/soap"/>
+    </wsdl:port>
+  </wsdl:service>
+</wsdl:definitions>"#;
+        let xml = template_for(source, "http://example.com/cards", "Cards");
+        assert!(
+            !xml.contains("tns:Taken"),
+            "a forbidden choice must vanish: {xml}"
+        );
+        assert!(!xml.contains("tns:Kept"), "{xml}");
+        assert!(xml.contains("<tns:Shown>?</tns:Shown>"), "{xml}");
+    }
+
+    #[test]
+    fn a_rebound_prefix_gets_its_own_generated_prefix_and_declaration() {
+        let source = r#"<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+          xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+          xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+          xmlns:tns="http://example.com/a"
+          xmlns:ns1="http://example.com/a"
+          targetNamespace="http://example.com/a">
+  <wsdl:types>
+    <xsd:schema targetNamespace="http://example.com/a" elementFormDefault="qualified" xmlns:ns1="http://example.com/b">
+      <xsd:element name="Root" type="tns:RootRequest"/>
+      <xsd:complexType name="RootRequest">
+        <xsd:sequence>
+          <xsd:element ref="ns1:Shared"/>
+        </xsd:sequence>
+      </xsd:complexType>
+    </xsd:schema>
+    <xsd:schema targetNamespace="http://example.com/b" elementFormDefault="qualified">
+      <xsd:element name="Shared" type="xsd:string"/>
+    </xsd:schema>
+  </wsdl:types>
+  <wsdl:message name="RootInput">
+    <wsdl:part name="body" element="tns:Root"/>
+  </wsdl:message>
+  <wsdl:portType name="RootPortType">
+    <wsdl:operation name="Root">
+      <wsdl:input message="tns:RootInput"/>
+    </wsdl:operation>
+  </wsdl:portType>
+  <wsdl:binding name="RootBinding" type="tns:RootPortType">
+    <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <wsdl:operation name="Root">
+      <soap:operation soapAction="urn:Root" style="document"/>
+      <wsdl:input><soap:body use="literal"/></wsdl:input>
+    </wsdl:operation>
+  </wsdl:binding>
+  <wsdl:service name="RootService">
+    <wsdl:port name="RootPort" binding="tns:RootBinding">
+      <soap:address location="http://127.0.0.1:9000/soap"/>
+    </wsdl:port>
+  </wsdl:service>
+</wsdl:definitions>"#;
+        let xml = template_for(source, "http://example.com/a", "Root");
+        // The root element keeps the document's `ns1` for http://example.com/a,
+        // the child namespace http://example.com/b must get a *different* prefix
+        // and its own declaration, and never appear bare.
+        assert!(xml.contains("<ns1:Root"), "{xml}");
+        assert!(xml.contains(r#"xmlns:ns1="http://example.com/a""#), "{xml}");
+        assert!(xml.contains("<ns2:Shared>?</ns2:Shared>"), "{xml}");
+        assert!(xml.contains(r#"xmlns:ns2="http://example.com/b""#), "{xml}");
+        let _ = build_dom(&xml);
+    }
+
+    #[test]
+    fn a_ref_carries_the_cardinality_of_the_reference_node() {
+        // `minOccurs`/`maxOccurs` on a `ref` belong to the reference, not to the
+        // global declaration it points at.
+        let source = r#"<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+          xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+          xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+          xmlns:tns="http://example.com/refs"
+          xmlns:ns1="http://example.com/other"
+          targetNamespace="http://example.com/refs">
+  <wsdl:types>
+    <xsd:schema targetNamespace="http://example.com/refs" elementFormDefault="qualified">
+      <xsd:element name="Root" type="tns:RootRequest"/>
+      <xsd:complexType name="RootRequest">
+        <xsd:sequence>
+          <xsd:element ref="ns1:Item" minOccurs="0" maxOccurs="3"/>
+        </xsd:sequence>
+      </xsd:complexType>
+    </xsd:schema>
+    <xsd:schema targetNamespace="http://example.com/other" elementFormDefault="qualified">
+      <xsd:element name="Item" type="xsd:string"/>
+    </xsd:schema>
+  </wsdl:types>
+  <wsdl:message name="RootInput">
+    <wsdl:part name="body" element="tns:Root"/>
+  </wsdl:message>
+  <wsdl:portType name="RootPortType">
+    <wsdl:operation name="Root">
+      <wsdl:input message="tns:RootInput"/>
+    </wsdl:operation>
+  </wsdl:portType>
+  <wsdl:binding name="RootBinding" type="tns:RootPortType">
+    <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <wsdl:operation name="Root">
+      <soap:operation soapAction="urn:Root" style="document"/>
+      <wsdl:input><soap:body use="literal"/></wsdl:input>
+    </wsdl:operation>
+  </wsdl:binding>
+  <wsdl:service name="RootService">
+    <wsdl:port name="RootPort" binding="tns:RootBinding">
+      <soap:address location="http://127.0.0.1:9000/soap"/>
+    </wsdl:port>
+  </wsdl:service>
+</wsdl:definitions>"#;
+        let xml = template_for(source, "http://example.com/refs", "Root");
+        assert_eq!(xml.matches("<ns1:Item").count(), 2, "{xml}");
+        // `minOccurs="0"` on the reference says the copies may go.
+        assert!(
+            xml.contains("<!--Optional:-->\n  <ns1:Item>?</ns1:Item>"),
+            "{xml}"
+        );
+        let _ = build_dom(&xml);
     }
 }
