@@ -286,6 +286,11 @@ pub(crate) fn build_dom(source: &str) -> Result<XmlDom, String> {
     if roots.len() > 1 {
         return Err("malformed: document has more than one root element".to_string());
     }
+    if !open.is_empty() {
+        return Err(
+            "malformed: an element was left open at the end of the document".to_string()
+        );
+    }
 
     Ok(XmlDom {
         nodes,
@@ -777,7 +782,12 @@ fn fetch_failure(error: &reqwest::Error) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use axum::{Router, routing::get};
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
 
     const SAMPLE: &str = r#"<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
       xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
@@ -1041,9 +1051,280 @@ mod tests {
     }
 
     #[test]
+    fn refuses_a_document_whose_elements_are_left_open_at_eof() {
+        let error = build_dom("<root><a>").unwrap_err();
+        assert!(error.starts_with("malformed:"));
+    }
+
+    #[test]
+    fn accepts_a_well_formed_document_that_ends_at_the_root() {
+        let dom = build_dom("<root/>").unwrap();
+        assert_eq!(dom.local(dom.root()), "root");
+    }
+
+    #[test]
+    fn reads_a_binding_level_address_when_the_port_has_none() {
+        let source = SAMPLE
+            .replace(
+                "<wsdl:port name=\"PeoplePort\" binding=\"tns:PeopleBinding\">\n      <soap:address location=\"http://127.0.0.1:9000/soap\"/>\n    </wsdl:port>",
+                "<wsdl:port name=\"PeoplePort\" binding=\"tns:PeopleBinding\"/>",
+            )
+            .replace(
+                "<wsdl:binding name=\"PeopleBinding\" type=\"tns:PeoplePortType\">",
+                "<wsdl:binding name=\"PeopleBinding\" type=\"tns:PeoplePortType\">\n      <soap:address location=\"http://127.0.0.1:9000/soap\"/>",
+            );
+        let parsed = parse_wsdl(&source).unwrap();
+        assert_eq!(first_operation(&parsed).endpoints[0].url, "http://127.0.0.1:9000/soap");
+    }
+
+    #[test]
+    fn a_soap_operation_overrides_the_bindings_soap_version() {
+        let source = SAMPLE
+            .replace(
+                "xmlns:soap=\"http://schemas.xmlsoap.org/wsdl/soap/\"",
+                "xmlns:soap=\"http://schemas.xmlsoap.org/wsdl/soap/\"\n      xmlns:soap12=\"http://schemas.xmlsoap.org/wsdl/soap12/\"",
+            )
+            .replace(
+                "<soap:operation soapAction=\"urn:GetPerson\" style=\"document\"/>",
+                "<soap12:operation soapAction=\"urn:GetPerson\" style=\"document\"/>",
+            );
+        let parsed = parse_wsdl(&source).unwrap();
+        assert_eq!(first_operation(&parsed).endpoints[0].soap_version, SOAP_VERSION_12);
+        assert_eq!(first_operation(&parsed).endpoints[0].soap_action, "urn:GetPerson");
+    }
+
+    #[test]
+    fn keeps_a_warning_when_one_port_of_a_service_fails() {
+        let source = SAMPLE.replace(
+            "<wsdl:port name=\"PeoplePort\" binding=\"tns:PeopleBinding\">\n      <soap:address location=\"http://127.0.0.1:9000/soap\"/>\n    </wsdl:port>",
+            "<wsdl:port name=\"BadPort\" binding=\"tns:PeopleBinding\">\n    </wsdl:port>\n    <wsdl:port name=\"PeoplePort\" binding=\"tns:PeopleBinding\">\n      <soap:address location=\"http://127.0.0.1:9000/soap\"/>\n    </wsdl:port>",
+        );
+        let parsed = parse_wsdl(&source).unwrap();
+        assert_eq!(parsed.warnings, vec!["no-address:PeopleService::BadPort".to_string()]);
+    }
+
+    #[test]
+    fn dedupes_repeated_warnings_into_one() {
+        let mut warnings = vec![
+            "import-external".to_string(),
+            "import-external".to_string(),
+            "no-input:PeopleService::PeoplePort::GetPerson".to_string(),
+            "import-external".to_string(),
+        ];
+        dedupe_warnings(&mut warnings);
+        assert_eq!(
+            warnings,
+            vec![
+                "import-external".to_string(),
+                "no-input:PeopleService::PeoplePort::GetPerson".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn qname_with_no_namespace_is_the_bare_local_name() {
+        let dom = build_dom(SAMPLE).unwrap();
+        let part = dom
+            .find(WSDL_NAMESPACE, "part")
+            .into_iter()
+            .find(|index| dom.attribute(*index, "name").as_deref() == Some("body"))
+            .expect("body part");
+        assert_eq!(dom.qname(part, "", "GetPerson"), "GetPerson");
+    }
+
+    #[test]
+    fn message_part_named_body_wins_over_the_first_part() {
+        let source = SAMPLE.replace(
+            "<wsdl:message name=\"GetPersonInput\">\n    <wsdl:part name=\"body\" element=\"tns:GetPerson\"/>\n  </wsdl:message>",
+            "<wsdl:message name=\"GetPersonInput\">\n    <wsdl:part name=\"head\" element=\"tns:GetPerson\"/>\n    <wsdl:part name=\"body\" element=\"tns:GetPersonResponse\"/>\n  </wsdl:message>",
+        );
+        let parsed = parse_wsdl(&source).unwrap();
+        assert_eq!(first_operation(&parsed).input_element, "tns:GetPersonResponse");
+    }
+
+    #[test]
+    fn message_part_accepts_a_single_part_whatever_its_name() {
+        let source = SAMPLE.replace(
+            "<wsdl:message name=\"GetPersonInput\">\n    <wsdl:part name=\"body\" element=\"tns:GetPerson\"/>\n  </wsdl:message>",
+            "<wsdl:message name=\"GetPersonInput\">\n    <wsdl:part name=\"payload\" element=\"tns:GetPerson\"/>\n  </wsdl:message>",
+        );
+        let parsed = parse_wsdl(&source).unwrap();
+        assert_eq!(first_operation(&parsed).input_element, "tns:GetPerson");
+    }
+
+    #[test]
+    fn refuses_a_document_with_no_root_element() {
+        let error = build_dom("   ").unwrap_err();
+        assert!(error.starts_with("malformed:"));
+    }
+
+    #[test]
     fn refuses_nesting_deeper_than_the_limit() {
         let source = "<root>".repeat(MAX_NESTING_LEVEL + 2);
         let error = build_dom(&source).unwrap_err();
         assert!(error.starts_with("malformed:"));
+    }
+
+    #[tokio::test]
+    async fn fetch_wsdl_reads_a_plain_http_document() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+        tokio::spawn(async move {
+            let _ = axum::serve(
+                listener,
+                Router::new().route("/", get(|| async { SAMPLE.to_string() })),
+            )
+            .await;
+        });
+
+        let (sender, waiter) = oneshot::channel::<()>();
+        let text = fetch_wsdl(false, waiter, &format!("http://{address}/"))
+            .await
+            .expect("fetch");
+        drop(sender);
+        assert_eq!(text, SAMPLE);
+    }
+
+    #[tokio::test]
+    async fn fetch_wsdl_refuses_a_document_larger_than_the_cap() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+        let body = Arc::new(vec![0u8; 5 * 1024 * 1024 + 1]);
+        tokio::spawn(async move {
+            let _ = axum::serve(
+                listener,
+                Router::new().route("/", get(move || {
+                    let length = body.len().to_string();
+                    let body = Arc::clone(&body);
+                    async move {
+                        (
+                            [(axum::http::header::CONTENT_LENGTH, length)],
+                            body.to_vec(),
+                        )
+                    }
+                })),
+            )
+            .await;
+        });
+
+        let (sender, waiter) = oneshot::channel::<()>();
+        let error = fetch_wsdl(false, waiter, &format!("http://{address}/"))
+            .await
+            .unwrap_err();
+        drop(sender);
+        assert!(error.starts_with("too-large:"));
+    }
+
+    #[tokio::test]
+    async fn fetch_wsdl_streaming_body_above_the_cap_is_refused() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+        let body = Arc::new(vec![0u8; 5 * 1024 * 1024 + 1]);
+        tokio::spawn(async move {
+            let _ = axum::serve(
+                listener,
+                Router::new().route("/", get(move || {
+                    let body = Arc::clone(&body);
+                    async move {
+                        let (mut parts, _) = axum::http::Response::new(()).into_parts();
+                        parts.status = axum::http::StatusCode::OK;
+                        parts.headers.clear();
+                        axum::response::Response::from_parts(parts, axum::body::Body::from(body.to_vec()))
+                    }
+                })),
+            )
+            .await;
+        });
+
+        let (sender, waiter) = oneshot::channel::<()>();
+        let error = fetch_wsdl(false, waiter, &format!("http://{address}/"))
+            .await
+            .unwrap_err();
+        drop(sender);
+        assert!(error.starts_with("too-large:"));
+    }
+
+    #[tokio::test]
+    async fn fetch_wsdl_reports_a_non_success_status() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+        tokio::spawn(async move {
+            let _ = axum::serve(
+                listener,
+                Router::new().route("/", get(|| async { axum::http::StatusCode::NOT_FOUND })),
+            )
+            .await;
+        });
+
+        let (sender, waiter) = oneshot::channel::<()>();
+        let error = fetch_wsdl(false, waiter, &format!("http://{address}/"))
+            .await
+            .unwrap_err();
+        drop(sender);
+        assert!(error.starts_with("http:"));
+    }
+
+    #[tokio::test]
+    async fn fetch_wsdl_reports_a_connection_refused() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+        drop(listener);
+
+        let (sender, waiter) = oneshot::channel::<()>();
+        let error = fetch_wsdl(false, waiter, &format!("http://{address}/"))
+            .await
+            .unwrap_err();
+        drop(sender);
+        assert!(error.starts_with("connect:"));
+    }
+
+    #[tokio::test]
+    async fn fetch_wsdl_answers_cancelled() {
+        let (sender, waiter) = oneshot::channel::<()>();
+        sender.send(()).expect("cancel");
+
+        let error = fetch_wsdl(true, waiter, "http://127.0.0.1:1/wsdl")
+            .await
+            .unwrap_err();
+        assert_eq!(error, "cancelled");
+    }
+
+    #[tokio::test]
+    async fn fetch_wsdl_answers_cancelled_after_the_request_started() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+        tokio::spawn(async move {
+            let _ = axum::serve(
+                listener,
+                Router::new().route(
+                    "/",
+                    get(|| async {
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                        SAMPLE.to_string()
+                    }),
+                ),
+            )
+            .await;
+        });
+
+        let (sender, waiter) = oneshot::channel::<()>();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let _ = sender.send(());
+        });
+        let error = fetch_wsdl(false, waiter, &format!("http://{address}/"))
+            .await
+            .unwrap_err();
+        assert_eq!(error, "cancelled");
+    }
+
+    #[tokio::test]
+    async fn fetch_wsdl_refuses_a_non_http_url() {
+        let (sender, waiter) = oneshot::channel::<()>();
+        let error = fetch_wsdl(false, waiter, "ftp://example.com/wsdl")
+            .await
+            .unwrap_err();
+        drop(sender);
+        assert!(error.starts_with("not-url:"));
     }
 }
